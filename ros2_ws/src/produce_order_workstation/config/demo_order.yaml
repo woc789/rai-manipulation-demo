@@ -1,0 +1,7 @@
+order_id: produce-demo-001
+zone: A
+items:
+  - sku: corn
+    quantity: 1
+  - sku: carrot
+    quantity: 1

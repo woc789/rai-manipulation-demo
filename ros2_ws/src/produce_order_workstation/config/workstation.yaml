@@ -1,0 +1,28 @@
+camera:
+  color: /color_image5
+  depth: /depth_image5
+  info: /color_camera_info5
+  source_frame: RGBDCamera5
+  target_frame: panda_link0
+aliases:
+  corn: [corn cob, ear of corn, corn]
+  carrot: [carrot]
+  apple: [apple]
+zones:
+  A:
+    tolerance_m: 0.07
+    slots:
+      - [0.40, 0.02]
+      - [0.40, 0.16]
+workspace:
+  x: [0.20, 0.60]
+  y: [-0.55, 0.55]
+  source_exclusion_radius_m: 0.08
+motion:
+  grasp_z_offset_m: 0.10
+  place_extra_height_m: 0.05
+  minimum_z_m: 0.135
+  service_timeout_s: 45.0
+  settle_time_s: 2.0
+startup_timeout_s: 90.0
+perception_timeout_s: 180.0

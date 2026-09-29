@@ -1,0 +1,88 @@
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import pytest
+import yaml
+
+from produce_order_workstation.order import (
+    OrderError,
+    choose_source,
+    load_order,
+    parse_centroids,
+    verify_placement,
+)
+from produce_order_workstation.runtime import Workstation
+
+
+PACKAGE = Path(__file__).resolve().parents[1]
+CONFIG = yaml.safe_load((PACKAGE / "config/workstation.yaml").read_text())
+
+
+def test_demo_order_has_two_unique_items_and_slots():
+    order = load_order(PACKAGE / "config/demo_order.yaml", CONFIG)
+    assert order.total_items == 2
+    assert [line.sku for line in order.lines] == ["corn", "carrot"]
+
+
+def test_duplicate_sku_is_rejected(tmp_path):
+    order_path = tmp_path / "duplicate.yaml"
+    order_path.write_text(
+        "order_id: duplicate\nzone: A\nitems:\n"
+        "  - {sku: corn, quantity: 1}\n"
+        "  - {sku: corn, quantity: 1}\n"
+    )
+    with pytest.raises(ValueError, match="Duplicate SKU"):
+        load_order(order_path, CONFIG)
+
+
+def test_perception_result_is_parsed_and_destination_object_excluded():
+    result = (
+        "Centroids of detected corn cob in panda_link0 frame: "
+        "[Centroid(x=0.5000, y=0.4000, z=0.0500), "
+        "Centroid(x=0.4000, y=0.0200, z=0.0500)]."
+    )
+    points = parse_centroids(result)
+    assert choose_source(points, CONFIG, CONFIG["zones"]["A"]) == (
+        0.5,
+        0.4,
+        0.05,
+    )
+
+
+def test_placement_requires_new_slot_occupancy_and_source_departure():
+    source = (0.5, 0.4, 0.05)
+    slot = (0.4, 0.02)
+    assert verify_placement([(0.405, 0.025, 0.05)], source, slot, 0.07, 0.08)
+    assert not verify_placement([source], source, slot, 0.07, 0.08)
+    assert not verify_placement(
+        [source, (0.405, 0.025, 0.05)], source, slot, 0.07, 0.08
+    )
+
+
+def test_no_reachable_object_stops_before_motion():
+    with pytest.raises(OrderError, match="No reachable"):
+        choose_source([(0.7, 0.7, 0.05)], CONFIG, CONFIG["zones"]["A"])
+
+
+def test_prepared_scene_uses_entity_identity_even_if_vision_mislabels():
+    corn = SimpleNamespace(prefab_name="corn")
+    carrot = SimpleNamespace(prefab_name="carrot")
+    positions = {
+        id(corn): SimpleNamespace(x=0.5, y=0.36, z=0.04),
+        id(carrot): SimpleNamespace(x=0.5, y=-0.3, z=0.04),
+    }
+    workstation = Workstation(MagicMock(), CONFIG)
+    workstation._scene_bridge = SimpleNamespace(
+        spawned_entities=[carrot, corn],
+        get_object_pose=lambda entity: SimpleNamespace(
+            pose=SimpleNamespace(position=positions[id(entity)])
+        ),
+    )
+    workstation.detect = MagicMock(side_effect=AssertionError("vision should not decide identity"))
+
+    source, entity = workstation.locate_source("corn", CONFIG["zones"]["A"])
+    assert source == (0.5, 0.36, 0.04)
+    assert entity is corn
+    assert workstation.observe_after_place("corn", entity) == [source]
+    workstation.detect.assert_not_called()
