@@ -141,6 +141,11 @@ interrupt a grasp or placement in flight. A cancellation result is
 `CANCELLED`, with the number of completed items recorded. A ROS service timeout
 or simulator exit is a failure, not a successful order. In particular, if O3DE
 closes, verify `/clock` and the `world`/`odom` TF before trying a new order.
+The order server may stay alive while O3DE restarts: scene preparation now
+discards only entities that O3DE confirms no longer exist, then spawns a fresh
+scene. A completed or failed order still reserves its order ID in the report
+directory; the debug panel generates microsecond-resolution IDs to avoid an
+immediate retry accidentally reusing the same ID.
 
 Live checks on 2026-10-01 completed a four-SKU order (`4/4`) and an eight-apple
 order (`8/8`, two apples in each box). The latter exercised the second drop

@@ -117,6 +117,44 @@ def test_receiving_bin_must_exist_at_configured_slot():
         workstation.slot_bin_position(CONFIG["zones"]["A"], 0, slot)
 
 
+def test_scene_recovers_entities_lost_when_simulator_restarts(monkeypatch):
+    monkeypatch.setattr("produce_order_workstation.runtime.time.sleep", lambda _: None)
+    workstation = Workstation(MagicMock(), CONFIG)
+    bridge = MagicMock()
+    bridge.spawned_entities = [MagicMock(name="old_bin"), MagicMock(name="old_stock")]
+    bridge.clear_scene.side_effect = RuntimeError(
+        "Failed to delete entity old_bin. Response: "
+        "Could not find entity with given name: toy_box_5"
+    )
+    workstation._scene_bridge = bridge
+    workstation.slot_bin_position = MagicMock()
+
+    workstation.prepare_scene(
+        PACKAGE / "config/demo_scene.yaml",
+        Order("retry-after-restart", "A", (OrderLine("apple", 1),)),
+    )
+
+    assert bridge.spawned_entities == []
+    assert bridge.clear_scene.call_count == 2
+    bridge.setup_scene.assert_called_once()
+
+
+def test_scene_does_not_hide_real_cleanup_errors():
+    workstation = Workstation(MagicMock(), CONFIG)
+    bridge = MagicMock()
+    bridge.spawned_entities = [MagicMock(name="old_bin")]
+    bridge.clear_scene.side_effect = RuntimeError("delete service timed out")
+    workstation._scene_bridge = bridge
+
+    with pytest.raises(RuntimeError, match="delete service timed out"):
+        workstation.prepare_scene(
+            PACKAGE / "config/demo_scene.yaml",
+            Order("cleanup-error", "A", (OrderLine("apple", 1),)),
+        )
+    assert len(bridge.spawned_entities) == 1
+    bridge.setup_scene.assert_not_called()
+
+
 def test_bin_release_retracts_before_verification(monkeypatch):
     monkeypatch.setattr("produce_order_workstation.runtime.time.sleep", lambda _: None)
     workstation = Workstation(MagicMock(), CONFIG)

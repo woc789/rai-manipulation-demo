@@ -48,6 +48,7 @@ class RosWorker(QThread):
         super().__init__()
         self._commands = Queue()
         self._active_goal = None
+        self._pending_order_id = None
         self._online = None
 
     def submit(self, order_id: str, quantities: dict[str, int], prepare: bool) -> None:
@@ -112,6 +113,7 @@ class RosWorker(QThread):
                 line.quantity = quantity
                 goal.lines.append(line)
         self.notice.emit(f"已提交订单 {order_id}，等待服务确认。")
+        self._pending_order_id = order_id
         future = client.send_goal_async(goal, feedback_callback=self._on_feedback)
         future.add_done_callback(self._on_goal_response)
 
@@ -119,7 +121,17 @@ class RosWorker(QThread):
         try:
             handle = future.result()
             if not handle.accepted:
-                self.notice.emit("订单被拒绝：可能是参数不合法，或工作站正在执行另一单。")
+                report = (
+                    Path.home()
+                    / ".local/share/produce_order_workstation/reports"
+                    / f"{self._pending_order_id}.json"
+                )
+                if report.exists():
+                    self.notice.emit(
+                        f"订单号 {self._pending_order_id} 已有报告；请换一个订单号。"
+                    )
+                else:
+                    self.notice.emit("订单被拒绝：请检查订单参数或等待当前订单结束。")
                 self.accepted.emit(False)
                 return
             self._active_goal = handle
@@ -269,7 +281,7 @@ class DebugPanel(QWidget):
         )
 
     def _new_id(self) -> None:
-        self.order_id.setText(datetime.now().strftime("debug-%Y%m%d-%H%M%S"))
+        self.order_id.setText(datetime.now().strftime("debug-%Y%m%d-%H%M%S-%f"))
 
     def _submit(self) -> None:
         order_id = self.order_id.text().strip()
@@ -306,6 +318,8 @@ class DebugPanel(QWidget):
         self.submit_button.setEnabled(not accepted)
         self.cancel_button.setEnabled(accepted)
         self.status.setText("执行中" if accepted else "等待订单")
+        if not accepted:
+            self.stage.setText("订单未被接收；请查看下方提示")
 
     def _on_feedback(self, stage: str, completed: int, total: int, detail: str) -> None:
         self.stage.setText(f"当前阶段：{stage}")
