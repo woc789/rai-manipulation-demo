@@ -17,6 +17,10 @@ class OrderError(RuntimeError):
     """An order cannot safely continue."""
 
 
+class OrderCancelled(OrderError):
+    """Cancellation was accepted at a safe item boundary."""
+
+
 @dataclass(frozen=True)
 class OrderLine:
     sku: str
@@ -41,33 +45,43 @@ def load_order(path: Path, config: dict) -> Order:
     order_id = raw.get("order_id")
     zone = raw.get("zone")
     items = raw.get("items")
-    if not isinstance(order_id, str) or not re.fullmatch(r"[\w-]{1,64}", order_id):
-        raise ValueError("order_id must contain 1-64 letters, digits, _ or -")
-    if not isinstance(zone, str) or zone not in config["zones"]:
-        raise ValueError(f"Unknown destination zone: {zone}")
     if not isinstance(items, list) or not items:
         raise ValueError("items must be a non-empty list")
     lines = []
-    seen = set()
     for item in items:
         if not isinstance(item, dict):
             raise ValueError("Each item must be a mapping")
         sku, quantity = item.get("sku"), item.get("quantity")
-        if not isinstance(sku, str) or sku not in config["aliases"]:
-            raise ValueError(f"Unknown SKU: {sku}")
-        if sku in seen:
-            raise ValueError(f"Duplicate SKU: {sku}")
-        if type(quantity) is not int or quantity < 1:
-            raise ValueError(f"Quantity for {sku} must be a positive integer")
-        seen.add(sku)
         lines.append(OrderLine(sku, quantity))
     order = Order(order_id, zone, tuple(lines))
-    slots = config["zones"][zone]["slots"]
+    validate_order(order, config)
+    return order
+
+
+def validate_order(order: Order, config: dict) -> None:
+    """Apply the same rules to YAML orders and ROS Action goals."""
+    if not isinstance(order.order_id, str) or not re.fullmatch(
+        r"[\w-]{1,64}", order.order_id
+    ):
+        raise ValueError("order_id must contain 1-64 letters, digits, _ or -")
+    if not isinstance(order.zone, str) or order.zone not in config["zones"]:
+        raise ValueError(f"Unknown destination zone: {order.zone}")
+    if not order.lines:
+        raise ValueError("items must be a non-empty list")
+    seen = set()
+    for line in order.lines:
+        if not isinstance(line.sku, str) or line.sku not in config["aliases"]:
+            raise ValueError(f"Unknown SKU: {line.sku}")
+        if line.sku in seen:
+            raise ValueError(f"Duplicate SKU: {line.sku}")
+        if type(line.quantity) is not int or line.quantity < 1:
+            raise ValueError(f"Quantity for {line.sku} must be a positive integer")
+        seen.add(line.sku)
+    slots = config["zones"][order.zone]["slots"]
     if order.total_items > len(slots):
         raise ValueError(
-            f"Order has {order.total_items} items but zone {zone} has {len(slots)} slots"
+            f"Order has {order.total_items} items but zone {order.zone} has {len(slots)} slots"
         )
-    return order
 
 
 def parse_centroids(result: str) -> list[tuple[float, float, float]]:

@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec python -m produce_order_workstation.order_server "$@"

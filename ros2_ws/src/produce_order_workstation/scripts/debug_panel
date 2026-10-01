@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec /usr/bin/python3 -m produce_order_workstation.debug_panel "$@"

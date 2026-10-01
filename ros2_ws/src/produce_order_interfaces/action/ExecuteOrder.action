@@ -1,0 +1,16 @@
+string order_id
+string zone
+produce_order_interfaces/OrderLine[] lines
+bool prepare_scene
+---
+string status
+uint32 completed
+uint32 requested
+string error
+string report_path
+---
+string stage
+string sku
+uint32 completed
+uint32 total
+string detail_json

@@ -1,10 +1,11 @@
-# Produce order workstation — phase 1
+# Produce order workstation
 
 This package turns the existing O3DE Panda manipulation demo into a small,
 testable order-picking workcell. The business input is a YAML order; the output
 is a sequence of ROS 2 events and a JSON completion report. It reuses RAI's
-manipulation service. Phase 1 deliberately keeps the planner deterministic; an
-Agent can be added above the same order boundary later.
+manipulation service. Phase 2 adds a persistent ROS 2 Action order server and a
+small desktop debug panel. The planner remains deterministic; an Agent can be
+added above the same order boundary later.
 
 ## Scope and boundaries
 
@@ -16,8 +17,11 @@ Agent can be added above the same order boundary later.
 | `order.py` | ROS-independent validation, centroid parsing, source selection, and placement checks. |
 | `runtime.py` | ROS 2 adapter: waits for interfaces, reads scene identity or perception, calls manipulation, emits events, runs the order state sequence. |
 | `cli.py` | Command-line entry, scene preparation, JSON report, exit status. |
-| `launch/workstation.launch.py` | O3DE benchmark, MoveIt, RAI perception, and manipulation process. |
+| `launch/workstation.launch.py` | O3DE benchmark, MoveIt, manipulation process, and order server; perception is optional. |
 | `test/test_order.py` | Fast tests for order rules, position parsing, and safety checks. |
+| `produce_order_interfaces/action/ExecuteOrder.action` | Typed order goal, progress feedback, and terminal result. |
+| `order_server.py` | Persistent Action server; validates goals, owns one active order, handles cancellation, writes reports. |
+| `debug_panel.py` | Temporary PyQt5 desktop client for order input, live progress, cancellation, and report path. |
 
 Data path:
 
@@ -50,11 +54,12 @@ the repository's `install/setup.bash` overlay. On this host, the project root
 is `/home/wang/rai_embodied_project`.
 
 ```bash
-cd /home/wang/rai_embodied_project
+cd /home/wang/rai_embodied_project/src/examples/rai-manipulation-demo
 source /opt/ros/jazzy/setup.bash
 source /home/wang/miniconda3/etc/profile.d/conda.sh
 conda activate rai-jazzy
-colcon build --packages-select produce_order_workstation --symlink-install
+colcon build --packages-select produce_order_interfaces produce_order_workstation --symlink-install
+source /home/wang/rai_embodied_project/install/setup.bash
 source install/setup.bash
 ros2 launch produce_order_workstation workstation.launch.py
 ```
@@ -80,6 +85,50 @@ substitute for verification: inspect `ORDER_COMPLETED` and the report.
 If the model weights are already cached and Hugging Face is unreachable, set
 `HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1` before launching. This only affects
 the model loader, not ROS communication.
+
+## Phase 2: persistent orders and debug panel
+
+The launch file now starts `/produce_orders/execute`, an Action server. Send a
+goal with an order ID, zone `A`, one or two `OrderLine` entries (`corn` or
+`carrot`), and `prepare_scene=true`. The feedback fields are `stage`, `sku`,
+`completed`, `total`, and `detail_json`. The result fields are `status`,
+`completed`, `requested`, `error`, and `report_path`. The JSON event topic and
+report from phase 1 remain available. Goal validation is shared with YAML
+orders; only one order runs at a time, and a reused report ID is rejected.
+
+For the simple desktop client, open another terminal and source ROS Jazzy and
+this worktree's overlay, then use the system Python (which already has PyQt5):
+
+```bash
+cd /home/wang/rai_embodied_project/src/examples/rai-manipulation-demo
+source /opt/ros/jazzy/setup.bash
+source install/setup.bash
+ros2 run produce_order_workstation debug_panel
+```
+
+No new packages or model downloads were needed for this phase. The panel is a
+learning/debugging surface, not the final business UI. It deliberately shows
+the order input, current stage, progress, event details, and report location;
+it does not claim Agent integration. Its form limits zone A to two items.
+
+With `prepare_scene=true`, order execution uses named simulator entity TF to
+check item identity. Therefore `workstation.launch.py` defaults to
+`enable_perception:=false`, avoiding an unnecessary vision-model load. For
+manual-scene camera experiments, launch with `enable_perception:=true`; model
+weights must already be available. Do not run the old `run_order` CLI and an
+Action order concurrently against the same robot.
+
+Cancellation is checked before motion and between items; it does **not**
+interrupt a grasp or placement in flight. A cancellation result is
+`CANCELLED`, with the number of completed items recorded. A ROS service timeout
+or simulator exit is a failure, not a successful order. In particular, if O3DE
+closes, verify `/clock` and the `world`/`odom` TF before trying a new order.
+
+One live smoke test on 2026-10-01 completed a one-corn order with stages
+`STARTING` → `PREPARING_SCENE` → `DETECTING` → `GRASPING` → `PLACING` →
+`VERIFYING` → `ITEM_COMPLETED` → `ORDER_COMPLETED`; its report recorded
+`COMPLETED`, `1/1`. Unit tests cover shared Action validation and cancellation
+before motion alongside the phase-1 order checks.
 
 ## Safety and current limitations
 

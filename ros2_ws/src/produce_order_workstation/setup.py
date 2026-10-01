@@ -15,7 +15,7 @@ setup(
         (f"share/{package_name}/launch", glob("launch/*.launch.py")),
     ],
     install_requires=["setuptools", "PyYAML"],
-    scripts=["scripts/run_order"],
+    scripts=["scripts/run_order", "scripts/order_server", "scripts/debug_panel"],
     zip_safe=True,
     maintainer="wang",
     maintainer_email="wang@example.com",

@@ -1,4 +1,6 @@
 [Bb]uild/
+install/
+log/
 [Cc]ache/
 [Uu]ser/
 [Uu]ser_test*/
