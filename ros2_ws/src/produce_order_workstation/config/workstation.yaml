@@ -30,13 +30,13 @@ zones:
       - order_bin_A3
       - order_bin_A4
 stock:
-  feed_position: [0.32, -0.07]
-  feed_settle_time_s: 0.5
-  spawn_rotations:
-    corn: {x: 0.0, y: 0.707, z: 0.0, w: 0.707}
-    carrot: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
-    apple: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
-    tomato: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+  initial_counts: {corn: 4, carrot: 4, apple: 4, tomato: 4}
+  settle_time_s: 2.0
+agent:
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  model: qwen-plus
+  timeout_s: 40
+  max_tool_calls_per_item: 3
 workspace:
   x: [0.20, 0.60]
   y: [-0.55, 0.55]

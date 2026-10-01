@@ -39,7 +39,7 @@ def test_duplicate_sku_is_rejected(tmp_path):
 
 def test_perception_result_is_parsed_and_destination_object_excluded():
     slot_x, slot_y = CONFIG["zones"]["A"]["slots"][0]
-    source_x, source_y = CONFIG["stock"]["feed_position"]
+    source_x, source_y = 0.29, -0.12
     result = (
         "Centroids of detected corn cob in panda_link0 frame: "
         f"[Centroid(x={source_x:.4f}, y={source_y:.4f}, z=0.0500), "

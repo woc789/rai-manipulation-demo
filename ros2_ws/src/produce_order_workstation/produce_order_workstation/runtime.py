@@ -1,4 +1,4 @@
-"""ROS 2 adapter and the sequential order workflow."""
+"""ROS 2 workcell tools exposed to the goal-driven produce agent."""
 
 import json
 import time
@@ -10,14 +10,9 @@ from geometry_msgs.msg import Point, Pose, PoseStamped, Quaternion
 from rai.communication.ros2 import wait_for_ros2_services, wait_for_ros2_topics
 from rai.communication.ros2.connectors import ROS2Connector
 from rai.communication.ros2.ros_async import get_future_result
-from rai.types import Header as RaiHeader
-from rai.types import Point as RaiPoint
-from rai.types import Pose as RaiPose
-from rai.types import PoseStamped as RaiPoseStamped
-from rai.types import Quaternion as RaiQuaternion
 from rai_interfaces.srv import ManipulatorMoveTo
 from rai_sim.o3de.o3de_bridge import O3DExROS2Bridge
-from rai_sim.simulation_bridge import Entity, SceneConfig
+from rai_sim.simulation_bridge import SceneConfig
 from std_msgs.msg import String
 from tf2_ros import TransformException
 
@@ -30,8 +25,8 @@ from .order import (
     parse_centroids,
     plan_placements,
     verify_bin_placement,
-    verify_placement,
 )
+from .agent import ProduceAgent
 
 
 class Workstation:
@@ -52,6 +47,8 @@ class Workstation:
         self._position_tool = None
         self._scene_bridge = None
         self._scene_prepared = False
+        self._placed_entities: list[tuple] = []
+        self._completed_by_sku: dict[str, int] = {}
         self.event_sink = event_sink
         self.cancel_requested = cancel_requested or (lambda: False)
 
@@ -119,32 +116,11 @@ class Workstation:
             self._position_tool = GetObjectPositionsTool(connector=self.connector)
 
     def build_scene(self, path: Path) -> SceneConfig:
-        """Create fixed receiving bins; stock arrives one item at a time."""
+        """Load receiving bins and an order-independent mixed table inventory."""
         return SceneConfig.load_base_config(path)
 
-    def spawn_product(self, sku: str, index: int) -> None:
-        """Refill one safe feeder position after the previous pick leaves it."""
-        if not self._scene_prepared or self._scene_bridge is None:
-            raise OrderError("Prepared scene is required for automatic stock feeding")
-        x, y = self.config["stock"]["feed_position"]
-        rotation = self.config["stock"]["spawn_rotations"][sku]
-        self._scene_bridge._spawn_entity(
-            Entity(
-                name=f"order_{sku}_{index}",
-                prefab_name=sku,
-                pose=RaiPoseStamped(
-                    header=RaiHeader(frame_id="odom"),
-                    pose=RaiPose(
-                        position=RaiPoint(x=x, y=y, z=0.05),
-                        orientation=RaiQuaternion(**rotation),
-                    ),
-                ),
-            )
-        )
-        time.sleep(self.config["stock"]["feed_settle_time_s"])
-
-    def prepare_scene(self, path: Path, order: Order) -> None:
-        """Populate the benchmark with visible bins and ordered stock."""
+    def prepare_scene(self, path: Path, order: Order | None = None) -> None:
+        """Populate the benchmark with visible bins and mixed, fixed stock."""
         if self._scene_bridge is None:
             self._scene_bridge = O3DExROS2Bridge(self.connector)
         # The Action server outlives O3DE. After a simulator restart its bridge
@@ -160,11 +136,38 @@ class Workstation:
                     raise
                 self._scene_bridge.spawned_entities.remove(stale)
         self._scene_bridge.setup_scene(self.build_scene(path))
-        time.sleep(0.5)
+        time.sleep(self.config["stock"]["settle_time_s"])
         for zone in self.config["zones"].values():
             for index, slot in enumerate(zone["slots"]):
                 self.slot_bin_position(zone, index, slot)
         self._scene_prepared = True
+        self._placed_entities = []
+        self._completed_by_sku = {}
+        zone = self.config["zones"]["A"]
+        inventory = {sku: 0 for sku in self.config["aliases"]}
+        for entity, _ in self._source_entities(zone).values():
+            inventory[entity.prefab_name] += 1
+        for sku, expected in self.config["stock"]["initial_counts"].items():
+            if inventory[sku] < expected:
+                raise OrderError(
+                    f"Prepared scene has only {inventory[sku]}/{expected} reachable {sku}"
+                )
+        if order is not None:
+            self.begin_order(order)
+
+    def begin_order(self, order: Order) -> None:
+        """Lock the current preloaded inventory to one new order."""
+        if not self._scene_prepared:
+            raise OrderError("Preloaded scene is not ready")
+        self._placed_entities = []
+        self._completed_by_sku = {line.sku: 0 for line in order.lines}
+        inventory = self.inspect_scene(order)["available"]
+        for line in order.lines:
+            if inventory.get(line.sku, 0) < line.quantity:
+                raise OrderError(
+                    f"Insufficient visible {line.sku} stock: need {line.quantity}, "
+                    f"have {inventory.get(line.sku, 0)}"
+                )
 
     def slot_bin_position(self, zone: dict, index: int, slot: tuple) -> tuple:
         """Confirm that a visible receiving bin actually occupies this slot."""
@@ -208,6 +211,49 @@ class Workstation:
         source = choose_source([point for _, point in candidates], self.config, zone)
         entity = next(entity for entity, point in candidates if point == source)
         return source, entity
+
+    def _source_entities(self, zone: dict) -> dict[str, tuple]:
+        if not self._scene_prepared or self._scene_bridge is None:
+            raise OrderError("Agent requires a prepared named-entity scene")
+        result = {}
+        already_placed = {entity.name for _, entity, _, _ in self._placed_entities}
+        for entity in self._scene_bridge.spawned_entities:
+            if entity.prefab_name not in self.config["aliases"]:
+                continue
+            if entity.name in already_placed:
+                continue
+            point = self._scene_bridge.get_object_pose(entity).pose.position
+            xyz = (point.x, point.y, point.z)
+            try:
+                choose_source([xyz], self.config, zone)
+            except OrderError:
+                continue
+            result[entity.name] = (entity, xyz)
+        return result
+
+    def inspect_scene(self, order: Order) -> dict:
+        """Ground-truth TF observation, not camera recognition."""
+        zone = self.config["zones"][order.zone]
+        candidates = self._source_entities(zone)
+        objects = [
+            {
+                "entity_id": name,
+                "sku": entity.prefab_name,
+                "position_m": [round(value, 3) for value in xyz],
+            }
+            for name, (entity, xyz) in sorted(candidates.items())
+        ]
+        available = {sku: 0 for sku in self.config["aliases"]}
+        for item in objects:
+            available[item["sku"]] += 1
+        return {
+            "objects": objects,
+            "available": available,
+            "remaining": {
+                line.sku: line.quantity - self._completed_by_sku.get(line.sku, 0)
+                for line in order.lines
+            },
+        }
 
     def observe_after_place(self, sku: str, entity):
         if entity is None:
@@ -262,157 +308,111 @@ class Workstation:
         if not result.success:
             raise OrderError(f"Manipulator {grip} motion failed")
 
-    def run(self, order: Order) -> dict:
+    def pick_and_place(self, order: Order, entity_id: str) -> dict:
+        """Validated motion tool: the model supplies an ID, never coordinates."""
+        self.check_cancel()
         zone = self.config["zones"][order.zone]
-        placements = plan_placements(order, self.config)
-        completed = 0
-        item_cursor = 0
-        placed_entities = []
+        candidates = self._source_entities(zone)
+        if entity_id not in candidates:
+            raise OrderError(f"Object {entity_id!r} is not reachable table stock")
+        entity, source = candidates[entity_id]
+        sku = entity.prefab_name
+        requested = {line.sku: line.quantity for line in order.lines}
+        done = self._completed_by_sku.get(sku, 0)
+        if sku not in requested or done >= requested[sku]:
+            raise OrderError(f"Object {entity_id!r} is not needed by this order")
+        placements = [
+            item for item in plan_placements(order, self.config) if item.sku == sku
+        ]
+        placement = placements[done]
+        bin_index = placement.bin_index
+        slot = tuple(zone["slots"][bin_index])
+        target = (slot[0] + placement.offset_x, slot[1] + placement.offset_y)
+        slot_id = f"{order.zone}{bin_index + 1}"
+        bin_position = self.slot_bin_position(zone, bin_index, slot)
+        if distance_xy(source, target) <= 0.12:
+            raise OrderError("Source is too close to destination slot")
+        self.event(
+            order.order_id, "GRASPING", sku=sku, entity_id=entity_id,
+            source=source, position_source="scene_tf",
+        )
+        self.move(source, grip="grab")
+        self.event(
+            order.order_id, "PLACING", sku=sku, entity_id=entity_id,
+            slot_id=slot_id, target=target, bin_position=bin_position,
+        )
+        self.move(
+            (target[0], target[1], source[2]),
+            grip="release", target_z=self.config["motion"]["bin_release_z_m"],
+        )
+        self.event(order.order_id, "RETRACTING", sku=sku, slot_id=slot_id)
+        self.move(
+            (target[0], target[1], source[2]),
+            grip="release", target_z=self.config["motion"]["bin_clearance_z_m"],
+        )
+        time.sleep(self.config["motion"]["settle_time_s"])
+        bin_position = self.slot_bin_position(zone, bin_index, slot)
+        self.event(order.order_id, "VERIFYING", sku=sku, slot_id=slot_id)
+        if not verify_bin_placement(
+            self.observe_after_place(sku, entity), source, bin_position,
+            tuple(zone["bin_half_extents_m"]),
+            self.config["workspace"]["source_exclusion_radius_m"],
+        ):
+            raise OrderError(f"{sku} was not observed inside bin {slot_id}")
+        self._completed_by_sku[sku] = done + 1
+        self._placed_entities.append((sku, entity, bin_index, source))
+        completed = sum(self._completed_by_sku.values())
+        self.event(
+            order.order_id, "ITEM_COMPLETED", sku=sku, entity_id=entity_id,
+            slot_id=slot_id, completed=completed, total=order.total_items,
+        )
+        return {"placed": entity_id, "sku": sku, "bin": slot_id, "completed": completed}
+
+    def finish_order(self, order: Order) -> dict:
+        """The Agent can request completion, but cannot declare success itself."""
+        self.check_cancel()
+        for line in order.lines:
+            if self._completed_by_sku.get(line.sku, 0) != line.quantity:
+                raise OrderError(f"Order is incomplete: {line.sku}")
+        zone = self.config["zones"][order.zone]
+        self.event(
+            order.order_id, "FINAL_AUDIT",
+            completed=len(self._placed_entities), total=order.total_items,
+        )
+        for sku, entity, bin_index, source in self._placed_entities:
+            slot = tuple(zone["slots"][bin_index])
+            bin_position = self.slot_bin_position(zone, bin_index, slot)
+            if not verify_bin_placement(
+                self.observe_after_place(sku, entity), source, bin_position,
+                tuple(zone["bin_half_extents_m"]),
+                self.config["workspace"]["source_exclusion_radius_m"],
+            ):
+                raise OrderError(
+                    f"Final audit found {sku} outside bin {order.zone}{bin_index + 1}"
+                )
+        return {"status": "verified", "completed": len(self._placed_entities)}
+
+    def run(self, order: Order, *, model=None) -> dict:
+        """Ask the model to solve a goal with tools, preserving a failure report."""
         failure = None
         self.event(order.order_id, "ORDER_STARTED", total=order.total_items)
         try:
-            for line in order.lines:
-                for index in range(line.quantity):
-                    self.check_cancel()
-                    placement = placements[item_cursor]
-                    bin_index = placement.bin_index
-                    slot = tuple(zone["slots"][bin_index])
-                    target = (
-                        slot[0] + placement.offset_x,
-                        slot[1] + placement.offset_y,
-                    )
-                    slot_id = f"{order.zone}{bin_index + 1}"
-                    if self._scene_prepared:
-                        bin_position = self.slot_bin_position(zone, bin_index, slot)
-                    else:
-                        bin_position = slot
-                    if self._scene_prepared:
-                        self.event(
-                            order.order_id,
-                            "FEEDING",
-                            sku=line.sku,
-                            item=index + 1,
-                        )
-                        self.spawn_product(line.sku, index + 1)
-                    self.event(
-                        order.order_id,
-                        "DETECTING",
-                        sku=line.sku,
-                        item=index + 1,
-                        slot_id=slot_id,
-                        target=target,
-                    )
-                    source, entity = self.locate_source(line.sku, zone)
-                    if distance_xy(source, target) <= 0.12:
-                        raise OrderError("Source is too close to destination slot")
-                    self.check_cancel()
-                    self.event(
-                        order.order_id,
-                        "GRASPING",
-                        sku=line.sku,
-                        source=source,
-                        position_source="scene_tf" if entity else "perception",
-                    )
-                    self.move(source, grip="grab")
-                    self.event(
-                        order.order_id,
-                        "PLACING",
-                        sku=line.sku,
-                        slot_id=slot_id,
-                        target=target,
-                        bin_position=bin_position,
-                    )
-                    self.move(
-                        (target[0], target[1], source[2]),
-                        grip="release",
-                        target_z=self.config["motion"]["bin_release_z_m"],
-                    )
-                    self.event(order.order_id, "RETRACTING", sku=line.sku, slot_id=slot_id)
-                    self.move(
-                        (target[0], target[1], source[2]),
-                        grip="release",
-                        target_z=self.config["motion"]["bin_clearance_z_m"],
-                    )
-                    time.sleep(self.config["motion"]["settle_time_s"])
-                    if self._scene_prepared:
-                        bin_position = self.slot_bin_position(zone, bin_index, slot)
-                    self.event(
-                        order.order_id,
-                        "VERIFYING",
-                        sku=line.sku,
-                        slot_id=slot_id,
-                        bin_position=bin_position,
-                    )
-                    observed = self.observe_after_place(line.sku, entity)
-                    if self._scene_prepared:
-                        placed = verify_bin_placement(
-                            observed,
-                            source,
-                            bin_position,
-                            tuple(zone["bin_half_extents_m"]),
-                            self.config["workspace"]["source_exclusion_radius_m"],
-                        )
-                    else:
-                        placed = verify_placement(
-                            observed,
-                            source,
-                            bin_position,
-                            zone["tolerance_m"],
-                            self.config["workspace"]["source_exclusion_radius_m"],
-                        )
-                    if not placed:
-                        raise OrderError(
-                            f"{line.sku} was not observed at destination after release"
-                        )
-                    completed += 1
-                    item_cursor += 1
-                    if entity is not None:
-                        placed_entities.append((line.sku, entity, bin_index, source))
-                    self.event(
-                        order.order_id,
-                        "ITEM_COMPLETED",
-                        sku=line.sku,
-                        slot_id=slot_id,
-                        completed=completed,
-                        total=order.total_items,
-                    )
-            if self._scene_prepared:
-                self.event(
-                    order.order_id,
-                    "FINAL_AUDIT",
-                    completed=completed,
-                    total=order.total_items,
-                )
-                for sku, entity, bin_index, source in placed_entities:
-                    slot = tuple(zone["slots"][bin_index])
-                    bin_position = self.slot_bin_position(zone, bin_index, slot)
-                    if not verify_bin_placement(
-                        self.observe_after_place(sku, entity),
-                        source,
-                        bin_position,
-                        tuple(zone["bin_half_extents_m"]),
-                        self.config["workspace"]["source_exclusion_radius_m"],
-                    ):
-                        raise OrderError(
-                            f"Final audit found {sku} outside bin "
-                            f"{order.zone}{bin_index + 1}"
-                        )
+            if not self._scene_prepared:
+                raise OrderError("Agent execution requires prepare_scene=true")
+            ProduceAgent(self, order, model=model).run()
         except OrderCancelled as exc:
             failure = str(exc)
             self.event(order.order_id, "ORDER_CANCELLED", reason=failure)
             status = "CANCELLED"
-        except (OrderError, TimeoutError, ValueError) as exc:
+        except Exception as exc:
             failure = str(exc)
             self.event(order.order_id, "ORDER_FAILED", reason=failure)
             status = "FAILED"
         else:
-            self.event(order.order_id, "ORDER_COMPLETED", completed=completed)
+            self.event(order.order_id, "ORDER_COMPLETED", completed=len(self._placed_entities))
             status = "COMPLETED"
         return {
-            "order_id": order.order_id,
-            "status": status,
-            "completed": completed,
-            "requested": order.total_items,
-            "error": failure,
-            "events": self.events,
+            "order_id": order.order_id, "status": status,
+            "completed": len(self._placed_entities), "requested": order.total_items,
+            "error": failure, "events": self.events,
         }

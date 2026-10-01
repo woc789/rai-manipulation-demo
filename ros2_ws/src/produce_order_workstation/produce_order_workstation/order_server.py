@@ -3,13 +3,14 @@
 import argparse
 import json
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Thread
 
 from ament_index_python.packages import get_package_share_directory
 import rclpy
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.utilities import remove_ros_args
 from rai.communication.ros2.connectors import ROS2Connector
@@ -38,6 +39,7 @@ class OrderActionServer(Node):
         self.scene_path = scene_path
         self._lock = Lock()
         self._busy = False
+        self._scene_ready = False
         self.connector = ROS2Connector(
             "produce_order_runtime", executor_type="single_threaded"
         )
@@ -51,6 +53,30 @@ class OrderActionServer(Node):
             cancel_callback=self.cancel_callback,
             callback_group=ReentrantCallbackGroup(),
         )
+        Thread(target=self._prepare_initial_stock, daemon=True).start()
+
+    def _prepare_initial_stock(self) -> None:
+        """Make inventory visible before a customer submits an order."""
+        try:
+            self.workstation.wait_until_ready(with_scene=True)
+            self.workstation.prepare_scene(self.scene_path)
+        except Exception as exc:
+            self.get_logger().error(f"Could not preload mixed inventory: {exc}")
+            return
+        with self._lock:
+            self._scene_ready = True
+        self.get_logger().info("Mixed table inventory is ready: four of each SKU")
+
+    def _replenish_after_order(self) -> None:
+        """Restore a full batch only after a verified completed order."""
+        try:
+            self.workstation.prepare_scene(self.scene_path)
+        except Exception as exc:
+            self.get_logger().error(f"Could not replenish inventory: {exc}")
+            return
+        with self._lock:
+            self._scene_ready = True
+        self.get_logger().info("Inventory replenished for the next order")
 
     @staticmethod
     def report_path(order_id: str) -> Path:
@@ -62,6 +88,8 @@ class OrderActionServer(Node):
 
     def goal_callback(self, goal: ExecuteOrder.Goal) -> GoalResponse:
         try:
+            if not goal.prepare_scene:
+                raise ValueError("Agent orders require prepare_scene=true")
             validate_order(order_from_goal(goal), self.config)
         except ValueError as exc:
             self.get_logger().warning(f"Rejected invalid order: {exc}")
@@ -70,10 +98,14 @@ class OrderActionServer(Node):
             if self._busy:
                 self.get_logger().warning("Rejected order: workcell is busy")
                 return GoalResponse.REJECT
+            if not self._scene_ready:
+                self.get_logger().warning("Rejected order: mixed inventory is not ready")
+                return GoalResponse.REJECT
             if self.report_path(goal.order_id).exists():
                 self.get_logger().warning("Rejected order: order ID already has a report")
                 return GoalResponse.REJECT
             self._busy = True
+            self._scene_ready = False
         return GoalResponse.ACCEPT
 
     def cancel_callback(self, goal_handle) -> CancelResponse:
@@ -105,13 +137,8 @@ class OrderActionServer(Node):
         try:
             self.workstation.event(order.order_id, "STARTING")
             self.workstation.check_cancel()
-            self.workstation.wait_until_ready(
-                with_scene=goal_handle.request.prepare_scene
-            )
-            self.workstation.check_cancel()
-            if goal_handle.request.prepare_scene:
-                self.workstation.event(order.order_id, "PREPARING_SCENE")
-                self.workstation.prepare_scene(self.scene_path, order)
+            self.workstation.event(order.order_id, "USING_PRELOADED_SCENE")
+            self.workstation.begin_order(order)
             self.workstation.check_cancel()
             result = self.workstation.run(order)
         except OrderCancelled as exc:
@@ -147,6 +174,8 @@ class OrderActionServer(Node):
         finally:
             with self._lock:
                 self._busy = False
+            if result["status"] == "COMPLETED":
+                Thread(target=self._replenish_after_order, daemon=True).start()
 
     def _failure_result(self, order: Order, status: str, error: str) -> dict:
         return {
@@ -176,12 +205,12 @@ def main() -> None:
     executor.add_node(server)
     try:
         executor.spin()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         executor.shutdown()
         server.close()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
 if __name__ == "__main__":

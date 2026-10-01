@@ -121,6 +121,12 @@ def validate_order(order: Order, config: dict) -> None:
                 f"Quantity for {line.sku} exceeds bin "
                 f"{order.zone}{sku_bins[line.sku] + 1} capacity {capacity}"
             )
+        stock = config.get("stock", {}).get("initial_counts", {})
+        if line.quantity > stock.get(line.sku, 0):
+            raise ValueError(
+                f"Quantity for {line.sku} exceeds prepared scene stock "
+                f"{stock.get(line.sku, 0)}"
+            )
 
 
 def plan_placements(order: Order, config: dict) -> tuple[Placement, ...]:

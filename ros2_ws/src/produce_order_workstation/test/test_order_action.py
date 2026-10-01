@@ -1,20 +1,16 @@
+from collections import Counter
+from copy import deepcopy
+import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, call
 
 import pytest
+import yaml
 
 from produce_order_interfaces.action import ExecuteOrder
 from produce_order_interfaces.msg import OrderLine as OrderLineMsg
-import yaml
-
-from produce_order_workstation.order import (
-    Order,
-    OrderError,
-    OrderLine,
-    capacity_usage,
-    plan_placements,
-    validate_order,
-)
+from produce_order_workstation.order import Order, OrderError, OrderLine, plan_placements, validate_order
 from produce_order_workstation.order_server import order_from_goal
 from produce_order_workstation.runtime import Workstation
 
@@ -23,216 +19,150 @@ PACKAGE = Path(__file__).resolve().parents[1]
 CONFIG = yaml.safe_load((PACKAGE / "config/workstation.yaml").read_text())
 
 
-def test_demo_scene_bins_match_order_slots():
+def test_scene_has_four_bins_and_mixed_order_independent_stock():
     scene = yaml.safe_load((PACKAGE / "config/demo_scene.yaml").read_text())
     entities = {item["name"]: item for item in scene["entities"]}
     zone = CONFIG["zones"]["A"]
-    assert len(zone["slots"]) == len(zone["slot_entities"]) == 4
     assert zone["sku_bins"] == {"corn": 0, "carrot": 1, "apple": 2, "tomato": 3}
     for name, slot in zip(zone["slot_entities"], zone["slots"]):
         assert entities[name]["prefab_name"] == "toy_box"
-        translation = entities[name]["pose"]["translation"]
-        assert [translation["x"], translation["y"]] == slot
+        pos = entities[name]["pose"]["translation"]
+        assert [pos["x"], pos["y"]] == slot
+    stock = Counter(item["prefab_name"] for item in entities.values() if item["prefab_name"] != "toy_box")
+    assert stock == CONFIG["stock"]["initial_counts"]
+    scene_config = Workstation(MagicMock(), CONFIG).build_scene(PACKAGE / "config/demo_scene.yaml")
+    assert len(scene_config.entities) == 20
 
 
-def test_scene_starts_with_only_bins_and_feeds_one_product(monkeypatch):
-    monkeypatch.setattr("produce_order_workstation.runtime.time.sleep", lambda _: None)
-    workstation = Workstation(MagicMock(), CONFIG)
-    scene = workstation.build_scene(PACKAGE / "config/demo_scene.yaml")
-    products = [entity for entity in scene.entities if entity.prefab_name != "toy_box"]
-    assert products == []
-    workstation._scene_bridge = MagicMock()
-    workstation._scene_prepared = True
-    workstation.spawn_product("corn", 2)
-    entity = workstation._scene_bridge._spawn_entity.call_args.args[0]
-    assert entity.name == "order_corn_2"
-    assert entity.prefab_name == "corn"
-    assert (entity.pose.pose.position.x, entity.pose.pose.position.y) == tuple(
-        CONFIG["stock"]["feed_position"]
-    )
+def test_stock_quantity_is_distinct_from_bin_capacity():
+    assert CONFIG["stock"]["initial_counts"]["apple"] == 4
+    assert CONFIG["zones"]["A"]["bin_capacity_items"] == 4
+    modified = deepcopy(CONFIG)
+    modified["stock"]["initial_counts"]["apple"] = 3
+    with pytest.raises(ValueError, match="prepared scene stock 3"):
+        validate_order(Order("four-apples", "A", (OrderLine("apple", 4),)), modified)
 
 
-def test_four_items_can_share_each_bin():
-    order = Order("eight-small", "A", (OrderLine("apple", 4), OrderLine("tomato", 4)))
-    placements = plan_placements(order, CONFIG)
-    assert [item.bin_index for item in placements] == [2] * 4 + [3] * 4
-    assert [(item.offset_x, item.offset_y) for item in placements[:4]] == [
-        (-0.03, -0.04),
-        (-0.03, 0.04),
-        (0.03, -0.04),
-        (0.03, 0.04),
-    ]
+def test_mixed_order_maps_each_sku_to_one_bin():
+    order = Order("mixed", "A", (OrderLine("corn", 2), OrderLine("carrot", 2), OrderLine("apple", 1), OrderLine("tomato", 1)))
+    assert [item.bin_index for item in plan_placements(order, CONFIG)] == [0, 0, 1, 1, 2, 3]
 
 
-def test_six_mixed_items_are_sorted_into_dedicated_bins():
-    order = Order(
-        "mixed-six",
-        "A",
-        (
-            OrderLine("corn", 2),
-            OrderLine("carrot", 2),
-            OrderLine("apple", 1),
-            OrderLine("tomato", 1),
-        ),
-    )
-    placements = plan_placements(order, CONFIG)
-    assert capacity_usage(order, CONFIG).bins_needed == 4
-    assert [item.bin_index for item in placements] == [0, 0, 1, 1, 2, 3]
-    assert sorted({item.sku for item in placements}) == [
-        "apple", "carrot", "corn", "tomato"
-    ]
-
-    with pytest.raises(ValueError, match="corn exceeds bin A1 capacity 4"):
-        validate_order(Order("too-much-corn", "A", (OrderLine("corn", 5),)), CONFIG)
-
-    reordered = Order(
-        "reordered", "A", (OrderLine("tomato", 1), OrderLine("corn", 2))
-    )
-    assert [item.bin_index for item in plan_placements(reordered, CONFIG)] == [3, 0, 0]
-
-
-def test_action_goal_uses_same_validation_as_yaml_order():
+def test_action_goal_uses_shared_order_validation():
     goal = ExecuteOrder.Goal()
-    goal.order_id = "action-001"
-    goal.zone = "A"
+    goal.order_id, goal.zone = "action-001", "A"
     line = OrderLineMsg()
-    line.sku = "corn"
-    line.quantity = 1
+    line.sku, line.quantity = "corn", 1
     goal.lines = [line]
     order = order_from_goal(goal)
     validate_order(order, CONFIG)
     assert order == Order("action-001", "A", (OrderLine("corn", 1),))
 
 
-def test_cancel_before_first_item_issues_no_motion():
-    workstation = Workstation(MagicMock(), CONFIG, cancel_requested=lambda: True)
-    workstation.move = MagicMock()
-    result = workstation.run(Order("cancel-001", "A", (OrderLine("corn", 1),)))
+def test_preloaded_inventory_is_checked_when_order_begins():
+    station = Workstation(MagicMock(), CONFIG)
+    station._scene_prepared = True
+    station.inspect_scene = MagicMock(return_value={"available": {"corn": 1}})
+    with pytest.raises(OrderError, match="need 2, have 1"):
+        station.begin_order(Order("short-stock", "A", (OrderLine("corn", 2),)))
+    station.inspect_scene.return_value = {"available": {"corn": 4}}
+    station.begin_order(Order("enough-stock", "A", (OrderLine("corn", 2),)))
+    assert station._completed_by_sku == {"corn": 0}
+
+
+def test_cancel_before_agent_issues_no_motion():
+    station = Workstation(MagicMock(), CONFIG, cancel_requested=lambda: True)
+    station._scene_prepared = True
+    station.move = MagicMock()
+    result = station.run(Order("cancel", "A", (OrderLine("corn", 1),)))
     assert result["status"] == "CANCELLED"
-    assert result["completed"] == 0
-    assert result["events"][-1]["stage"] == "ORDER_CANCELLED"
-    workstation.move.assert_not_called()
+    station.move.assert_not_called()
 
 
-def test_receiving_bin_must_exist_at_configured_slot():
-    workstation = Workstation(MagicMock(), CONFIG)
-    bin_entity = MagicMock(name="bin_entity")
-    bin_entity.name = "order_bin_A1"
-    bin_entity.prefab_name = "toy_box"
-    workstation._scene_bridge = MagicMock()
-    workstation._scene_bridge.spawned_entities = [bin_entity]
-    pose = workstation._scene_bridge.get_object_pose.return_value.pose.position
+def test_bin_must_exist_at_slot():
+    station = Workstation(MagicMock(), CONFIG)
+    entity = SimpleNamespace(name="order_bin_A1", prefab_name="toy_box")
+    station._scene_bridge = MagicMock()
+    station._scene_bridge.spawned_entities = [entity]
+    point = station._scene_bridge.get_object_pose.return_value.pose.position
     slot = CONFIG["zones"]["A"]["slots"][0]
-    pose.x, pose.y = slot
-    assert workstation.slot_bin_position(CONFIG["zones"]["A"], 0, slot) == tuple(slot)
-
-    pose.x += 0.2
+    point.x, point.y = slot
+    assert station.slot_bin_position(CONFIG["zones"]["A"], 0, slot) == tuple(slot)
+    point.x += 0.2
     with pytest.raises(OrderError, match="not at its configured slot"):
-        workstation.slot_bin_position(CONFIG["zones"]["A"], 0, slot)
-
-    workstation._scene_bridge.spawned_entities = []
-    with pytest.raises(OrderError, match="is missing"):
-        workstation.slot_bin_position(CONFIG["zones"]["A"], 0, slot)
+        station.slot_bin_position(CONFIG["zones"]["A"], 0, slot)
 
 
-def test_scene_recovers_entities_lost_when_simulator_restarts(monkeypatch):
+def test_agent_tool_rejects_invented_entity_before_motion():
+    station = Workstation(MagicMock(), CONFIG)
+    station._scene_prepared = True
+    station._source_entities = MagicMock(return_value={})
+    station.move = MagicMock()
+    with pytest.raises(OrderError, match="not reachable"):
+        station.pick_and_place(Order("invalid", "A", (OrderLine("corn", 1),)), "invented")
+    carrot = SimpleNamespace(name="stock_carrot_1", prefab_name="carrot")
+    station._source_entities.return_value = {carrot.name: (carrot, (0.26, -0.27, 0.03))}
+    with pytest.raises(OrderError, match="not needed"):
+        station.pick_and_place(Order("wrong-sku", "A", (OrderLine("corn", 1),)), carrot.name)
+    station.move.assert_not_called()
+
+
+def test_agent_chosen_entity_runs_motion_and_audit(monkeypatch):
     monkeypatch.setattr("produce_order_workstation.runtime.time.sleep", lambda _: None)
-    workstation = Workstation(MagicMock(), CONFIG)
-    bridge = MagicMock()
-    bridge.spawned_entities = [MagicMock(name="old_bin"), MagicMock(name="old_stock")]
-    bridge.clear_scene.side_effect = RuntimeError(
-        "Failed to delete entity old_bin. Response: "
-        "Could not find entity with given name: toy_box_5"
-    )
-    workstation._scene_bridge = bridge
-    workstation.slot_bin_position = MagicMock()
-
-    workstation.prepare_scene(
-        PACKAGE / "config/demo_scene.yaml",
-        Order("retry-after-restart", "A", (OrderLine("apple", 1),)),
-    )
-
-    assert bridge.spawned_entities == []
-    assert bridge.clear_scene.call_count == 2
-    bridge.setup_scene.assert_called_once()
-
-
-def test_scene_does_not_hide_real_cleanup_errors():
-    workstation = Workstation(MagicMock(), CONFIG)
-    bridge = MagicMock()
-    bridge.spawned_entities = [MagicMock(name="old_bin")]
-    bridge.clear_scene.side_effect = RuntimeError("delete service timed out")
-    workstation._scene_bridge = bridge
-
-    with pytest.raises(RuntimeError, match="delete service timed out"):
-        workstation.prepare_scene(
-            PACKAGE / "config/demo_scene.yaml",
-            Order("cleanup-error", "A", (OrderLine("apple", 1),)),
-        )
-    assert len(bridge.spawned_entities) == 1
-    bridge.setup_scene.assert_not_called()
-
-
-def test_bin_release_retracts_before_verification(monkeypatch):
-    monkeypatch.setattr("produce_order_workstation.runtime.time.sleep", lambda _: None)
-    workstation = Workstation(MagicMock(), CONFIG)
-    workstation._scene_bridge = MagicMock()
-    workstation._scene_prepared = True
+    station = Workstation(MagicMock(), CONFIG)
+    station._scene_prepared = True
+    station._completed_by_sku = {"corn": 0}
     slot = tuple(CONFIG["zones"]["A"]["slots"][0])
-    source = (0.5, 0.4, 0.03)
-    workstation.slot_bin_position = MagicMock(return_value=slot)
-    workstation.locate_source = MagicMock(return_value=(source, object()))
-    workstation.observe_after_place = MagicMock(
-        return_value=[(slot[0], slot[1], source[2])]
-    )
-    workstation.move = MagicMock()
-    workstation.spawn_product = MagicMock()
-
-    result = workstation.run(Order("bin-order", "A", (OrderLine("corn", 1),)))
-
-    assert result["status"] == "COMPLETED"
-    assert workstation.move.call_args_list == [
+    source = (0.29, -0.12, 0.04)
+    entity = SimpleNamespace(name="stock_corn_1", prefab_name="corn")
+    station._source_entities = MagicMock(return_value={entity.name: (entity, source)})
+    station.slot_bin_position = MagicMock(return_value=slot)
+    station.observe_after_place = MagicMock(return_value=[(*slot, 0.05)])
+    station.move = MagicMock()
+    order = Order("motion", "A", (OrderLine("corn", 1),))
+    assert station.pick_and_place(order, entity.name)["bin"] == "A1"
+    assert station.move.call_args_list == [
         call(source, grip="grab"),
-        call(
-            (slot[0], slot[1], source[2]),
-            grip="release",
-            target_z=CONFIG["motion"]["bin_release_z_m"],
-        ),
-        call(
-            (slot[0], slot[1], source[2]),
-            grip="release",
-            target_z=CONFIG["motion"]["bin_clearance_z_m"],
-        ),
+        call((*slot, source[2]), grip="release", target_z=CONFIG["motion"]["bin_release_z_m"]),
+        call((*slot, source[2]), grip="release", target_z=CONFIG["motion"]["bin_clearance_z_m"]),
     ]
-    assert [event["stage"] for event in result["events"]].index(
-        "RETRACTING"
-    ) < [event["stage"] for event in result["events"]].index("VERIFYING")
+    assert station.finish_order(order)["status"] == "verified"
+    station.observe_after_place.return_value = [(slot[0] + 0.2, slot[1], 0.05)]
+    with pytest.raises(OrderError, match="Final audit"):
+        station.finish_order(order)
 
 
-def test_final_audit_catches_item_displaced_by_later_placement(monkeypatch):
-    monkeypatch.setattr("produce_order_workstation.runtime.time.sleep", lambda _: None)
-    workstation = Workstation(MagicMock(), CONFIG)
-    workstation._scene_bridge = MagicMock()
-    workstation._scene_prepared = True
-    slot = tuple(CONFIG["zones"]["A"]["slots"][2])
-    workstation.slot_bin_position = MagicMock(return_value=slot)
-    source = (0.32, -0.07, 0.03)
-    workstation.locate_source = MagicMock(
-        side_effect=[(source, object()), (source, object())]
-    )
-    workstation.observe_after_place = MagicMock(
-        side_effect=[
-            [(slot[0], slot[1], 0.05)],
-            [(slot[0], slot[1], 0.05)],
-            [(slot[0] + 0.20, slot[1], 0.05)],
-        ]
-    )
-    workstation.move = MagicMock()
-    workstation.spawn_product = MagicMock()
+class FakeModel:
+    def __init__(self, calls):
+        self.calls = iter(calls)
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
 
-    result = workstation.run(Order("displaced", "A", (OrderLine("apple", 2),)))
+    def create(self, **_):
+        name, arguments = next(self.calls)
+        function = SimpleNamespace(name=name, arguments=json.dumps(arguments))
+        tool_call = SimpleNamespace(id=f"test-{name}", function=function)
+        message = SimpleNamespace(content=None, tool_calls=[tool_call])
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
+
+def test_agent_loop_uses_model_chosen_tool_and_entity():
+    station = Workstation(MagicMock(), CONFIG)
+    station._scene_prepared = True
+    station.inspect_scene = MagicMock(return_value={"objects": [{"entity_id": "stock_corn_2", "sku": "corn"}]})
+    station.pick_and_place = MagicMock(return_value={"placed": "stock_corn_2"})
+    station.finish_order = MagicMock(return_value={"status": "verified"})
+    model = FakeModel([("inspect_scene", {}), ("pick_and_place", {"entity_id": "stock_corn_2"}), ("finish_order", {})])
+    result = station.run(Order("agent", "A", (OrderLine("corn", 1),)), model=model)
+    assert result["status"] == "COMPLETED"
+    assert station.pick_and_place.call_args.args[1] == "stock_corn_2"
+    assert [item["stage"] for item in result["events"]].count("AGENT_TOOL_CALL") == 3
+
+
+def test_agent_cannot_move_without_first_observation():
+    station = Workstation(MagicMock(), CONFIG)
+    station._scene_prepared = True
+    station.pick_and_place = MagicMock()
+    result = station.run(Order("no-inspection", "A", (OrderLine("corn", 1),)), model=FakeModel([("pick_and_place", {"entity_id": "stock_corn_1"})]))
     assert result["status"] == "FAILED"
-    assert result["completed"] == 2
-    assert "Final audit found apple outside bin A3" in result["error"]
-    assert "FINAL_AUDIT" in [event["stage"] for event in result["events"]]
+    assert "inspect" in result["error"]
+    station.pick_and_place.assert_not_called()

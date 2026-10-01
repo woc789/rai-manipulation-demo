@@ -136,7 +136,10 @@ class RosWorker(QThread):
                         f"订单号 {self._pending_order_id} 已有报告；请换一个订单号。"
                     )
                 else:
-                    self.notice.emit("订单被拒绝：请检查订单参数或等待当前订单结束。")
+                    self.notice.emit(
+                        "订单被拒绝：库存可能正在初始化/补货，或工作台需要重启；"
+                        "请看订单服务终端日志后重试。"
+                    )
                 self.accepted.emit(False)
                 return
             self._active_goal = handle
@@ -207,7 +210,7 @@ class DebugPanel(QWidget):
         header = QLabel("生鲜订单拣选工作站")
         header.setObjectName("title")
         root.addWidget(header)
-        root.addWidget(QLabel("调试面板 · 结构化下单、ROS 2 进度反馈与结果记录；Agent 尚未接入"))
+        root.addWidget(QLabel("调试面板 · 混合桌面库存 → Agent 选物/选工具 → ROS 2 抓放与验收"))
 
         top = QHBoxLayout()
         self.connection = QLabel("● 正在连接订单服务")
@@ -231,7 +234,13 @@ class DebugPanel(QWidget):
             (("corn", "玉米"), ("carrot", "胡萝卜"), ("apple", "苹果"), ("tomato", "番茄"))
         ):
             spin = QSpinBox()
-            spin.setRange(0, self.config["zones"]["A"]["bin_capacity_items"])
+            spin.setRange(
+                0,
+                min(
+                    self.config["zones"]["A"]["bin_capacity_items"],
+                    self.config["stock"]["initial_counts"][sku],
+                ),
+            )
             row, column = divmod(index, 2)
             bin_id = self.config["zones"]["A"]["sku_bins"][sku] + 1
             quantities.addWidget(QLabel(f"{label} → A{bin_id}"), row, column * 2)
@@ -245,7 +254,7 @@ class DebugPanel(QWidget):
         self.bin_preview = QLabel()
         self.bin_preview.setWordWrap(True)
         form.addRow("分箱预览", self.bin_preview)
-        form.addRow("场景", QLabel("自动准备场景并逐件上料；四类商品固定分类装箱"))
+        form.addRow("场景", QLabel("服务启动时预置 16 件混合库存；Agent 根据观察选择物品与工具"))
         buttons = QHBoxLayout()
         self.submit_button = QPushButton("提交订单")
         self.submit_button.setObjectName("primary")
@@ -344,9 +353,9 @@ class DebugPanel(QWidget):
             self.status.setText("订单配置无效")
             return
         self.capacity_status.setText(
-            f"可提交 · 已选 {usage.items_needed} 件，逐件自动上料；"
+            f"可提交 · 已选 {usage.items_needed} 件，桌面预置混合库存；"
             f"使用 {usage.bins_needed}/{usage.bins_available} 个分类箱；"
-            f"每类最多 {usage.items_per_bin} 件。"
+            f"每类现有 {self.config['stock']['initial_counts']['corn']} 件库存。"
         )
         self.capacity_status.setStyleSheet("color: #86efac;")
         bins = [0 for _ in range(usage.bins_available)]
@@ -406,6 +415,13 @@ class DebugPanel(QWidget):
             self.progress.setValue(completed)
         try:
             event = json.loads(detail)
+            if stage == "AGENT_TOOL_CALL":
+                argument = event.get("arguments", {})
+                target = argument.get("entity_id", "")
+                self._append(f"Agent 选择工具：{event['tool']} {target}".strip())
+            elif stage == "AGENT_TOOL_RESULT" and event.get("tool") == "inspect_scene":
+                available = event.get("result", {}).get("available", {})
+                self._append(f"Agent 观察到桌面库存：{available}")
             self._append(json.dumps(event, ensure_ascii=False))
         except json.JSONDecodeError:
             self._append(detail)

@@ -59,6 +59,9 @@ def main() -> None:
         )
         return
 
+    if not args.prepare_scene:
+        parser.error("Agent orders require --prepare-scene for named object identity")
+
     rclpy.init()
     connector = ROS2Connector(executor_type="single_threaded")
     workstation = Workstation(connector, config)

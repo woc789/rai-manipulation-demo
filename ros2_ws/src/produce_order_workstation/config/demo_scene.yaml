@@ -19,3 +19,85 @@ entities:
     pose:
       translation: {x: 0.50, y: 0.48, z: 0.05}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+  # Sixteen mixed objects exist before the Agent sees the order. Names are stable
+  # entity IDs; TF positions are measured again before each pick.
+  - name: stock_carrot_1
+    prefab_name: carrot
+    pose:
+      translation: {x: 0.26, y: -0.275, z: 0.05}
+      rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+  - name: stock_corn_1
+    prefab_name: corn
+    pose:
+      translation: {x: 0.26, y: -0.055, z: 0.05}
+      rotation: {x: 0.0, y: 0.707, z: 0.0, w: 0.707}
+  - name: stock_apple_1
+    prefab_name: apple
+    pose:
+      translation: {x: 0.26, y: -0.165, z: 0.05}
+      rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+  - name: stock_tomato_1
+    prefab_name: tomato
+    pose:
+      translation: {x: 0.26, y: -0.385, z: 0.05}
+      rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+  - name: stock_tomato_2
+    prefab_name: tomato
+    pose:
+      translation: {x: 0.26, y: 0.055, z: 0.05}
+      rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+  - name: stock_apple_2
+    prefab_name: apple
+    pose:
+      translation: {x: 0.26, y: 0.385, z: 0.05}
+      rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+  - name: stock_corn_2
+    prefab_name: corn
+    pose:
+      translation: {x: 0.26, y: 0.165, z: 0.05}
+      rotation: {x: 0.0, y: 0.707, z: 0.0, w: 0.707}
+  - name: stock_carrot_2
+    prefab_name: carrot
+    pose:
+      translation: {x: 0.26, y: 0.275, z: 0.05}
+      rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+  - name: stock_apple_3
+    prefab_name: apple
+    pose:
+      translation: {x: 0.40, y: -0.385, z: 0.05}
+      rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+  - name: stock_carrot_3
+    prefab_name: carrot
+    pose:
+      translation: {x: 0.40, y: -0.275, z: 0.05}
+      rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+  - name: stock_corn_3
+    prefab_name: corn
+    pose:
+      translation: {x: 0.40, y: -0.165, z: 0.05}
+      rotation: {x: 0.0, y: 0.707, z: 0.0, w: 0.707}
+  - name: stock_tomato_3
+    prefab_name: tomato
+    pose:
+      translation: {x: 0.40, y: -0.055, z: 0.05}
+      rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+  - name: stock_apple_4
+    prefab_name: apple
+    pose:
+      translation: {x: 0.40, y: 0.055, z: 0.05}
+      rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+  - name: stock_corn_4
+    prefab_name: corn
+    pose:
+      translation: {x: 0.40, y: 0.165, z: 0.05}
+      rotation: {x: 0.0, y: 0.707, z: 0.0, w: 0.707}
+  - name: stock_carrot_4
+    prefab_name: carrot
+    pose:
+      translation: {x: 0.40, y: 0.275, z: 0.05}
+      rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+  - name: stock_tomato_4
+    prefab_name: tomato
+    pose:
+      translation: {x: 0.40, y: 0.385, z: 0.05}
+      rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
