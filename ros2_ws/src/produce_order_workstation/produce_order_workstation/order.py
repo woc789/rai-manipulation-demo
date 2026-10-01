@@ -1,7 +1,7 @@
 """Order rules independent of ROS and the simulator."""
 
 from dataclasses import dataclass
-from math import hypot, isfinite
+from math import ceil, hypot, isfinite
 from pathlib import Path
 import re
 
@@ -42,7 +42,29 @@ class Order:
 class Placement:
     sku: str
     bin_index: int
+    offset_x: float
     offset_y: float
+
+
+@dataclass(frozen=True)
+class CapacityUsage:
+    bins_needed: int
+    bins_available: int
+    items_needed: int
+    items_per_bin: int
+
+
+def capacity_usage(order: Order, config: dict) -> CapacityUsage:
+    """Count pieces, not arbitrary SKU-specific space weights."""
+    zone = config["zones"][order.zone]
+    capacity = zone["bin_capacity_items"]
+    bins = len(zone["slots"])
+    return CapacityUsage(
+        bins_needed=ceil(order.total_items / capacity),
+        bins_available=bins,
+        items_needed=order.total_items,
+        items_per_bin=capacity,
+    )
 
 
 def load_order(path: Path, config: dict) -> Order:
@@ -85,43 +107,39 @@ def validate_order(order: Order, config: dict) -> None:
             raise ValueError(f"Quantity for {line.sku} must be a positive integer")
         seen.add(line.sku)
     zone = config["zones"][order.zone]
-    slots = zone["slots"]
-    capacity = zone["bin_capacity_units"]
-    weights = zone["sku_space_units"]
-    if any(
-        line.sku not in weights or weights[line.sku] not in (1, capacity)
-        for line in order.lines
-    ):
-        raise ValueError("SKU capacity configuration is invalid")
-    required = sum(line.quantity * weights[line.sku] for line in order.lines)
-    available = len(slots) * capacity
-    if required > available:
+    capacity = zone["bin_capacity_items"]
+    if type(capacity) is not int or capacity < 1 or capacity > 4:
+        raise ValueError("Bin capacity must be between 1 and 4 items")
+    usage = capacity_usage(order, config)
+    if usage.bins_needed > usage.bins_available:
         raise ValueError(
-            f"Order needs {required} capacity units but zone {order.zone} has {available}"
+            f"Order needs {usage.bins_needed} bins but zone {order.zone} "
+            f"has {usage.bins_available} ({usage.items_per_bin} items per bin)"
         )
-    if order.total_items > len(config["stock"]["positions"]):
-        raise ValueError("Order exceeds the number of available source positions")
 
 
 def plan_placements(order: Order, config: dict) -> tuple[Placement, ...]:
-    """Reserve whole bins for large produce; share each other bin between two small items."""
+    """Balance the order across the fewest bins, using up to four drop points."""
     validate_order(order, config)
-    zone = config["zones"][order.zone]
     skus = [line.sku for line in order.lines for _ in range(line.quantity)]
-    weights = zone["sku_space_units"]
-    capacity = zone["bin_capacity_units"]
-    large_indices = [i for i, sku in enumerate(skus) if weights[sku] == capacity]
-    small_indices = [i for i, sku in enumerate(skus) if weights[sku] == 1]
+    bins_needed = capacity_usage(order, config).bins_needed
+    bin_items = [[] for _ in range(bins_needed)]
+    for item_index in range(len(skus)):
+        bin_items[item_index % bins_needed].append(item_index)
+    offsets = {
+        1: [(0.0, 0.0)],
+        2: [(0.0, -0.04), (0.0, 0.04)],
+        3: [(-0.03, -0.04), (-0.03, 0.04), (0.03, 0.0)],
+        4: [(-0.03, -0.04), (-0.03, 0.04), (0.03, -0.04), (0.03, 0.04)],
+    }
     assignments: list[Placement | None] = [None] * len(skus)
-    for bin_index, item_index in enumerate(large_indices):
-        assignments[item_index] = Placement(skus[item_index], bin_index, 0.0)
-    free_bins = len(zone["slots"]) - len(large_indices)
-    for index, item_index in enumerate(small_indices):
-        bin_index = len(large_indices) + index % free_bins
-        second = index >= free_bins
-        pair_exists = index + free_bins < len(small_indices) or second
-        offset_y = (0.04 if second else -0.04) if pair_exists else 0.0
-        assignments[item_index] = Placement(skus[item_index], bin_index, offset_y)
+    for bin_index, item_indices in enumerate(bin_items):
+        for item_index, (offset_x, offset_y) in zip(
+            item_indices, offsets[len(item_indices)]
+        ):
+            assignments[item_index] = Placement(
+                skus[item_index], bin_index, offset_x, offset_y
+            )
     return tuple(assignments)
 
 
@@ -171,3 +189,23 @@ def verify_placement(
         distance_xy(point, source) > source_exclusion_radius_m for point in points
     )
     return at_slot and left_source
+
+
+def verify_bin_placement(
+    points: list[tuple[float, float, float]],
+    source: tuple[float, float, float],
+    bin_center: tuple[float, float],
+    half_extents: tuple[float, float],
+    source_exclusion_radius_m: float,
+) -> bool:
+    """Accept an item inside the bin footprint, including its corners."""
+    inside = any(
+        abs(point[0] - bin_center[0]) <= half_extents[0]
+        and abs(point[1] - bin_center[1]) <= half_extents[1]
+        for point in points
+    )
+    left_source = all(
+        distance_xy(point, source) > source_exclusion_radius_m
+        for point in points
+    )
+    return inside and left_source

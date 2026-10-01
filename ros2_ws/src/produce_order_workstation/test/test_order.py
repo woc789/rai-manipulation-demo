@@ -10,6 +10,7 @@ from produce_order_workstation.order import (
     choose_source,
     load_order,
     parse_centroids,
+    verify_bin_placement,
     verify_placement,
 )
 from produce_order_workstation.runtime import Workstation
@@ -38,7 +39,7 @@ def test_duplicate_sku_is_rejected(tmp_path):
 
 def test_perception_result_is_parsed_and_destination_object_excluded():
     slot_x, slot_y = CONFIG["zones"]["A"]["slots"][0]
-    source_x, source_y = CONFIG["stock"]["positions"][0]
+    source_x, source_y = CONFIG["stock"]["feed_position"]
     result = (
         "Centroids of detected corn cob in panda_link0 frame: "
         f"[Centroid(x={source_x:.4f}, y={source_y:.4f}, z=0.0500), "
@@ -61,6 +62,17 @@ def test_placement_requires_new_slot_occupancy_and_source_departure():
     )
 
 
+def test_bin_footprint_accepts_corners_but_rejects_outside_items():
+    center = (0.50, -0.48)
+    source = (0.32, -0.07, 0.03)
+    corner_inside = (0.558, -0.526, 0.05)
+    assert verify_bin_placement([corner_inside], source, center, (0.08, 0.08), 0.08)
+    assert not verify_bin_placement(
+        [(0.59, -0.526, 0.05)], source, center, (0.08, 0.08), 0.08
+    )
+    assert not verify_bin_placement([source], source, center, (0.08, 0.08), 0.08)
+
+
 def test_no_reachable_object_stops_before_motion():
     with pytest.raises(OrderError, match="No reachable"):
         choose_source([(0.7, 0.7, 0.05)], CONFIG, CONFIG["zones"]["A"])
@@ -80,6 +92,7 @@ def test_prepared_scene_uses_entity_identity_even_if_vision_mislabels():
             pose=SimpleNamespace(position=positions[id(entity)])
         ),
     )
+    workstation._scene_prepared = True
     workstation.detect = MagicMock(side_effect=AssertionError("vision should not decide identity"))
 
     source, entity = workstation.locate_source("corn", CONFIG["zones"]["A"])

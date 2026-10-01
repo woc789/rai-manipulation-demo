@@ -12,12 +12,8 @@ aliases:
 zones:
   A:
     tolerance_m: 0.07
-    bin_capacity_units: 2
-    sku_space_units:
-      corn: 2
-      carrot: 2
-      apple: 1
-      tomato: 1
+    bin_half_extents_m: [0.08, 0.08]
+    bin_capacity_items: 4
     slots:
       - [0.50, -0.48]
       - [0.57, -0.16]
@@ -29,15 +25,8 @@ zones:
       - order_bin_A3
       - order_bin_A4
 stock:
-  positions:
-    - [0.32, -0.49]
-    - [0.32, -0.21]
-    - [0.32, 0.07]
-    - [0.32, 0.35]
-    - [0.32, -0.35]
-    - [0.32, -0.07]
-    - [0.32, 0.21]
-    - [0.32, 0.49]
+  feed_position: [0.32, -0.07]
+  feed_settle_time_s: 0.5
   spawn_rotations:
     corn: {x: 0.0, y: 0.707, z: 0.0, w: 0.707}
     carrot: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}

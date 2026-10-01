@@ -9,7 +9,7 @@ import rclpy
 from rai.communication.ros2.connectors import ROS2Connector
 import yaml
 
-from .order import load_order
+from .order import load_order, plan_placements
 from .runtime import Workstation
 
 
@@ -44,7 +44,14 @@ def main() -> None:
                     "order_id": order.order_id,
                     "zone": order.zone,
                     "items": [vars(line) for line in order.lines],
-                    "slots": config["zones"][order.zone]["slots"][: order.total_items],
+                    "placements": [
+                        {
+                            "sku": item.sku,
+                            "bin_id": f"{order.zone}{item.bin_index + 1}",
+                            "offset_m": [item.offset_x, item.offset_y],
+                        }
+                        for item in plan_placements(order, config)
+                    ],
                 },
                 ensure_ascii=False,
                 indent=2,

@@ -32,7 +32,13 @@ from produce_order_interfaces.action import ExecuteOrder
 from produce_order_interfaces.msg import OrderLine
 import yaml
 
-from .order import Order, OrderLine as BusinessOrderLine, validate_order
+from .order import (
+    Order,
+    OrderLine as BusinessOrderLine,
+    capacity_usage,
+    plan_placements,
+    validate_order,
+)
 
 
 class RosWorker(QThread):
@@ -181,8 +187,14 @@ class DebugPanel(QWidget):
             / "config/workstation.yaml"
         )
         self.config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        self._order_active = False
+        self._active_order_id = ""
         self.worker = RosWorker()
         self._build_ui()
+        self.order_id.textChanged.connect(self._refresh_order_preview)
+        for spin in self.quantity_spins.values():
+            spin.valueChanged.connect(self._refresh_order_preview)
+        self._refresh_order_preview()
         self.worker.connected.connect(self._set_connected)
         self.worker.accepted.connect(self._set_accepted)
         self.worker.feedback.connect(self._on_feedback)
@@ -201,7 +213,7 @@ class DebugPanel(QWidget):
         top = QHBoxLayout()
         self.connection = QLabel("● 正在连接订单服务")
         self.connection.setObjectName("connection")
-        self.status = QLabel("等待订单")
+        self.status = QLabel("待提交")
         self.status.setObjectName("status")
         top.addWidget(self.connection)
         top.addStretch()
@@ -219,7 +231,7 @@ class DebugPanel(QWidget):
             (("corn", "玉米"), ("carrot", "胡萝卜"), ("apple", "苹果"), ("tomato", "番茄"))
         ):
             spin = QSpinBox()
-            spin.setRange(0, 8)
+            spin.setRange(0, 16)
             spin.setValue(1 if sku in ("corn", "carrot") else 0)
             row, column = divmod(index, 2)
             quantities.addWidget(QLabel(label), row, column * 2)
@@ -227,7 +239,12 @@ class DebugPanel(QWidget):
             self.quantity_spins[sku] = spin
         form.addRow("商品数量", quantities)
         form.addRow("目标区域", QLabel("A 区 · A1–A4 四个橙色收货箱（从左到右）"))
-        form.addRow("箱体容量", QLabel("每箱 2 单位：玉米/胡萝卜占 2，苹果/番茄占 1；最多 8 件小件"))
+        self.capacity_status = QLabel()
+        self.capacity_status.setWordWrap(True)
+        form.addRow("容量校验", self.capacity_status)
+        self.bin_preview = QLabel()
+        self.bin_preview.setWordWrap(True)
+        form.addRow("分箱预览", self.bin_preview)
         self.prepare = QCheckBox("自动准备示例场景（使用仿真实体 TF 核验）")
         self.prepare.setChecked(True)
         form.addRow("场景", self.prepare)
@@ -250,6 +267,9 @@ class DebugPanel(QWidget):
         self.progress.setValue(0)
         progress_layout.addWidget(self.stage)
         progress_layout.addWidget(self.progress)
+        self.last_result = QLabel("上一单：暂无")
+        self.last_result.setWordWrap(True)
+        progress_layout.addWidget(self.last_result)
         root.addWidget(progress_box)
 
         log_box = QGroupBox("③ 实时事件与输出")
@@ -283,30 +303,90 @@ class DebugPanel(QWidget):
     def _new_id(self) -> None:
         self.order_id.setText(datetime.now().strftime("debug-%Y%m%d-%H%M%S-%f"))
 
-    def _submit(self) -> None:
-        order_id = self.order_id.text().strip()
-        if not order_id or not all(c.isalnum() or c in "_-" for c in order_id):
-            self._append("订单号只能使用字母、数字、下划线和连字符。")
-            return
-        quantities = {sku: spin.value() for sku, spin in self.quantity_spins.items()}
-        order = Order(
-            order_id,
+    def _current_order(self) -> Order:
+        return Order(
+            self.order_id.text().strip(),
             "A",
             tuple(
-                BusinessOrderLine(sku, quantity)
-                for sku, quantity in quantities.items()
-                if quantity
+                BusinessOrderLine(sku, spin.value())
+                for sku, spin in self.quantity_spins.items()
+                if spin.value()
             ),
         )
+
+    def _set_form_enabled(self, enabled: bool) -> None:
+        self.order_id.setEnabled(enabled)
+        self.prepare.setEnabled(enabled)
+        for spin in self.quantity_spins.values():
+            spin.setEnabled(enabled)
+
+    def _refresh_order_preview(self, _=None) -> None:
+        if self._order_active:
+            return
+        order = self._current_order()
+        usage = capacity_usage(order, self.config)
+        self.stage.setText("尚未提交")
+        self.progress.setMaximum(100)
+        self.progress.setValue(0)
+        if not order.lines:
+            detail = "至少选择一件商品。"
+        elif usage.bins_needed > usage.bins_available:
+            detail = (
+                f"需要 {usage.bins_needed} 个箱，只有 {usage.bins_available} 个；"
+                f"每箱上限 {usage.items_per_bin} 件，四种商品按件数同等计算。"
+            )
+        else:
+            try:
+                validate_order(order, self.config)
+            except ValueError as exc:
+                detail = str(exc)
+            else:
+                detail = ""
+        if detail:
+            self.capacity_status.setText(
+                f"不可提交 · 已选 {usage.items_needed} 件。{detail}"
+            )
+            self.capacity_status.setStyleSheet("color: #fca5a5;")
+            self.bin_preview.setText("请调整数量后查看分箱方案。")
+            self.submit_button.setEnabled(False)
+            self.status.setText("订单配置无效")
+            return
+        self.capacity_status.setText(
+            f"可提交 · 已选 {usage.items_needed} 件，逐件自动上料；"
+            f"分配 {usage.bins_needed}/{usage.bins_available} 个箱；"
+            f"每箱最多 {usage.items_per_bin} 件，不区分商品种类。"
+        )
+        self.capacity_status.setStyleSheet("color: #86efac;")
+        bins = [[] for _ in range(usage.bins_available)]
+        labels = {"corn": "玉米", "carrot": "胡萝卜", "apple": "苹果", "tomato": "番茄"}
+        for placement in plan_placements(order, self.config):
+            bins[placement.bin_index].append(labels[placement.sku])
+        self.bin_preview.setText(
+            "  ·  ".join(
+                f"A{index + 1}：{'、'.join(items) if items else '空'}"
+                for index, items in enumerate(bins)
+            )
+        )
+        self.submit_button.setEnabled(True)
+        self.status.setText("待提交")
+
+    def _submit(self) -> None:
+        order = self._current_order()
         try:
             validate_order(order, self.config)
         except ValueError as exc:
-            self._append(f"订单不符合箱体容量：{exc}")
+            self._append(f"订单不可提交：{exc}")
+            self._refresh_order_preview()
             return
+        quantities = {line.sku: line.quantity for line in order.lines}
+        self._order_active = True
+        self._active_order_id = order.order_id
+        self._set_form_enabled(False)
         self.progress.setValue(0)
         self.status.setText("提交中")
+        self.stage.setText("等待订单服务确认")
         self.submit_button.setEnabled(False)
-        self.worker.submit(order_id, quantities, self.prepare.isChecked())
+        self.worker.submit(order.order_id, quantities, self.prepare.isChecked())
 
     def _set_connected(self, online: bool) -> None:
         self.connection.setText("● 订单服务在线" if online else "● 订单服务离线")
@@ -315,10 +395,14 @@ class DebugPanel(QWidget):
         )
 
     def _set_accepted(self, accepted: bool) -> None:
-        self.submit_button.setEnabled(not accepted)
         self.cancel_button.setEnabled(accepted)
-        self.status.setText("执行中" if accepted else "等待订单")
-        if not accepted:
+        if accepted:
+            self.status.setText("执行中")
+        else:
+            self._order_active = False
+            self._set_form_enabled(True)
+            self._refresh_order_preview()
+            self.status.setText("未被接收")
             self.stage.setText("订单未被接收；请查看下方提示")
 
     def _on_feedback(self, stage: str, completed: int, total: int, detail: str) -> None:
@@ -336,15 +420,18 @@ class DebugPanel(QWidget):
     def _on_result(
         self, status: str, completed: int, requested: int, error: str, report: str
     ) -> None:
-        self.status.setText(status)
-        self.stage.setText(f"结果：{status}，完成 {completed}/{requested}")
+        self.last_result.setText(
+            f"上一单 {self._active_order_id}：{status}，完成 {completed}/{requested}"
+        )
         self._append(f"最终结果：{status} · {completed}/{requested}")
         if error:
             self._append(f"原因：{error}")
         self._append(f"报告：{report}")
-        self.submit_button.setEnabled(True)
+        self._order_active = False
+        self._set_form_enabled(True)
         self.cancel_button.setEnabled(False)
         self._new_id()
+        self._refresh_order_preview()
 
     def _append(self, message: str) -> None:
         self.log.appendPlainText(message)

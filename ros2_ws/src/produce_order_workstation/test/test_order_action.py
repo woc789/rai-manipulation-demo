@@ -11,6 +11,7 @@ from produce_order_workstation.order import (
     Order,
     OrderError,
     OrderLine,
+    capacity_usage,
     plan_placements,
     validate_order,
 )
@@ -33,44 +34,55 @@ def test_demo_scene_bins_match_order_slots():
         assert [translation["x"], translation["y"]] == slot
 
 
-def test_scene_spawns_exactly_the_ordered_stock():
+def test_scene_starts_with_only_bins_and_feeds_one_product(monkeypatch):
+    monkeypatch.setattr("produce_order_workstation.runtime.time.sleep", lambda _: None)
     workstation = Workstation(MagicMock(), CONFIG)
-    order = Order(
-        "four-items",
-        "A",
-        (OrderLine("corn", 2), OrderLine("apple", 1), OrderLine("tomato", 1)),
-    )
-    scene = workstation.build_scene(PACKAGE / "config/demo_scene.yaml", order)
+    scene = workstation.build_scene(PACKAGE / "config/demo_scene.yaml")
     products = [entity for entity in scene.entities if entity.prefab_name != "toy_box"]
-    assert [entity.name for entity in products] == [
-        "order_corn_1",
-        "order_corn_2",
-        "order_apple_1",
-        "order_tomato_1",
-    ]
-    assert [entity.prefab_name for entity in products] == [
-        "corn", "corn", "apple", "tomato"
-    ]
-    assert [(item.pose.pose.position.x, item.pose.pose.position.y) for item in products] == [
-        tuple(position) for position in CONFIG["stock"]["positions"][:4]
-    ]
+    assert products == []
+    workstation._scene_bridge = MagicMock()
+    workstation._scene_prepared = True
+    workstation.spawn_product("corn", 2)
+    entity = workstation._scene_bridge._spawn_entity.call_args.args[0]
+    assert entity.name == "order_corn_2"
+    assert entity.prefab_name == "corn"
+    assert (entity.pose.pose.position.x, entity.pose.pose.position.y) == tuple(
+        CONFIG["stock"]["feed_position"]
+    )
 
 
-def test_two_small_items_can_share_each_bin():
+def test_four_items_can_share_each_bin():
     order = Order("eight-small", "A", (OrderLine("apple", 4), OrderLine("tomato", 4)))
     placements = plan_placements(order, CONFIG)
-    assert [item.bin_index for item in placements] == [0, 1, 2, 3, 0, 1, 2, 3]
-    assert [item.offset_y for item in placements] == [-0.04] * 4 + [0.04] * 4
+    assert [item.bin_index for item in placements] == [0, 1, 0, 1, 0, 1, 0, 1]
+    assert [(item.offset_x, item.offset_y) for item in placements[::2]] == [
+        (-0.03, -0.04),
+        (-0.03, 0.04),
+        (0.03, -0.04),
+        (0.03, 0.04),
+    ]
 
 
-def test_large_items_reserve_whole_bins_before_small_items():
-    order = Order("mixed-six", "A", (OrderLine("apple", 4), OrderLine("corn", 2)))
+def test_six_mixed_items_have_no_arbitrary_sku_weight():
+    order = Order(
+        "mixed-six",
+        "A",
+        (
+            OrderLine("corn", 2),
+            OrderLine("carrot", 2),
+            OrderLine("apple", 1),
+            OrderLine("tomato", 1),
+        ),
+    )
     placements = plan_placements(order, CONFIG)
-    assert [item.bin_index for item in placements] == [2, 3, 2, 3, 0, 1]
-    assert [item.offset_y for item in placements] == [-0.04, -0.04, 0.04, 0.04, 0, 0]
+    assert capacity_usage(order, CONFIG).bins_needed == 2
+    assert [item.bin_index for item in placements] == [0, 1, 0, 1, 0, 1]
+    assert sorted({item.sku for item in placements}) == [
+        "apple", "carrot", "corn", "tomato"
+    ]
 
-    with pytest.raises(ValueError, match="capacity units"):
-        validate_order(Order("too-many", "A", (OrderLine("corn", 5),)), CONFIG)
+    with pytest.raises(ValueError, match="needs 5 bins"):
+        validate_order(Order("too-many-bins", "A", (OrderLine("corn", 17),)), CONFIG)
 
 
 def test_action_goal_uses_same_validation_as_yaml_order():
@@ -159,6 +171,7 @@ def test_bin_release_retracts_before_verification(monkeypatch):
     monkeypatch.setattr("produce_order_workstation.runtime.time.sleep", lambda _: None)
     workstation = Workstation(MagicMock(), CONFIG)
     workstation._scene_bridge = MagicMock()
+    workstation._scene_prepared = True
     slot = tuple(CONFIG["zones"]["A"]["slots"][0])
     source = (0.5, 0.4, 0.03)
     workstation.slot_bin_position = MagicMock(return_value=slot)
@@ -167,6 +180,7 @@ def test_bin_release_retracts_before_verification(monkeypatch):
         return_value=[(slot[0], slot[1], source[2])]
     )
     workstation.move = MagicMock()
+    workstation.spawn_product = MagicMock()
 
     result = workstation.run(Order("bin-order", "A", (OrderLine("corn", 1),)))
 
@@ -187,3 +201,32 @@ def test_bin_release_retracts_before_verification(monkeypatch):
     assert [event["stage"] for event in result["events"]].index(
         "RETRACTING"
     ) < [event["stage"] for event in result["events"]].index("VERIFYING")
+
+
+def test_final_audit_catches_item_displaced_by_later_placement(monkeypatch):
+    monkeypatch.setattr("produce_order_workstation.runtime.time.sleep", lambda _: None)
+    workstation = Workstation(MagicMock(), CONFIG)
+    workstation._scene_bridge = MagicMock()
+    workstation._scene_prepared = True
+    slot = tuple(CONFIG["zones"]["A"]["slots"][0])
+    workstation.slot_bin_position = MagicMock(return_value=slot)
+    source = (0.32, -0.07, 0.03)
+    workstation.locate_source = MagicMock(
+        side_effect=[(source, object()), (source, object())]
+    )
+    workstation.observe_after_place = MagicMock(
+        side_effect=[
+            [(slot[0], slot[1], 0.05)],
+            [(slot[0], slot[1], 0.05)],
+            [(slot[0] + 0.20, slot[1], 0.05)],
+        ]
+    )
+    workstation.move = MagicMock()
+    workstation.spawn_product = MagicMock()
+
+    result = workstation.run(Order("displaced", "A", (OrderLine("apple", 2),)))
+
+    assert result["status"] == "FAILED"
+    assert result["completed"] == 2
+    assert "Final audit found apple outside bin A1" in result["error"]
+    assert "FINAL_AUDIT" in [event["stage"] for event in result["events"]]
