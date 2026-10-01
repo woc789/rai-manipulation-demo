@@ -25,6 +25,13 @@ class PerceptionMismatch(OrderError):
     """A visual candidate failed the simulator safety interlock before motion."""
 
 
+def readable_error(error: str) -> str:
+    """Translate a known API failure without hiding the report's original error."""
+    if "Arrearage" in error or "overdue-payment" in error:
+        return "百炼 API 账户欠费或额度不可用；请检查百炼账户。是否需要重置场景请看工作台状态。"
+    return error
+
+
 @dataclass(frozen=True)
 class OrderLine:
     sku: str

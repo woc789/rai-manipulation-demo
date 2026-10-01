@@ -52,6 +52,7 @@ class Workstation:
         self._completed_by_sku: dict[str, int] = {}
         self._visual_candidates: dict[str, tuple[str, tuple[float, float, float]]] = {}
         self._rejected_visual_positions: dict[str, list[tuple[float, float, float]]] = {}
+        self.motion_attempted = False
         self.event_sink = event_sink
         self.cancel_requested = cancel_requested or (lambda: False)
 
@@ -146,6 +147,7 @@ class Workstation:
         self._completed_by_sku = {}
         self._visual_candidates = {}
         self._rejected_visual_positions = {}
+        self.motion_attempted = False
         zone = self.config["zones"]["A"]
         inventory = {sku: 0 for sku in self.config["aliases"]}
         for entity, _ in self._source_entities(zone).values():
@@ -166,6 +168,7 @@ class Workstation:
         self._completed_by_sku = {line.sku: 0 for line in order.lines}
         self._visual_candidates = {}
         self._rejected_visual_positions = {}
+        self.motion_attempted = False
 
     def slot_bin_position(self, zone: dict, index: int, slot: tuple) -> tuple:
         """Confirm that a visible receiving bin actually occupies this slot."""
@@ -367,6 +370,7 @@ class Workstation:
             order.order_id, "GRASPING", sku=sku, detection_id=detection_id,
             source=source, position_source="rgbd_perception",
         )
+        self.motion_attempted = True
         self.move(source, grip="grab")
         self.event(
             order.order_id, "PLACING", sku=sku, detection_id=detection_id,

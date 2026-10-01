@@ -10,8 +10,8 @@ import yaml
 
 from produce_order_interfaces.action import ExecuteOrder
 from produce_order_interfaces.msg import OrderLine as OrderLineMsg
-from produce_order_workstation.order import Order, OrderError, OrderLine, PerceptionMismatch, plan_placements, validate_order
-from produce_order_workstation.order_server import order_from_goal
+from produce_order_workstation.order import Order, OrderError, OrderLine, PerceptionMismatch, plan_placements, readable_error, validate_order
+from produce_order_workstation.order_server import order_from_goal, state_after_order
 from produce_order_workstation.runtime import Workstation
 
 
@@ -57,6 +57,17 @@ def test_action_goal_uses_shared_order_validation():
     order = order_from_goal(goal)
     validate_order(order, CONFIG)
     assert order == Order("action-001", "A", (OrderLine("corn", 1),))
+
+
+def test_failed_order_without_motion_is_retryable_but_motion_requires_recovery():
+    assert state_after_order("FAILED", False)[::2] == ("READY", True)
+    assert state_after_order("CANCELLED", False)[::2] == ("READY", True)
+    assert state_after_order("FAILED", True)[::2] == ("RECOVERY_REQUIRED", False)
+    assert state_after_order("COMPLETED", True)[::2] == ("REPLENISHING", False)
+
+
+def test_arrearage_is_presented_as_actionable_error():
+    assert "百炼 API" in readable_error("Error code 400: Arrearage")
 
 
 def test_order_start_resets_stale_visual_candidates():
@@ -137,6 +148,7 @@ def test_agent_chosen_entity_runs_motion_and_audit(monkeypatch):
     station.move = MagicMock()
     order = Order("motion", "A", (OrderLine("corn", 1),))
     assert station.pick_and_place(order, "visual_corn_1")["bin"] == "A1"
+    assert station.motion_attempted is True
     assert station.move.call_args_list == [
         call(source, grip="grab"),
         call((*slot, source[2]), grip="release", target_z=CONFIG["motion"]["bin_release_z_m"]),
@@ -162,6 +174,7 @@ def test_misclassified_visual_candidate_cannot_move_robot():
             Order("false-label", "A", (OrderLine("apple", 1),)), "visual_apple_1"
         )
     station.move.assert_not_called()
+    assert station.motion_attempted is False
     assert station._rejected_visual_positions["apple"] == [point]
     result = station.get_object_positions(
         Order("false-label", "A", (OrderLine("apple", 1),)), "apple"

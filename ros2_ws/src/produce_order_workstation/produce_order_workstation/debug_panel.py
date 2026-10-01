@@ -26,6 +26,9 @@ from PyQt5.QtWidgets import (
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile
+from std_msgs.msg import String
+from std_srvs.srv import Trigger
 
 from produce_order_interfaces.action import ExecuteOrder
 from produce_order_interfaces.msg import OrderLine
@@ -36,6 +39,7 @@ from .order import (
     OrderLine as BusinessOrderLine,
     capacity_usage,
     plan_placements,
+    readable_error,
     validate_order,
 )
 
@@ -48,6 +52,7 @@ class RosWorker(QThread):
     feedback = pyqtSignal(str, int, int, str)
     finished = pyqtSignal(str, int, int, str, str)
     notice = pyqtSignal(str)
+    workcell_status = pyqtSignal(str, str, bool, bool)
 
     def __init__(self):
         super().__init__()
@@ -62,6 +67,9 @@ class RosWorker(QThread):
     def cancel(self) -> None:
         self._commands.put(("cancel",))
 
+    def recover(self) -> None:
+        self._commands.put(("recover",))
+
     def stop(self) -> None:
         self._commands.put(("stop",))
 
@@ -69,6 +77,11 @@ class RosWorker(QThread):
         rclpy.init(args=None)
         node = Node("produce_order_debug_panel")
         client = ActionClient(node, ExecuteOrder, "/produce_orders/execute")
+        recovery = node.create_client(Trigger, "/produce_orders/recover")
+        node.create_subscription(
+            String, "/produce_orders/workcell_status", self._on_workcell_status,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
+        )
         running = True
         last_check = 0.0
         try:
@@ -83,6 +96,8 @@ class RosWorker(QThread):
                             self._send(client, command)
                         elif command[0] == "cancel":
                             self._cancel()
+                        elif command[0] == "recover":
+                            self._recover(recovery)
                 except Empty:
                     pass
                 if not running:
@@ -97,6 +112,7 @@ class RosWorker(QThread):
                     last_check = now
         finally:
             client.destroy()
+            node.destroy_client(recovery)
             node.destroy_node()
             rclpy.shutdown()
 
@@ -137,8 +153,8 @@ class RosWorker(QThread):
                     )
                 else:
                     self.notice.emit(
-                        "订单被拒绝：库存可能正在初始化/补货，或工作台需要重启；"
-                        "请看订单服务终端日志后重试。"
+                        "订单未被接收：请查看上方工作台状态。若正在准备库存，"
+                        "等待就绪；若需要恢复，点击“恢复工作台”。"
                     )
                 self.accepted.emit(False)
                 return
@@ -178,6 +194,28 @@ class RosWorker(QThread):
         self._active_goal.cancel_goal_async()
         self.notice.emit("已请求取消；正在执行的抓放会先到安全检查点。")
 
+    def _on_workcell_status(self, message: String) -> None:
+        try:
+            status = json.loads(message.data)
+        except (TypeError, ValueError):
+            return
+        self.workcell_status.emit(
+            status.get("state", "UNKNOWN"), status.get("reason", ""),
+            bool(status.get("can_submit")), bool(status.get("can_recover")),
+        )
+
+    def _recover(self, client) -> None:
+        if not client.service_is_ready():
+            self.notice.emit("恢复服务尚未上线；请检查订单服务是否运行。")
+            return
+        self.notice.emit("已请求恢复工作台，等待服务确认。")
+        client.call_async(Trigger.Request()).add_done_callback(
+            lambda future: self.notice.emit(
+                future.result().message if future.exception() is None
+                else f"恢复请求失败：{future.exception()}"
+            )
+        )
+
 
 class DebugPanel(QWidget):
     def __init__(self):
@@ -191,6 +229,10 @@ class DebugPanel(QWidget):
         self.config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         self._order_active = False
         self._active_order_id = ""
+        self._online = False
+        self._workcell_can_submit = False
+        self._workcell_can_recover = False
+        self._has_previous_attempt = False
         self.worker = RosWorker()
         self._build_ui()
         self.order_id.textChanged.connect(self._refresh_order_preview)
@@ -202,6 +244,7 @@ class DebugPanel(QWidget):
         self.worker.feedback.connect(self._on_feedback)
         self.worker.finished.connect(self._on_result)
         self.worker.notice.connect(self._append)
+        self.worker.workcell_status.connect(self._set_workcell_status)
         self.worker.start()
 
     def _build_ui(self) -> None:
@@ -221,6 +264,9 @@ class DebugPanel(QWidget):
         top.addStretch()
         top.addWidget(self.status)
         root.addLayout(top)
+        self.workcell_state = QLabel("工作台状态：等待服务消息")
+        self.workcell_state.setWordWrap(True)
+        root.addWidget(self.workcell_state)
 
         order_box = QGroupBox("① 输入订单")
         form = QFormLayout(order_box)
@@ -265,6 +311,18 @@ class DebugPanel(QWidget):
         buttons.addWidget(self.submit_button)
         buttons.addWidget(self.cancel_button)
         form.addRow(buttons)
+        recovery_buttons = QHBoxLayout()
+        self.retry_button = QPushButton("重新提交本单")
+        self.retry_button.setToolTip("保持当前商品数量，使用新的订单号重新提交")
+        self.retry_button.clicked.connect(self._retry)
+        self.retry_button.setEnabled(False)
+        self.recover_button = QPushButton("恢复工作台（重置场景）")
+        self.recover_button.setToolTip("清理并重建仿真物品和收货箱；不会重启 O3DE 进程")
+        self.recover_button.clicked.connect(self._recover)
+        self.recover_button.setEnabled(False)
+        recovery_buttons.addWidget(self.retry_button)
+        recovery_buttons.addWidget(self.recover_button)
+        form.addRow("故障处理", recovery_buttons)
         root.addWidget(order_box)
 
         progress_box = QGroupBox("② 执行状态")
@@ -277,6 +335,10 @@ class DebugPanel(QWidget):
         self.last_result = QLabel("上一单：暂无")
         self.last_result.setWordWrap(True)
         progress_layout.addWidget(self.last_result)
+        self.failure_reason = QLabel("")
+        self.failure_reason.setWordWrap(True)
+        self.failure_reason.setStyleSheet("color: #fca5a5;")
+        progress_layout.addWidget(self.failure_reason)
         root.addWidget(progress_box)
 
         log_box = QGroupBox("③ 实时事件与输出")
@@ -350,6 +412,7 @@ class DebugPanel(QWidget):
             self.capacity_status.setStyleSheet("color: #fca5a5;")
             self.bin_preview.setText("请调整数量后查看分箱方案。")
             self.submit_button.setEnabled(False)
+            self.retry_button.setEnabled(False)
             self.status.setText("订单配置无效")
             return
         self.capacity_status.setText(
@@ -369,7 +432,13 @@ class DebugPanel(QWidget):
                 for sku, index in sorted(sku_bins.items(), key=lambda item: item[1])
             )
         )
-        self.submit_button.setEnabled(True)
+        self.submit_button.setEnabled(
+            self._online and self._workcell_can_submit and not self._order_active
+        )
+        self.retry_button.setEnabled(
+            self._has_previous_attempt and self._online
+            and self._workcell_can_submit and not self._order_active
+        )
         self.status.setText("待提交")
 
     def _submit(self) -> None:
@@ -385,16 +454,37 @@ class DebugPanel(QWidget):
         self._active_order_id = order.order_id
         self._set_form_enabled(False)
         self.progress.setValue(0)
+        self.failure_reason.setText("")
         self.status.setText("提交中")
         self.stage.setText("等待订单服务确认")
         self.submit_button.setEnabled(False)
+        self.retry_button.setEnabled(False)
         self.worker.submit(order.order_id, quantities, True)
 
+    def _retry(self) -> None:
+        self._new_id()
+        self._submit()
+
+    def _recover(self) -> None:
+        if self._order_active or not self._workcell_can_recover:
+            return
+        self.recover_button.setEnabled(False)
+        self.worker.recover()
+
     def _set_connected(self, online: bool) -> None:
+        self._online = online
         self.connection.setText("● 订单服务在线" if online else "● 订单服务离线")
         self.connection.setStyleSheet(
             "color: #34d399;" if online else "color: #fbbf24;"
         )
+        self._refresh_order_preview()
+
+    def _set_workcell_status(self, state: str, reason: str, can_submit: bool, can_recover: bool) -> None:
+        self._workcell_can_submit = can_submit
+        self._workcell_can_recover = can_recover
+        self.workcell_state.setText(f"工作台状态：{state} · {reason}")
+        self.recover_button.setEnabled(can_recover and not self._order_active)
+        self._refresh_order_preview()
 
     def _set_accepted(self, accepted: bool) -> None:
         self.cancel_button.setEnabled(accepted)
@@ -402,6 +492,7 @@ class DebugPanel(QWidget):
             self.status.setText("执行中")
         else:
             self._order_active = False
+            self._has_previous_attempt = True
             self._set_form_enabled(True)
             self._refresh_order_preview()
             self.status.setText("未被接收")
@@ -435,15 +526,18 @@ class DebugPanel(QWidget):
         self.last_result.setText(
             f"上一单 {self._active_order_id}：{status}，完成 {completed}/{requested}"
         )
+        self.failure_reason.setText(readable_error(error) if error else "")
         self._append(f"最终结果：{status} · {completed}/{requested}")
         if error:
-            self._append(f"原因：{error}")
+            self._append(f"原因：{readable_error(error)}")
         self._append(f"报告：{report}")
         self._order_active = False
+        self._has_previous_attempt = True
         self._set_form_enabled(True)
         self.cancel_button.setEnabled(False)
         self._new_id()
         self._refresh_order_preview()
+        self.recover_button.setEnabled(self._workcell_can_recover)
 
     def _append(self, message: str) -> None:
         self.log.appendPlainText(message)

@@ -17,7 +17,7 @@ one-by-one in response to order lines.
 | `agent.py` | Bounded OpenAI-compatible tool-calling loop; goal prompt and three tool schemas. |
 | `runtime.py` | RGB-D perception adapter, visual-candidate registry, validated pick/place tool, ROS motion service and final audit. |
 | `order_server.py` | Persistent ROS Action server, one order at a time, cancellation and JSON reports. |
-| `debug_panel.py` | Temporary PyQt debug UI: enter desired counts and watch Agent calls and ROS feedback. |
+| `debug_panel.py` | Temporary PyQt debug UI: enter counts, watch Agent calls and ROS feedback, retry or recover the workcell. |
 
 ```text
 Order goal (SKU quantities)
@@ -99,9 +99,27 @@ The UI therefore permits 0–4 per SKU. The Action goal must have
 `prepare_scene=true` (retained as a compatibility flag; it now means the
 preloaded workcell is required). After a verified order the server
 replenishes the table asynchronously before accepting another order. A failed
-order does not auto-reset the uncertain physical state; restart the full launch
-before trying again. The report is written under
+order with attempted arm motion requires explicit scene recovery before retry.
+The report is written under
 `~/.local/share/produce_order_workstation/reports/<order_id>.json`.
+
+The panel now displays the server's workcell state (`INITIALIZING`, `READY`,
+`RUNNING`, `REPLENISHING`, `RECOVERING`, `RECOVERY_REQUIRED`). Submit is enabled
+only when `READY`. **重新提交本单** keeps the quantities but generates a fresh order
+ID. **恢复工作台（重置场景）** calls `/produce_orders/recover`, which clears and
+recreates the simulator stock/bins; it does not restart the O3DE executable.
+It is disabled while an order or stock preparation is running. A failed or
+cancelled order with no attempted arm motion returns to `READY` automatically;
+after any attempted motion the server requires explicit scene recovery. A
+completed order replenishes automatically. If O3DE or its ROS services have
+crashed, restart the full launch from the terminal; scene recovery cannot
+restart a dead simulator process.
+
+The screenshot from 2026-10-01 corresponded to a Bailian `Arrearage` API
+response. That happened before any arm motion, so the new server stays ready
+for another order, but retrying cannot succeed until the API account issue is
+resolved. The panel shows this reason directly instead of a generic inventory
+message; the original error remains in the JSON report.
 
 To check the event stream:
 

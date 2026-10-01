@@ -12,9 +12,12 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile
 from rclpy.utilities import remove_ros_args
 from rai.communication.ros2.connectors import ROS2Connector
 import yaml
+from std_msgs.msg import String
+from std_srvs.srv import Trigger
 
 from produce_order_interfaces.action import ExecuteOrder
 
@@ -30,6 +33,19 @@ def order_from_goal(goal: ExecuteOrder.Goal) -> Order:
     )
 
 
+def state_after_order(status: str, motion_attempted: bool) -> tuple[str, str, bool]:
+    """Only an untouched scene can immediately accept a new order."""
+    if status == "COMPLETED":
+        return "REPLENISHING", "上一单已完成，正在补齐桌面库存", False
+    if motion_attempted:
+        return (
+            "RECOVERY_REQUIRED",
+            "订单中尝试过机械臂动作，现场状态可能改变；请点击“恢复工作台”重置场景",
+            False,
+        )
+    return "READY", "订单在机械臂动作前结束，库存未改变，可以重新提交", True
+
+
 class OrderActionServer(Node):
     """Accept one order at a time; publish progress and retain a JSON report."""
 
@@ -40,6 +56,17 @@ class OrderActionServer(Node):
         self._lock = Lock()
         self._busy = False
         self._scene_ready = False
+        self._state = "INITIALIZING"
+        self._state_reason = "正在启动感知服务并准备桌面库存"
+        self._status_publisher = self.create_publisher(
+            String, "/produce_orders/workcell_status",
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
+        )
+        self._recovery_service = self.create_service(
+            Trigger, "/produce_orders/recover", self.recover_callback,
+            callback_group=ReentrantCallbackGroup(),
+        )
+        self._status_timer = self.create_timer(1.0, self.publish_status)
         self.connector = ROS2Connector(
             "produce_order_runtime", executor_type="single_threaded"
         )
@@ -55,6 +82,25 @@ class OrderActionServer(Node):
         )
         Thread(target=self._prepare_initial_stock, daemon=True).start()
 
+    def publish_status(self) -> None:
+        with self._lock:
+            status = {
+                "state": self._state,
+                "reason": self._state_reason,
+                "can_submit": self._scene_ready and not self._busy,
+                "can_recover": not self._busy and self._state not in (
+                    "INITIALIZING", "REPLENISHING", "RECOVERING"
+                ),
+            }
+        self._status_publisher.publish(String(data=json.dumps(status, ensure_ascii=False)))
+
+    def _set_state(self, state: str, reason: str, *, ready: bool = False) -> None:
+        with self._lock:
+            self._state = state
+            self._state_reason = reason
+            self._scene_ready = ready
+        self.publish_status()
+
     def _prepare_initial_stock(self) -> None:
         """Make inventory visible before a customer submits an order."""
         try:
@@ -62,9 +108,9 @@ class OrderActionServer(Node):
             self.workstation.prepare_scene(self.scene_path)
         except Exception as exc:
             self.get_logger().error(f"Could not preload mixed inventory: {exc}")
+            self._set_state("RECOVERY_REQUIRED", f"库存初始化失败：{exc}")
             return
-        with self._lock:
-            self._scene_ready = True
+        self._set_state("READY", "混合库存已就绪，可以提交订单", ready=True)
         self.get_logger().info("Mixed table inventory is ready: four of each SKU")
 
     def _replenish_after_order(self) -> None:
@@ -73,10 +119,40 @@ class OrderActionServer(Node):
             self.workstation.prepare_scene(self.scene_path)
         except Exception as exc:
             self.get_logger().error(f"Could not replenish inventory: {exc}")
+            self._set_state("RECOVERY_REQUIRED", f"自动补货失败：{exc}")
             return
-        with self._lock:
-            self._scene_ready = True
+        self._set_state("READY", "库存已补齐，可以提交下一单", ready=True)
         self.get_logger().info("Inventory replenished for the next order")
+
+    def recover_callback(self, _request, response):
+        with self._lock:
+            if self._busy or self._state in ("INITIALIZING", "REPLENISHING", "RECOVERING"):
+                response.success = False
+                response.message = "工作台正在执行或准备中，暂不能重置场景"
+                return response
+            self._busy = True
+            self._scene_ready = False
+            self._state = "RECOVERING"
+            self._state_reason = "正在清理并重新生成库存与分箱"
+        self.publish_status()
+        Thread(target=self._recover_scene, daemon=True).start()
+        response.success = True
+        response.message = "已开始重置场景；等待状态变为 READY 后再提交订单"
+        return response
+
+    def _recover_scene(self) -> None:
+        try:
+            self.workstation.wait_until_ready(with_scene=True)
+            self.workstation.prepare_scene(self.scene_path)
+        except Exception as exc:
+            self.get_logger().error(f"Workcell recovery failed: {exc}")
+            self._set_state("RECOVERY_REQUIRED", f"场景恢复失败：{exc}")
+        else:
+            self._set_state("READY", "场景已重置，库存已就绪", ready=True)
+        finally:
+            with self._lock:
+                self._busy = False
+            self.publish_status()
 
     @staticmethod
     def report_path(order_id: str) -> Path:
@@ -106,6 +182,9 @@ class OrderActionServer(Node):
                 return GoalResponse.REJECT
             self._busy = True
             self._scene_ready = False
+            self._state = "RUNNING"
+            self._state_reason = f"正在执行订单 {goal.order_id}"
+        self.publish_status()
         return GoalResponse.ACCEPT
 
     def cancel_callback(self, goal_handle) -> CancelResponse:
@@ -174,6 +253,10 @@ class OrderActionServer(Node):
         finally:
             with self._lock:
                 self._busy = False
+            state, reason, ready = state_after_order(
+                result["status"], self.workstation.motion_attempted
+            )
+            self._set_state(state, reason, ready=ready)
             if result["status"] == "COMPLETED":
                 Thread(target=self._replenish_after_order, daemon=True).start()
 
