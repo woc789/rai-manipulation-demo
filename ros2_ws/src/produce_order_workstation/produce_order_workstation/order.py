@@ -1,7 +1,7 @@
 """Order rules independent of ROS and the simulator."""
 
 from dataclasses import dataclass
-from math import ceil, hypot, isfinite
+from math import hypot, isfinite
 from pathlib import Path
 import re
 
@@ -55,12 +55,12 @@ class CapacityUsage:
 
 
 def capacity_usage(order: Order, config: dict) -> CapacityUsage:
-    """Count pieces, not arbitrary SKU-specific space weights."""
+    """Each nonempty SKU uses its dedicated receiving bin."""
     zone = config["zones"][order.zone]
     capacity = zone["bin_capacity_items"]
     bins = len(zone["slots"])
     return CapacityUsage(
-        bins_needed=ceil(order.total_items / capacity),
+        bins_needed=len(order.lines),
         bins_available=bins,
         items_needed=order.total_items,
         items_per_bin=capacity,
@@ -110,37 +110,34 @@ def validate_order(order: Order, config: dict) -> None:
     capacity = zone["bin_capacity_items"]
     if type(capacity) is not int or capacity < 1 or capacity > 4:
         raise ValueError("Bin capacity must be between 1 and 4 items")
-    usage = capacity_usage(order, config)
-    if usage.bins_needed > usage.bins_available:
-        raise ValueError(
-            f"Order needs {usage.bins_needed} bins but zone {order.zone} "
-            f"has {usage.bins_available} ({usage.items_per_bin} items per bin)"
-        )
+    sku_bins = zone["sku_bins"]
+    if set(sku_bins) != set(config["aliases"]) or set(sku_bins.values()) != set(
+        range(len(zone["slots"]))
+    ):
+        raise ValueError("Each SKU must map to exactly one distinct receiving bin")
+    for line in order.lines:
+        if line.quantity > capacity:
+            raise ValueError(
+                f"Quantity for {line.sku} exceeds bin "
+                f"{order.zone}{sku_bins[line.sku] + 1} capacity {capacity}"
+            )
 
 
 def plan_placements(order: Order, config: dict) -> tuple[Placement, ...]:
-    """Balance the order across the fewest bins, using up to four drop points."""
+    """Put every SKU in its dedicated bin, using up to four drop points."""
     validate_order(order, config)
-    skus = [line.sku for line in order.lines for _ in range(line.quantity)]
-    bins_needed = capacity_usage(order, config).bins_needed
-    bin_items = [[] for _ in range(bins_needed)]
-    for item_index in range(len(skus)):
-        bin_items[item_index % bins_needed].append(item_index)
+    sku_bins = config["zones"][order.zone]["sku_bins"]
     offsets = {
         1: [(0.0, 0.0)],
         2: [(0.0, -0.04), (0.0, 0.04)],
         3: [(-0.03, -0.04), (-0.03, 0.04), (0.03, 0.0)],
         4: [(-0.03, -0.04), (-0.03, 0.04), (0.03, -0.04), (0.03, 0.04)],
     }
-    assignments: list[Placement | None] = [None] * len(skus)
-    for bin_index, item_indices in enumerate(bin_items):
-        for item_index, (offset_x, offset_y) in zip(
-            item_indices, offsets[len(item_indices)]
-        ):
-            assignments[item_index] = Placement(
-                skus[item_index], bin_index, offset_x, offset_y
-            )
-    return tuple(assignments)
+    return tuple(
+        Placement(line.sku, sku_bins[line.sku], offset_x, offset_y)
+        for line in order.lines
+        for offset_x, offset_y in offsets[line.quantity]
+    )
 
 
 def parse_centroids(result: str) -> list[tuple[float, float, float]]:

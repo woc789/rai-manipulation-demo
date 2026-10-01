@@ -28,6 +28,7 @@ def test_demo_scene_bins_match_order_slots():
     entities = {item["name"]: item for item in scene["entities"]}
     zone = CONFIG["zones"]["A"]
     assert len(zone["slots"]) == len(zone["slot_entities"]) == 4
+    assert zone["sku_bins"] == {"corn": 0, "carrot": 1, "apple": 2, "tomato": 3}
     for name, slot in zip(zone["slot_entities"], zone["slots"]):
         assert entities[name]["prefab_name"] == "toy_box"
         translation = entities[name]["pose"]["translation"]
@@ -54,8 +55,8 @@ def test_scene_starts_with_only_bins_and_feeds_one_product(monkeypatch):
 def test_four_items_can_share_each_bin():
     order = Order("eight-small", "A", (OrderLine("apple", 4), OrderLine("tomato", 4)))
     placements = plan_placements(order, CONFIG)
-    assert [item.bin_index for item in placements] == [0, 1, 0, 1, 0, 1, 0, 1]
-    assert [(item.offset_x, item.offset_y) for item in placements[::2]] == [
+    assert [item.bin_index for item in placements] == [2] * 4 + [3] * 4
+    assert [(item.offset_x, item.offset_y) for item in placements[:4]] == [
         (-0.03, -0.04),
         (-0.03, 0.04),
         (0.03, -0.04),
@@ -63,7 +64,7 @@ def test_four_items_can_share_each_bin():
     ]
 
 
-def test_six_mixed_items_have_no_arbitrary_sku_weight():
+def test_six_mixed_items_are_sorted_into_dedicated_bins():
     order = Order(
         "mixed-six",
         "A",
@@ -75,14 +76,19 @@ def test_six_mixed_items_have_no_arbitrary_sku_weight():
         ),
     )
     placements = plan_placements(order, CONFIG)
-    assert capacity_usage(order, CONFIG).bins_needed == 2
-    assert [item.bin_index for item in placements] == [0, 1, 0, 1, 0, 1]
+    assert capacity_usage(order, CONFIG).bins_needed == 4
+    assert [item.bin_index for item in placements] == [0, 0, 1, 1, 2, 3]
     assert sorted({item.sku for item in placements}) == [
         "apple", "carrot", "corn", "tomato"
     ]
 
-    with pytest.raises(ValueError, match="needs 5 bins"):
-        validate_order(Order("too-many-bins", "A", (OrderLine("corn", 17),)), CONFIG)
+    with pytest.raises(ValueError, match="corn exceeds bin A1 capacity 4"):
+        validate_order(Order("too-much-corn", "A", (OrderLine("corn", 5),)), CONFIG)
+
+    reordered = Order(
+        "reordered", "A", (OrderLine("tomato", 1), OrderLine("corn", 2))
+    )
+    assert [item.bin_index for item in plan_placements(reordered, CONFIG)] == [3, 0, 0]
 
 
 def test_action_goal_uses_same_validation_as_yaml_order():
@@ -208,7 +214,7 @@ def test_final_audit_catches_item_displaced_by_later_placement(monkeypatch):
     workstation = Workstation(MagicMock(), CONFIG)
     workstation._scene_bridge = MagicMock()
     workstation._scene_prepared = True
-    slot = tuple(CONFIG["zones"]["A"]["slots"][0])
+    slot = tuple(CONFIG["zones"]["A"]["slots"][2])
     workstation.slot_bin_position = MagicMock(return_value=slot)
     source = (0.32, -0.07, 0.03)
     workstation.locate_source = MagicMock(
@@ -228,5 +234,5 @@ def test_final_audit_catches_item_displaced_by_later_placement(monkeypatch):
 
     assert result["status"] == "FAILED"
     assert result["completed"] == 2
-    assert "Final audit found apple outside bin A1" in result["error"]
+    assert "Final audit found apple outside bin A3" in result["error"]
     assert "FINAL_AUDIT" in [event["stage"] for event in result["events"]]

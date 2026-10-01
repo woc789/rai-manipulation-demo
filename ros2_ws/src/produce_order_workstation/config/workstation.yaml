@@ -14,6 +14,11 @@ zones:
     tolerance_m: 0.07
     bin_half_extents_m: [0.08, 0.08]
     bin_capacity_items: 4
+    sku_bins:
+      corn: 0
+      carrot: 1
+      apple: 2
+      tomato: 3
     slots:
       - [0.50, -0.48]
       - [0.57, -0.16]

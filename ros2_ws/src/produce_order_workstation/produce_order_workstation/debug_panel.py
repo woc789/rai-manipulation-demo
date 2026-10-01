@@ -10,7 +10,6 @@ from ament_index_python.packages import get_package_share_directory
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication,
-    QCheckBox,
     QFormLayout,
     QGridLayout,
     QGroupBox,
@@ -223,6 +222,7 @@ class DebugPanel(QWidget):
         order_box = QGroupBox("① 输入订单")
         form = QFormLayout(order_box)
         self.order_id = QLineEdit()
+        self.order_id.setReadOnly(True)
         self._new_id()
         form.addRow("订单号", self.order_id)
         quantities = QGridLayout()
@@ -231,23 +231,21 @@ class DebugPanel(QWidget):
             (("corn", "玉米"), ("carrot", "胡萝卜"), ("apple", "苹果"), ("tomato", "番茄"))
         ):
             spin = QSpinBox()
-            spin.setRange(0, 16)
-            spin.setValue(1 if sku in ("corn", "carrot") else 0)
+            spin.setRange(0, self.config["zones"]["A"]["bin_capacity_items"])
             row, column = divmod(index, 2)
-            quantities.addWidget(QLabel(label), row, column * 2)
+            bin_id = self.config["zones"]["A"]["sku_bins"][sku] + 1
+            quantities.addWidget(QLabel(f"{label} → A{bin_id}"), row, column * 2)
             quantities.addWidget(spin, row, column * 2 + 1)
             self.quantity_spins[sku] = spin
         form.addRow("商品数量", quantities)
-        form.addRow("目标区域", QLabel("A 区 · A1–A4 四个橙色收货箱（从左到右）"))
+        form.addRow("订单方式", QLabel("自动生成订单号；只填写四类商品的数量（0 表示不需要）"))
         self.capacity_status = QLabel()
         self.capacity_status.setWordWrap(True)
         form.addRow("容量校验", self.capacity_status)
         self.bin_preview = QLabel()
         self.bin_preview.setWordWrap(True)
         form.addRow("分箱预览", self.bin_preview)
-        self.prepare = QCheckBox("自动准备示例场景（使用仿真实体 TF 核验）")
-        self.prepare.setChecked(True)
-        form.addRow("场景", self.prepare)
+        form.addRow("场景", QLabel("自动准备场景并逐件上料；四类商品固定分类装箱"))
         buttons = QHBoxLayout()
         self.submit_button = QPushButton("提交订单")
         self.submit_button.setObjectName("primary")
@@ -316,7 +314,6 @@ class DebugPanel(QWidget):
 
     def _set_form_enabled(self, enabled: bool) -> None:
         self.order_id.setEnabled(enabled)
-        self.prepare.setEnabled(enabled)
         for spin in self.quantity_spins.values():
             spin.setEnabled(enabled)
 
@@ -330,11 +327,6 @@ class DebugPanel(QWidget):
         self.progress.setValue(0)
         if not order.lines:
             detail = "至少选择一件商品。"
-        elif usage.bins_needed > usage.bins_available:
-            detail = (
-                f"需要 {usage.bins_needed} 个箱，只有 {usage.bins_available} 个；"
-                f"每箱上限 {usage.items_per_bin} 件，四种商品按件数同等计算。"
-            )
         else:
             try:
                 validate_order(order, self.config)
@@ -353,18 +345,19 @@ class DebugPanel(QWidget):
             return
         self.capacity_status.setText(
             f"可提交 · 已选 {usage.items_needed} 件，逐件自动上料；"
-            f"分配 {usage.bins_needed}/{usage.bins_available} 个箱；"
-            f"每箱最多 {usage.items_per_bin} 件，不区分商品种类。"
+            f"使用 {usage.bins_needed}/{usage.bins_available} 个分类箱；"
+            f"每类最多 {usage.items_per_bin} 件。"
         )
         self.capacity_status.setStyleSheet("color: #86efac;")
-        bins = [[] for _ in range(usage.bins_available)]
+        bins = [0 for _ in range(usage.bins_available)]
         labels = {"corn": "玉米", "carrot": "胡萝卜", "apple": "苹果", "tomato": "番茄"}
         for placement in plan_placements(order, self.config):
-            bins[placement.bin_index].append(labels[placement.sku])
+            bins[placement.bin_index] += 1
+        sku_bins = self.config["zones"]["A"]["sku_bins"]
         self.bin_preview.setText(
             "  ·  ".join(
-                f"A{index + 1}：{'、'.join(items) if items else '空'}"
-                for index, items in enumerate(bins)
+                f"A{index + 1} {labels[sku]} ×{bins[index]}"
+                for sku, index in sorted(sku_bins.items(), key=lambda item: item[1])
             )
         )
         self.submit_button.setEnabled(True)
@@ -386,7 +379,7 @@ class DebugPanel(QWidget):
         self.status.setText("提交中")
         self.stage.setText("等待订单服务确认")
         self.submit_button.setEnabled(False)
-        self.worker.submit(order.order_id, quantities, self.prepare.isChecked())
+        self.worker.submit(order.order_id, quantities, True)
 
     def _set_connected(self, online: bool) -> None:
         self.connection.setText("● 订单服务在线" if online else "● 订单服务离线")

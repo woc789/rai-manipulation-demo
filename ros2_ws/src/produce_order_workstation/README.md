@@ -109,10 +109,12 @@ the model loader, not ROS communication.
 
 The launch file now starts `/produce_orders/execute`, an Action server. Send a
 goal with an order ID, zone `A`, `OrderLine` entries for `corn`, `carrot`,
-`apple`, or `tomato`, and `prepare_scene=true`. The current demo limit is four
-pieces per box, independent of SKU, for up to 16 pieces across four boxes.
-The planner balances items over the fewest boxes needed and chooses one of four
-drop points in each box. Scene preparation spawns only the bins; each product
+`apple`, or `tomato`, and `prepare_scene=true`. Each SKU has one dedicated bin:
+corn → A1, carrot → A2, apple → A3, tomato → A4. An omitted SKU does not use
+its bin. The current demo limit is four pieces of each SKU, for up to 16 pieces
+across the four boxes. The planner chooses one of four drop points within the
+SKU's assigned bin, regardless of Action line order. Scene preparation spawns
+only the bins; each product
 is spawned at the feeder just before its grasp. The
 feedback fields are `stage`, `sku`,
 `completed`, `total`, and `detail_json`. The result fields are `status`,
@@ -133,9 +135,11 @@ ros2 run produce_order_workstation debug_panel
 No new packages or model downloads were needed for this phase. The panel is a
 learning/debugging surface, not the final business UI. It deliberately shows
 the order input, current stage, progress, event details, and report location;
-it does not claim Agent integration. Its form previews the planned contents of
-each box and disables submission when the count exceeds four per box across
-the four-box layout. The current order state and previous result are displayed
+it does not claim Agent integration. The panel generates the order ID and
+prepares the scene automatically; the user only fills four quantities (zero
+means that SKU is not ordered). It previews each fixed SKU-to-bin mapping and
+disables submission when a SKU exceeds its bin's four-piece limit. The current
+order state and previous result are displayed
 separately, so an invalid new input cannot appear to be a completed order.
 
 With `prepare_scene=true`, order execution uses named simulator entity TF to
@@ -156,14 +160,15 @@ scene. A completed or failed order still reserves its order ID in the report
 directory; the debug panel generates microsecond-resolution IDs to avoid an
 immediate retry accidentally reusing the same ID.
 
-Live checks on 2026-10-01 completed the user's six-piece mixed order (`6/6`,
-three items in each of two boxes) and an eight-apple order (`8/8`, four apples
-in each of two boxes). All eight apples remained inside the assigned bin
-footprints at the final check. Unit tests cover capacity allocation, sequential
-feeding, Action validation, cancellation before motion, and the
-release/retract sequence. Four of every SKU in one box has not been separately
-stress-tested; the item-count limit is a demo rule, not a measured industrial
-payload rating.
+Live checks on 2026-10-01 completed the fixed-classification order corn 2 →
+A1, carrot 2 → A2, apple 1 → A3, and tomato 1 → A4 (`6/6`), including the
+final audit. An earlier capacity stress test completed eight apples (`8/8`,
+four apples in each of two boxes), and all eight remained inside their bins at
+the final position check. Unit tests cover classification, capacity allocation,
+sequential feeding, Action validation, cancellation before motion, and the
+release/retract sequence. Four of every SKU in its respective bin has not been
+separately stress-tested; the item-count limit is a demo rule, not a measured
+industrial payload rating.
 
 ## Safety and current limitations
 
