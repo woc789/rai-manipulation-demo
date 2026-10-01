@@ -12,8 +12,8 @@ added above the same order boundary later.
 | Module | Responsibility |
 | --- | --- |
 | `config/demo_order.yaml` | One sample order: one corn and one carrot to zone A. |
-| `config/demo_scene.yaml` | Reproducible O3DE spawn positions; same coordinates as RAI's `1carrot_1corn.yaml`. |
-| `config/workstation.yaml` | Camera frames/topics, SKU aliases, reachable area, slots, tolerances, and motion limits. |
+| `config/demo_scene.yaml` | Reproducible O3DE spawn positions for four receiving bins; ordered products are spawned dynamically. |
+| `config/workstation.yaml` | Camera frames/topics, SKU aliases, reachable area, visible bin centers, tolerances, and motion limits. |
 | `order.py` | ROS-independent validation, centroid parsing, source selection, and placement checks. |
 | `runtime.py` | ROS 2 adapter: waits for interfaces, reads scene identity or perception, calls manipulation, emits events, runs the order state sequence. |
 | `cli.py` | Command-line entry, scene preparation, JSON report, exit status. |
@@ -26,8 +26,8 @@ added above the same order boundary later.
 Data path:
 
 ```text
-order YAML -> validate -> detect SKU -> select source -> grab -> place
-                                                    -> re-detect -> verify -> next item
+order YAML -> validate capacity -> assign bins -> spawn ordered stock
+           -> select source -> grab -> release above bin -> retract -> verify -> next item
                                       each transition -> /produce_orders/events
                                       final result    -> JSON report
 ```
@@ -44,6 +44,8 @@ The event topic is `std_msgs/msg/String` with one UTF-8 JSON object per
 message. Every object has `time_utc`, `order_id`, and `stage`; later fields
 depend on the stage. Useful stages are `DETECTING`, `GRASPING`, `PLACING`,
 `VERIFYING`, `ITEM_COMPLETED`, `ORDER_COMPLETED`, and `ORDER_FAILED`.
+Placement-related events also carry `slot_id` (`A1` through `A4`); `PLACING` and
+`VERIFYING` include the measured `bin_position` in `panda_link0`.
 
 ## Run in the existing RAI environment
 
@@ -73,8 +75,17 @@ ros2 run produce_order_workstation run_order --prepare-scene
 ros2 topic echo /produce_orders/events
 ```
 
-`--prepare-scene` spawns the two demo objects into the empty
-`RoboticManipulationBenchmark` level before the order starts. Do not run it
+`--prepare-scene` spawns four orange `toy_box` receiving bins and exactly the
+products requested by the order into the empty `RoboticManipulationBenchmark`
+level. A1–A4 are arranged left to right on the front of the table. Their
+centers in `panda_link0` are `(0.50, -0.48)`, `(0.57, -0.16)`,
+`(0.57, 0.16)`, and `(0.50, 0.48)`. These are physical bin centers, not
+invisible abstract slots. Scene setup checks that all bins exist at their
+configured positions; before and after
+each placement the active bin is checked again. Verification uses the named
+product entity relative to the observed bin center. The gripper releases above
+the box rim and retracts before verification; leaving it inside the box caused
+collisions in an earlier test. Do not run scene setup
 against a manually prepared scene unless you intend to add objects. The
 default report is at
 `~/.local/share/produce_order_workstation/reports/produce-demo-001.json`;
@@ -89,8 +100,14 @@ the model loader, not ROS communication.
 ## Phase 2: persistent orders and debug panel
 
 The launch file now starts `/produce_orders/execute`, an Action server. Send a
-goal with an order ID, zone `A`, one or two `OrderLine` entries (`corn` or
-`carrot`), and `prepare_scene=true`. The feedback fields are `stage`, `sku`,
+goal with an order ID, zone `A`, `OrderLine` entries for `corn`, `carrot`,
+`apple`, or `tomato`, and `prepare_scene=true`. Each box holds two capacity
+units: corn and carrot use two units (one per box); apple and tomato use one
+unit. Thus four large items or eight small items can fit, and mixed orders are
+validated by total capacity. Large items reserve whole boxes first; the other
+boxes are assigned to small items, up to two per box at separate drop points.
+The scene spawns one named product entity for every requested unit. The
+feedback fields are `stage`, `sku`,
 `completed`, `total`, and `detail_json`. The result fields are `status`,
 `completed`, `requested`, `error`, and `report_path`. The JSON event topic and
 report from phase 1 remain available. Goal validation is shared with YAML
@@ -109,7 +126,8 @@ ros2 run produce_order_workstation debug_panel
 No new packages or model downloads were needed for this phase. The panel is a
 learning/debugging surface, not the final business UI. It deliberately shows
 the order input, current stage, progress, event details, and report location;
-it does not claim Agent integration. Its form limits zone A to two items.
+it does not claim Agent integration. Its form uses the same capacity validation
+as Action/YAML orders, so quantity cannot exceed the physical four-box layout.
 
 With `prepare_scene=true`, order execution uses named simulator entity TF to
 check item identity. Therefore `workstation.launch.py` defaults to
@@ -124,11 +142,11 @@ interrupt a grasp or placement in flight. A cancellation result is
 or simulator exit is a failure, not a successful order. In particular, if O3DE
 closes, verify `/clock` and the `world`/`odom` TF before trying a new order.
 
-One live smoke test on 2026-10-01 completed a one-corn order with stages
-`STARTING` → `PREPARING_SCENE` → `DETECTING` → `GRASPING` → `PLACING` →
-`VERIFYING` → `ITEM_COMPLETED` → `ORDER_COMPLETED`; its report recorded
-`COMPLETED`, `1/1`. Unit tests cover shared Action validation and cancellation
-before motion alongside the phase-1 order checks.
+Live checks on 2026-10-01 completed a four-SKU order (`4/4`) and an eight-apple
+order (`8/8`, two apples in each box). The latter exercised the second drop
+point in every box and finished with the gripper clear of the box. Unit tests
+cover capacity allocation, dynamic stock generation, Action validation,
+cancellation before motion, and the release/retract sequence.
 
 ## Safety and current limitations
 

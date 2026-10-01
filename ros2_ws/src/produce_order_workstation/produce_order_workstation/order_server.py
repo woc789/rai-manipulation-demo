@@ -111,7 +111,7 @@ class OrderActionServer(Node):
             self.workstation.check_cancel()
             if goal_handle.request.prepare_scene:
                 self.workstation.event(order.order_id, "PREPARING_SCENE")
-                self.workstation.prepare_scene(self.scene_path)
+                self.workstation.prepare_scene(self.scene_path, order)
             self.workstation.check_cancel()
             result = self.workstation.run(order)
         except OrderCancelled as exc:

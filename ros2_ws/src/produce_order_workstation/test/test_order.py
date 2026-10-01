@@ -37,26 +37,27 @@ def test_duplicate_sku_is_rejected(tmp_path):
 
 
 def test_perception_result_is_parsed_and_destination_object_excluded():
+    slot_x, slot_y = CONFIG["zones"]["A"]["slots"][0]
+    source_x, source_y = CONFIG["stock"]["positions"][0]
     result = (
         "Centroids of detected corn cob in panda_link0 frame: "
-        "[Centroid(x=0.5000, y=0.4000, z=0.0500), "
-        "Centroid(x=0.4000, y=0.0200, z=0.0500)]."
+        f"[Centroid(x={source_x:.4f}, y={source_y:.4f}, z=0.0500), "
+        f"Centroid(x={slot_x:.4f}, y={slot_y:.4f}, z=0.0500)]."
     )
     points = parse_centroids(result)
     assert choose_source(points, CONFIG, CONFIG["zones"]["A"]) == (
-        0.5,
-        0.4,
-        0.05,
+        source_x, source_y, 0.05
     )
 
 
 def test_placement_requires_new_slot_occupancy_and_source_departure():
     source = (0.5, 0.4, 0.05)
-    slot = (0.4, 0.02)
-    assert verify_placement([(0.405, 0.025, 0.05)], source, slot, 0.07, 0.08)
+    slot = CONFIG["zones"]["A"]["slots"][0]
+    placed = (slot[0] + 0.005, slot[1] + 0.005, 0.05)
+    assert verify_placement([placed], source, slot, 0.07, 0.08)
     assert not verify_placement([source], source, slot, 0.07, 0.08)
     assert not verify_placement(
-        [source, (0.405, 0.025, 0.05)], source, slot, 0.07, 0.08
+        [source, placed], source, slot, 0.07, 0.08
     )
 
 

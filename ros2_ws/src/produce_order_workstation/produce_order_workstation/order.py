@@ -38,6 +38,13 @@ class Order:
         return sum(line.quantity for line in self.lines)
 
 
+@dataclass(frozen=True)
+class Placement:
+    sku: str
+    bin_index: int
+    offset_y: float
+
+
 def load_order(path: Path, config: dict) -> Order:
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
@@ -77,11 +84,45 @@ def validate_order(order: Order, config: dict) -> None:
         if type(line.quantity) is not int or line.quantity < 1:
             raise ValueError(f"Quantity for {line.sku} must be a positive integer")
         seen.add(line.sku)
-    slots = config["zones"][order.zone]["slots"]
-    if order.total_items > len(slots):
+    zone = config["zones"][order.zone]
+    slots = zone["slots"]
+    capacity = zone["bin_capacity_units"]
+    weights = zone["sku_space_units"]
+    if any(
+        line.sku not in weights or weights[line.sku] not in (1, capacity)
+        for line in order.lines
+    ):
+        raise ValueError("SKU capacity configuration is invalid")
+    required = sum(line.quantity * weights[line.sku] for line in order.lines)
+    available = len(slots) * capacity
+    if required > available:
         raise ValueError(
-            f"Order has {order.total_items} items but zone {order.zone} has {len(slots)} slots"
+            f"Order needs {required} capacity units but zone {order.zone} has {available}"
         )
+    if order.total_items > len(config["stock"]["positions"]):
+        raise ValueError("Order exceeds the number of available source positions")
+
+
+def plan_placements(order: Order, config: dict) -> tuple[Placement, ...]:
+    """Reserve whole bins for large produce; share each other bin between two small items."""
+    validate_order(order, config)
+    zone = config["zones"][order.zone]
+    skus = [line.sku for line in order.lines for _ in range(line.quantity)]
+    weights = zone["sku_space_units"]
+    capacity = zone["bin_capacity_units"]
+    large_indices = [i for i, sku in enumerate(skus) if weights[sku] == capacity]
+    small_indices = [i for i, sku in enumerate(skus) if weights[sku] == 1]
+    assignments: list[Placement | None] = [None] * len(skus)
+    for bin_index, item_index in enumerate(large_indices):
+        assignments[item_index] = Placement(skus[item_index], bin_index, 0.0)
+    free_bins = len(zone["slots"]) - len(large_indices)
+    for index, item_index in enumerate(small_indices):
+        bin_index = len(large_indices) + index % free_bins
+        second = index >= free_bins
+        pair_exists = index + free_bins < len(small_indices) or second
+        offset_y = (0.04 if second else -0.04) if pair_exists else 0.0
+        assignments[item_index] = Placement(skus[item_index], bin_index, offset_y)
+    return tuple(assignments)
 
 
 def parse_centroids(result: str) -> list[tuple[float, float, float]]:

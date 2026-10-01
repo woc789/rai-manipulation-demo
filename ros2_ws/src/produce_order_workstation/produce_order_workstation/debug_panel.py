@@ -2,9 +2,11 @@
 
 from datetime import datetime
 import json
+from pathlib import Path
 from queue import Empty, Queue
 import sys
 
+from ament_index_python.packages import get_package_share_directory
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication,
@@ -28,6 +30,9 @@ from rclpy.node import Node
 
 from produce_order_interfaces.action import ExecuteOrder
 from produce_order_interfaces.msg import OrderLine
+import yaml
+
+from .order import Order, OrderLine as BusinessOrderLine, validate_order
 
 
 class RosWorker(QThread):
@@ -45,8 +50,8 @@ class RosWorker(QThread):
         self._active_goal = None
         self._online = None
 
-    def submit(self, order_id: str, corn: int, carrot: int, prepare: bool) -> None:
-        self._commands.put(("submit", order_id, corn, carrot, prepare))
+    def submit(self, order_id: str, quantities: dict[str, int], prepare: bool) -> None:
+        self._commands.put(("submit", order_id, quantities, prepare))
 
     def cancel(self) -> None:
         self._commands.put(("cancel",))
@@ -90,7 +95,7 @@ class RosWorker(QThread):
             rclpy.shutdown()
 
     def _send(self, client: ActionClient, command: tuple) -> None:
-        _, order_id, corn, carrot, prepare = command
+        _, order_id, quantities, prepare = command
         if not client.server_is_ready():
             self.notice.emit("订单服务尚未上线；请先启动仿真与订单服务。")
             self.accepted.emit(False)
@@ -100,7 +105,7 @@ class RosWorker(QThread):
         goal.zone = "A"
         goal.prepare_scene = prepare
         goal.lines = []
-        for sku, quantity in (("corn", corn), ("carrot", carrot)):
+        for sku, quantity in quantities.items():
             if quantity:
                 line = OrderLine()
                 line.sku = sku
@@ -159,6 +164,11 @@ class DebugPanel(QWidget):
         super().__init__()
         self.setWindowTitle("生鲜拣选工作站 · 调试面板")
         self.resize(850, 620)
+        config_path = (
+            Path(get_package_share_directory("produce_order_workstation"))
+            / "config/workstation.yaml"
+        )
+        self.config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         self.worker = RosWorker()
         self._build_ui()
         self.worker.connected.connect(self._set_connected)
@@ -192,18 +202,20 @@ class DebugPanel(QWidget):
         self._new_id()
         form.addRow("订单号", self.order_id)
         quantities = QGridLayout()
-        self.corn = QSpinBox()
-        self.corn.setRange(0, 2)
-        self.corn.setValue(1)
-        self.carrot = QSpinBox()
-        self.carrot.setRange(0, 2)
-        self.carrot.setValue(1)
-        quantities.addWidget(QLabel("玉米"), 0, 0)
-        quantities.addWidget(self.corn, 0, 1)
-        quantities.addWidget(QLabel("胡萝卜"), 0, 2)
-        quantities.addWidget(self.carrot, 0, 3)
+        self.quantity_spins = {}
+        for index, (sku, label) in enumerate(
+            (("corn", "玉米"), ("carrot", "胡萝卜"), ("apple", "苹果"), ("tomato", "番茄"))
+        ):
+            spin = QSpinBox()
+            spin.setRange(0, 8)
+            spin.setValue(1 if sku in ("corn", "carrot") else 0)
+            row, column = divmod(index, 2)
+            quantities.addWidget(QLabel(label), row, column * 2)
+            quantities.addWidget(spin, row, column * 2 + 1)
+            self.quantity_spins[sku] = spin
         form.addRow("商品数量", quantities)
-        form.addRow("目标区域", QLabel("A 区 · 两个放置槽位"))
+        form.addRow("目标区域", QLabel("A 区 · A1–A4 四个橙色收货箱（从左到右）"))
+        form.addRow("箱体容量", QLabel("每箱 2 单位：玉米/胡萝卜占 2，苹果/番茄占 1；最多 8 件小件"))
         self.prepare = QCheckBox("自动准备示例场景（使用仿真实体 TF 核验）")
         self.prepare.setChecked(True)
         form.addRow("场景", self.prepare)
@@ -264,18 +276,25 @@ class DebugPanel(QWidget):
         if not order_id or not all(c.isalnum() or c in "_-" for c in order_id):
             self._append("订单号只能使用字母、数字、下划线和连字符。")
             return
-        if self.corn.value() + self.carrot.value() == 0:
-            self._append("至少选择一件商品。")
-            return
-        if self.corn.value() + self.carrot.value() > 2:
-            self._append("A 区只有两个槽位，最多选择两件商品。")
+        quantities = {sku: spin.value() for sku, spin in self.quantity_spins.items()}
+        order = Order(
+            order_id,
+            "A",
+            tuple(
+                BusinessOrderLine(sku, quantity)
+                for sku, quantity in quantities.items()
+                if quantity
+            ),
+        )
+        try:
+            validate_order(order, self.config)
+        except ValueError as exc:
+            self._append(f"订单不符合箱体容量：{exc}")
             return
         self.progress.setValue(0)
         self.status.setText("提交中")
         self.submit_button.setEnabled(False)
-        self.worker.submit(
-            order_id, self.corn.value(), self.carrot.value(), self.prepare.isChecked()
-        )
+        self.worker.submit(order_id, quantities, self.prepare.isChecked())
 
     def _set_connected(self, online: bool) -> None:
         self.connection.setText("● 订单服务在线" if online else "● 订单服务离线")

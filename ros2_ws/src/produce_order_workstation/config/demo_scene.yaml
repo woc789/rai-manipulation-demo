@@ -1,11 +1,21 @@
 entities:
-  - name: order_carrot_1
-    prefab_name: carrot
+  - name: order_bin_A1
+    prefab_name: toy_box
     pose:
-      translation: {x: 0.5, y: -0.3, z: 0.05}
+      translation: {x: 0.50, y: -0.48, z: 0.05}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
-  - name: order_corn_1
-    prefab_name: corn
+  - name: order_bin_A2
+    prefab_name: toy_box
     pose:
-      translation: {x: 0.5, y: 0.4, z: 0.05}
-      rotation: {x: 0.0, y: 0.707, z: 0.0, w: 0.707}
+      translation: {x: 0.57, y: -0.16, z: 0.05}
+      rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+  - name: order_bin_A3
+    prefab_name: toy_box
+    pose:
+      translation: {x: 0.57, y: 0.16, z: 0.05}
+      rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+  - name: order_bin_A4
+    prefab_name: toy_box
+    pose:
+      translation: {x: 0.50, y: 0.48, z: 0.05}
+      rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}

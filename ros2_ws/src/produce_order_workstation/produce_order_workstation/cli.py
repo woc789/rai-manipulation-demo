@@ -60,7 +60,7 @@ def main() -> None:
         workstation.wait_until_ready(with_scene=args.prepare_scene)
         if args.prepare_scene:
             workstation.event(order.order_id, "PREPARING_SCENE")
-            workstation.prepare_scene(args.scene)
+            workstation.prepare_scene(args.scene, order)
         result = workstation.run(order)
     except Exception as exc:
         workstation.event(order.order_id, "ORDER_FAILED", reason=str(exc))

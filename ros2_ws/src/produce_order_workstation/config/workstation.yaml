@@ -8,12 +8,41 @@ aliases:
   corn: [corn cob, ear of corn, corn]
   carrot: [carrot]
   apple: [apple]
+  tomato: [tomato]
 zones:
   A:
     tolerance_m: 0.07
+    bin_capacity_units: 2
+    sku_space_units:
+      corn: 2
+      carrot: 2
+      apple: 1
+      tomato: 1
     slots:
-      - [0.40, 0.02]
-      - [0.40, 0.16]
+      - [0.50, -0.48]
+      - [0.57, -0.16]
+      - [0.57, 0.16]
+      - [0.50, 0.48]
+    slot_entities:
+      - order_bin_A1
+      - order_bin_A2
+      - order_bin_A3
+      - order_bin_A4
+stock:
+  positions:
+    - [0.32, -0.49]
+    - [0.32, -0.21]
+    - [0.32, 0.07]
+    - [0.32, 0.35]
+    - [0.32, -0.35]
+    - [0.32, -0.07]
+    - [0.32, 0.21]
+    - [0.32, 0.49]
+  spawn_rotations:
+    corn: {x: 0.0, y: 0.707, z: 0.0, w: 0.707}
+    carrot: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+    apple: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+    tomato: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
 workspace:
   x: [0.20, 0.60]
   y: [-0.55, 0.55]
@@ -21,6 +50,8 @@ workspace:
 motion:
   grasp_z_offset_m: 0.10
   place_extra_height_m: 0.05
+  bin_release_z_m: 0.32
+  bin_clearance_z_m: 0.40
   minimum_z_m: 0.135
   service_timeout_s: 45.0
   settle_time_s: 2.0
