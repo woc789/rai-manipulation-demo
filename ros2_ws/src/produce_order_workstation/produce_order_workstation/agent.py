@@ -1,6 +1,6 @@
 """Goal-driven tool-calling agent for the prepared produce workcell.
 
-The model decides *which* named object to handle next. Motion coordinates,
+The model chooses among visual detections. Motion coordinates,
 bin assignment, completion and safety checks remain deterministic tools.
 """
 
@@ -8,27 +8,32 @@ import json
 import os
 from pathlib import Path
 
-from .order import OrderError
+from .order import OrderError, PerceptionMismatch
 
 
 TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "inspect_scene",
-            "description": "Observe named objects still on the table and current order progress. Call this first and after a failed action.",
-            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+            "name": "get_object_positions",
+            "description": "Use the RGB-D camera, detection and segmentation services to recognize one requested SKU and calculate its grasp coordinates in the robot base frame. Call before each pick.",
+            "parameters": {
+                "type": "object",
+                "properties": {"sku": {"type": "string"}},
+                "required": ["sku"],
+                "additionalProperties": False,
+            },
         },
     },
     {
         "type": "function",
         "function": {
             "name": "pick_and_place",
-            "description": "Pick one observed object by entity_id and put it in its fixed SKU bin. The tool owns all motion, target and verification logic.",
+            "description": "Pick one visual detection by detection_id, re-localize it with RGB-D, and put it in its fixed SKU bin. The tool owns motion and verification.",
             "parameters": {
                 "type": "object",
-                "properties": {"entity_id": {"type": "string"}},
-                "required": ["entity_id"],
+                "properties": {"detection_id": {"type": "string"}},
+                "required": ["detection_id"],
                 "additionalProperties": False,
             },
         },
@@ -86,10 +91,10 @@ class ProduceAgent:
         self.model_name = os.getenv("PRODUCE_AGENT_MODEL", self.config["model"])
 
     def _invoke_tool(self, name: str, arguments: dict) -> dict:
-        if name == "inspect_scene" and not arguments:
-            return self.workstation.inspect_scene(self.order)
-        if name == "pick_and_place" and set(arguments) == {"entity_id"}:
-            return self.workstation.pick_and_place(self.order, arguments["entity_id"])
+        if name == "get_object_positions" and set(arguments) == {"sku"}:
+            return self.workstation.get_object_positions(self.order, arguments["sku"])
+        if name == "pick_and_place" and set(arguments) == {"detection_id"}:
+            return self.workstation.pick_and_place(self.order, arguments["detection_id"])
         if name == "finish_order" and not arguments:
             return self.workstation.finish_order(self.order)
         raise OrderError(f"Unknown tool or invalid tool arguments: {name}")
@@ -100,11 +105,14 @@ class ProduceAgent:
             {
                 "role": "system",
                 "content": (
-                    "You are a produce-sorting robot agent. First call inspect_scene. "
-                    "Use only the returned entity IDs to choose which physical item to pick. "
-                    "Fulfil the requested counts, and then call finish_order. "
-                    "Never invent stock, coordinates or tool results. Do not pick extra items. "
-                    "Each SKU has a fixed bin handled by the tool. Call one tool at a time."
+                    "You are a produce-sorting robot agent. For a requested SKU, "
+                    "first call get_object_positions to recognize visible items and "
+                    "calculate their 3D positions from the RGB-D camera. Then choose "
+                    "one returned detection_id for pick_and_place. Re-perceive after "
+                    "every successful pick because coordinates become stale. If a "
+                    "candidate fails the visual safety check, choose a different "
+                    "detection or perceive again. Fulfil all requested counts, then "
+                    "call finish_order. Never invent IDs or coordinates. Call one tool at a time."
                 ),
             },
             {
@@ -115,7 +123,7 @@ class ProduceAgent:
                 ),
             },
         ]
-        inspected = False
+        perceived = False
         max_calls = self.config["max_tool_calls_per_item"] * self.order.total_items + 6
         for _ in range(max_calls):
             self.workstation.check_cancel()
@@ -138,17 +146,22 @@ class ProduceAgent:
                 raise OrderError("Agent returned invalid tool JSON") from exc
             if not isinstance(arguments, dict):
                 raise OrderError("Agent tool arguments must be an object")
-            if not inspected and name != "inspect_scene":
-                raise OrderError("Agent must inspect the scene before moving")
+            if not perceived and name == "pick_and_place":
+                raise OrderError("Agent must use get_object_positions before moving")
             self.workstation.event(
                 self.order.order_id, "AGENT_TOOL_CALL", tool=name, arguments=arguments
             )
-            result = self._invoke_tool(name, arguments)
+            try:
+                result = self._invoke_tool(name, arguments)
+            except PerceptionMismatch as exc:
+                result = {"ok": False, "error": str(exc), "retryable": True}
             self.workstation.event(
                 self.order.order_id, "AGENT_TOOL_RESULT", tool=name, result=result
             )
-            if name == "inspect_scene":
-                inspected = True
+            if name == "get_object_positions":
+                perceived = True
+            elif name == "pick_and_place" and result.get("placed"):
+                perceived = False
             if name == "finish_order":
                 return
             messages.append(

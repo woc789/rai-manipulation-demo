@@ -14,8 +14,8 @@ def generate_launch_description():
         [
             DeclareLaunchArgument(
                 "enable_perception",
-                default_value="false",
-                description="Load GPU vision models for manual-scene orders",
+                default_value="true",
+                description="Load RGB-D detection and segmentation required by Agent orders",
             ),
             ExecuteProcess(
                 cmd=[

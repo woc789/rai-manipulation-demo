@@ -78,9 +78,9 @@ def test_no_reachable_object_stops_before_motion():
         choose_source([(0.7, 0.7, 0.05)], CONFIG, CONFIG["zones"]["A"])
 
 
-def test_prepared_scene_uses_entity_identity_even_if_vision_mislabels():
-    corn = SimpleNamespace(prefab_name="corn")
-    carrot = SimpleNamespace(prefab_name="carrot")
+def test_simulation_entity_lookup_is_only_a_hidden_safety_oracle():
+    corn = SimpleNamespace(name="stock_corn_1", prefab_name="corn")
+    carrot = SimpleNamespace(name="stock_carrot_1", prefab_name="carrot")
     positions = {
         id(corn): SimpleNamespace(x=0.5, y=0.36, z=0.04),
         id(carrot): SimpleNamespace(x=0.5, y=-0.3, z=0.04),
@@ -93,10 +93,10 @@ def test_prepared_scene_uses_entity_identity_even_if_vision_mislabels():
         ),
     )
     workstation._scene_prepared = True
-    workstation.detect = MagicMock(side_effect=AssertionError("vision should not decide identity"))
+    workstation.detect = MagicMock(side_effect=AssertionError("oracle must not run vision"))
 
-    source, entity = workstation.locate_source("corn", CONFIG["zones"]["A"])
-    assert source == (0.5, 0.36, 0.04)
-    assert entity is corn
-    assert workstation.observe_after_place("corn", entity) == [source]
+    truth = workstation._source_entities(CONFIG["zones"]["A"])
+    assert truth[corn.name][0] is corn
+    assert truth[corn.name][1] == (0.5, 0.36, 0.04)
+    assert workstation.observe_after_place("corn", corn) == [truth[corn.name][1]]
     workstation.detect.assert_not_called()

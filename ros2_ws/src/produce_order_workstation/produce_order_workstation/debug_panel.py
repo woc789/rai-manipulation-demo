@@ -210,7 +210,7 @@ class DebugPanel(QWidget):
         header = QLabel("生鲜订单拣选工作站")
         header.setObjectName("title")
         root.addWidget(header)
-        root.addWidget(QLabel("调试面板 · 混合桌面库存 → Agent 选物/选工具 → ROS 2 抓放与验收"))
+        root.addWidget(QLabel("调试面板 · RGB-D 识别/三维定位 → Agent 选工具 → ROS 2 抓放"))
 
         top = QHBoxLayout()
         self.connection = QLabel("● 正在连接订单服务")
@@ -254,7 +254,7 @@ class DebugPanel(QWidget):
         self.bin_preview = QLabel()
         self.bin_preview.setWordWrap(True)
         form.addRow("分箱预览", self.bin_preview)
-        form.addRow("场景", QLabel("服务启动时预置 16 件混合库存；Agent 根据观察选择物品与工具"))
+        form.addRow("场景", QLabel("服务启动时预置 16 件混合库存；Agent 调用视觉定位后选择抓取目标"))
         buttons = QHBoxLayout()
         self.submit_button = QPushButton("提交订单")
         self.submit_button.setObjectName("primary")
@@ -417,11 +417,14 @@ class DebugPanel(QWidget):
             event = json.loads(detail)
             if stage == "AGENT_TOOL_CALL":
                 argument = event.get("arguments", {})
-                target = argument.get("entity_id", "")
+                target = argument.get("detection_id", argument.get("sku", ""))
                 self._append(f"Agent 选择工具：{event['tool']} {target}".strip())
-            elif stage == "AGENT_TOOL_RESULT" and event.get("tool") == "inspect_scene":
-                available = event.get("result", {}).get("available", {})
-                self._append(f"Agent 观察到桌面库存：{available}")
+            elif stage == "AGENT_TOOL_RESULT" and event.get("tool") == "get_object_positions":
+                result = event.get("result", {})
+                self._append(
+                    f"视觉定位 {result.get('sku')}：{len(result.get('detections', []))} 个候选，"
+                    f"坐标系 {result.get('frame')}"
+                )
             self._append(json.dumps(event, ensure_ascii=False))
         except json.JSONDecodeError:
             self._append(detail)

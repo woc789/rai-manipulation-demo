@@ -3,7 +3,7 @@
 This ROS 2/O3DE workcell accepts a structured produce order as a **goal**. On
 server startup the scene is preloaded with 16 mixed products (four each of
 corn, carrot, apple and tomato), plus four visible receiving bins. A Bailian
-model chooses tool calls and individual named products; ROS tools own the
+model chooses perception and grasp tools plus visual candidates; ROS tools own the
 physical motion, bin mapping and verification. The products are never generated
 one-by-one in response to order lines.
 
@@ -13,9 +13,9 @@ one-by-one in response to order lines.
 | --- | --- |
 | `config/demo_scene.yaml` | Reproducible mixed table inventory and four receiving bins; independent of the order. |
 | `config/workstation.yaml` | Stock counts, Agent endpoint/model, fixed SKU-bin mapping, workspace and motion limits. |
-| `order.py` | Validate order, check available stock and bin capacity, determine drop offsets, verify placement. |
+| `order.py` | Validate order and bin capacity, parse 3D perception results, determine drop offsets and verify placement. |
 | `agent.py` | Bounded OpenAI-compatible tool-calling loop; goal prompt and three tool schemas. |
-| `runtime.py` | Ground-truth scene observation, validated pick/place tool, ROS motion service, final audit and event stream. |
+| `runtime.py` | RGB-D perception adapter, visual-candidate registry, validated pick/place tool, ROS motion service and final audit. |
 | `order_server.py` | Persistent ROS Action server, one order at a time, cancellation and JSON reports. |
 | `debug_panel.py` | Temporary PyQt debug UI: enter desired counts and watch Agent calls and ROS feedback. |
 
@@ -24,9 +24,10 @@ Order goal (SKU quantities)
    ↓
 Server startup: 16 mixed products + A1–A4 receiving bins
    ↓
-Agent: inspect_scene → choose pick_and_place(entity_id) repeatedly → finish_order
+Agent: get_object_positions(SKU) → choose pick_and_place(detection_id)
+       → re-perceive after each pick → finish_order
                            ↓
-ROS tool: recheck ID/SKU/stock → grasp → fixed SKU bin → retract → verify
+ROS tool: fresh RGB-D localization → safety checks → grasp → fixed bin → verify
    ↓
 Action feedback + /produce_orders/events + JSON report
 ```
@@ -39,15 +40,24 @@ entity. The event stream includes `AGENT_TOOL_CALL`, `AGENT_TOOL_RESULT`,
 `GRASPING`, `PLACING`, `VERIFYING`, `ITEM_COMPLETED`, `FINAL_AUDIT` and the final
 order state.
 
-Object identity currently comes from the simulator's named TF entity frames.
-This is **not camera-based recognition or a VLA model**. It makes tool-selection
-and Agent/ROS integration reproducible while leaving camera-grounded perception
-as a separate future improvement. The stock layout is intentionally scattered
-across two columns; actual positions are measured again before every pick.
+`get_object_positions` uses the existing RAI perception pipeline: camera RGB →
+GroundingDINO detection → SAM segmentation → depth and camera intrinsics →
+point cloud → TF to `panda_link0` → 3D centroid. The Agent sees only visual
+detection IDs and these estimated coordinates, not simulator entity names or
+ground-truth positions. Before motion, the tool re-localizes the chosen visual
+candidate. In this simulator demo a hidden entity/TF check rejects known
+false-positive classes and verifies final placement; it is a safety/evaluation
+oracle, **not an Agent observation or grasp-coordinate fallback**. The detector
+can still miss objects or confuse visually similar classes; in that case the
+Agent can re-perceive and choose another candidate. Rejected visual locations
+are excluded for the rest of the order. If no trustworthy candidate remains,
+the order fails safely rather than claiming success. The stock layout remains
+fixed and mixed so perception failures are reproducible.
 
 ## Start
 
-The base RAI repository, O3DE binary/assets, ROS Jazzy, MoveIt and the existing
+The base RAI repository, O3DE binary/assets, ROS Jazzy, MoveIt, cached RAI
+GroundingDINO/SAM weights and the existing
 `rai-jazzy` Conda environment are required. Launch from the **RAI repository
 root**, because the launch file resolves demo asset paths relative to it:
 
@@ -81,13 +91,13 @@ source src/examples/rai-manipulation-demo/ros2_ws/install/setup.bash
 ros2 run produce_order_workstation debug_panel
 ```
 
-Only enter quantities; zero means the SKU is not needed. Each SKU has four
+The launch starts both vision services by default; model initialization can
+take around a minute. Only enter quantities; zero means the SKU is not needed. Each SKU has four
 pieces of prepared stock and a dedicated bin: corn → A1, carrot → A2,
 apple → A3, tomato → A4. Each bin is configured for at most four placements.
 The UI therefore permits 0–4 per SKU. The Action goal must have
 `prepare_scene=true` (retained as a compatibility flag; it now means the
-preloaded named-entity workcell is required). Manual scenes cannot yet supply
-reliable identity for Agent tool selection. After a verified order the server
+preloaded workcell is required). After a verified order the server
 replenishes the table asynchronously before accepting another order. A failed
 order does not auto-reset the uncertain physical state; restart the full launch
 before trying again. The report is written under
@@ -109,10 +119,11 @@ PYTHONPATH=ros2_ws/src/produce_order_workstation:$PYTHONPATH \
 
 ## Boundaries and safety
 
-- The Agent gets named objects and TF positions from a simulator observation
-  tool. It does not inspect raw images yet.
-- `pick_and_place` rejects an unknown, unreachable or unrequested entity before
-  motion. The configured SKU→bin mapping cannot be changed by model output.
+- The Agent calls a camera-based 3D perception tool. It does not receive raw
+  pixels itself; detection and depth projection are performed by RAI tools.
+- `pick_and_place` rejects unknown/stale visual IDs, unrequested items,
+  unstable coordinates and candidates failing the hidden simulation check.
+  The configured SKU→bin mapping cannot be changed by model output.
 - A service timeout or failed placement stops the order, because the physical
   state may be unknown. Cancellation is checked before a motion and between
   items, but cannot interrupt a grasp already in flight.
@@ -123,7 +134,13 @@ PYTHONPATH=ros2_ws/src/produce_order_workstation:$PYTHONPATH \
 - The 16-object layout and per-bin capacity are demo configuration values, not
   an industrial payload claim. Full 16-item order endurance is not yet proven.
 
-Live verification on 2026-10-01: one apple was chosen by the real Bailian
-model from 16 observed pieces, put into A3, and passed final audit (`1/1`).
-A second order selected corn and carrot from the same mixed layout, placed
-them into A1 and A2, and passed final audit (`2/2`).
+Vision-enabled live runs completed corn (`1/1`, report
+`visual-agent-20261001-corn-01.json`) and apple (`1/1`, report
+`visual-agent-20261001-apple-01.json`). In the apple run, the first visual
+candidate failed the hidden class/position safety check; the Agent called
+`get_object_positions` again and successfully chose a different candidate.
+Inspect `PERCEPTION_RESULT`, `AGENT_TOOL_RESULT` and
+`GRASPING.position_source=rgbd_perception` in those reports. This confirms the
+RGB-D coordinate path for these two small orders, **not** reliable recognition
+or completion of all 16 pieces. Earlier TF-fed Agent runs do not validate the
+vision path.

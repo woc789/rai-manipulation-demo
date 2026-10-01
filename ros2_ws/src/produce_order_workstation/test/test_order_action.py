@@ -10,7 +10,7 @@ import yaml
 
 from produce_order_interfaces.action import ExecuteOrder
 from produce_order_interfaces.msg import OrderLine as OrderLineMsg
-from produce_order_workstation.order import Order, OrderError, OrderLine, plan_placements, validate_order
+from produce_order_workstation.order import Order, OrderError, OrderLine, PerceptionMismatch, plan_placements, validate_order
 from produce_order_workstation.order_server import order_from_goal
 from produce_order_workstation.runtime import Workstation
 
@@ -59,15 +59,15 @@ def test_action_goal_uses_shared_order_validation():
     assert order == Order("action-001", "A", (OrderLine("corn", 1),))
 
 
-def test_preloaded_inventory_is_checked_when_order_begins():
+def test_order_start_resets_stale_visual_candidates():
     station = Workstation(MagicMock(), CONFIG)
     station._scene_prepared = True
-    station.inspect_scene = MagicMock(return_value={"available": {"corn": 1}})
-    with pytest.raises(OrderError, match="need 2, have 1"):
-        station.begin_order(Order("short-stock", "A", (OrderLine("corn", 2),)))
-    station.inspect_scene.return_value = {"available": {"corn": 4}}
+    station._visual_candidates = {"visual_corn_1": ("corn", (0.3, 0.0, 0.05))}
+    station._rejected_visual_positions = {"apple": [(0.3, 0.0, 0.05)]}
     station.begin_order(Order("enough-stock", "A", (OrderLine("corn", 2),)))
     assert station._completed_by_sku == {"corn": 0}
+    assert station._visual_candidates == {}
+    assert station._rejected_visual_positions == {}
 
 
 def test_cancel_before_agent_issues_no_motion():
@@ -93,17 +93,31 @@ def test_bin_must_exist_at_slot():
         station.slot_bin_position(CONFIG["zones"]["A"], 0, slot)
 
 
-def test_agent_tool_rejects_invented_entity_before_motion():
+def test_visual_tool_returns_detected_coordinates_without_simulator_labels():
     station = Workstation(MagicMock(), CONFIG)
     station._scene_prepared = True
-    station._source_entities = MagicMock(return_value={})
+    station._completed_by_sku = {"apple": 0}
+    station.detect = MagicMock(return_value=[(0.29, -0.1, 0.04), (0.40, 0.1, 0.04)])
+    station._source_entities = MagicMock(side_effect=AssertionError("no oracle observation"))
+    result = station.get_object_positions(
+        Order("vision", "A", (OrderLine("apple", 1),)), "apple"
+    )
+    assert result["source"] == "rgbd_detection_segmentation_depth_tf"
+    assert result["frame"] == "panda_link0"
+    assert len(result["detections"]) == 2
+    assert all(item["detection_id"].startswith("visual_apple_") for item in result["detections"])
+    station._source_entities.assert_not_called()
+
+
+def test_agent_tool_rejects_unknown_or_unrequested_visual_id_before_motion():
+    station = Workstation(MagicMock(), CONFIG)
+    station._scene_prepared = True
     station.move = MagicMock()
-    with pytest.raises(OrderError, match="not reachable"):
+    with pytest.raises(OrderError, match="Unknown or stale"):
         station.pick_and_place(Order("invalid", "A", (OrderLine("corn", 1),)), "invented")
-    carrot = SimpleNamespace(name="stock_carrot_1", prefab_name="carrot")
-    station._source_entities.return_value = {carrot.name: (carrot, (0.26, -0.27, 0.03))}
+    station._visual_candidates = {"visual_carrot_1": ("carrot", (0.26, -0.27, 0.03))}
     with pytest.raises(OrderError, match="not needed"):
-        station.pick_and_place(Order("wrong-sku", "A", (OrderLine("corn", 1),)), carrot.name)
+        station.pick_and_place(Order("wrong-sku", "A", (OrderLine("corn", 1),)), "visual_carrot_1")
     station.move.assert_not_called()
 
 
@@ -115,12 +129,14 @@ def test_agent_chosen_entity_runs_motion_and_audit(monkeypatch):
     slot = tuple(CONFIG["zones"]["A"]["slots"][0])
     source = (0.29, -0.12, 0.04)
     entity = SimpleNamespace(name="stock_corn_1", prefab_name="corn")
+    station._visual_candidates = {"visual_corn_1": ("corn", source)}
+    station.detect = MagicMock(return_value=[source])
     station._source_entities = MagicMock(return_value={entity.name: (entity, source)})
     station.slot_bin_position = MagicMock(return_value=slot)
     station.observe_after_place = MagicMock(return_value=[(*slot, 0.05)])
     station.move = MagicMock()
     order = Order("motion", "A", (OrderLine("corn", 1),))
-    assert station.pick_and_place(order, entity.name)["bin"] == "A1"
+    assert station.pick_and_place(order, "visual_corn_1")["bin"] == "A1"
     assert station.move.call_args_list == [
         call(source, grip="grab"),
         call((*slot, source[2]), grip="release", target_z=CONFIG["motion"]["bin_release_z_m"]),
@@ -130,6 +146,27 @@ def test_agent_chosen_entity_runs_motion_and_audit(monkeypatch):
     station.observe_after_place.return_value = [(slot[0] + 0.2, slot[1], 0.05)]
     with pytest.raises(OrderError, match="Final audit"):
         station.finish_order(order)
+
+
+def test_misclassified_visual_candidate_cannot_move_robot():
+    station = Workstation(MagicMock(), CONFIG)
+    station._scene_prepared = True
+    point = (0.26, -0.38, 0.04)
+    station._visual_candidates = {"visual_apple_1": ("apple", point)}
+    station.detect = MagicMock(return_value=[point])
+    tomato = SimpleNamespace(name="stock_tomato_1", prefab_name="tomato")
+    station._source_entities = MagicMock(return_value={tomato.name: (tomato, point)})
+    station.move = MagicMock()
+    with pytest.raises(PerceptionMismatch, match="safety check"):
+        station.pick_and_place(
+            Order("false-label", "A", (OrderLine("apple", 1),)), "visual_apple_1"
+        )
+    station.move.assert_not_called()
+    assert station._rejected_visual_positions["apple"] == [point]
+    result = station.get_object_positions(
+        Order("false-label", "A", (OrderLine("apple", 1),)), "apple"
+    )
+    assert result["detections"] == []
 
 
 class FakeModel:
@@ -145,24 +182,41 @@ class FakeModel:
         return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
 
-def test_agent_loop_uses_model_chosen_tool_and_entity():
+def test_agent_loop_uses_model_chosen_perception_and_motion_tools():
     station = Workstation(MagicMock(), CONFIG)
     station._scene_prepared = True
-    station.inspect_scene = MagicMock(return_value={"objects": [{"entity_id": "stock_corn_2", "sku": "corn"}]})
-    station.pick_and_place = MagicMock(return_value={"placed": "stock_corn_2"})
+    station.get_object_positions = MagicMock(return_value={"detections": [{"detection_id": "visual_corn_2"}]})
+    station.pick_and_place = MagicMock(return_value={"placed": "visual_corn_2"})
     station.finish_order = MagicMock(return_value={"status": "verified"})
-    model = FakeModel([("inspect_scene", {}), ("pick_and_place", {"entity_id": "stock_corn_2"}), ("finish_order", {})])
+    model = FakeModel([("get_object_positions", {"sku": "corn"}), ("pick_and_place", {"detection_id": "visual_corn_2"}), ("finish_order", {})])
     result = station.run(Order("agent", "A", (OrderLine("corn", 1),)), model=model)
     assert result["status"] == "COMPLETED"
-    assert station.pick_and_place.call_args.args[1] == "stock_corn_2"
+    station.get_object_positions.assert_called_once()
+    assert station.pick_and_place.call_args.args[1] == "visual_corn_2"
     assert [item["stage"] for item in result["events"]].count("AGENT_TOOL_CALL") == 3
 
 
-def test_agent_cannot_move_without_first_observation():
+def test_agent_cannot_move_without_first_visual_perception():
     station = Workstation(MagicMock(), CONFIG)
     station._scene_prepared = True
     station.pick_and_place = MagicMock()
-    result = station.run(Order("no-inspection", "A", (OrderLine("corn", 1),)), model=FakeModel([("pick_and_place", {"entity_id": "stock_corn_1"})]))
+    result = station.run(Order("no-inspection", "A", (OrderLine("corn", 1),)), model=FakeModel([("pick_and_place", {"detection_id": "visual_corn_1"})]))
     assert result["status"] == "FAILED"
-    assert "inspect" in result["error"]
+    assert "get_object_positions" in result["error"]
     station.pick_and_place.assert_not_called()
+
+
+def test_agent_must_reperceive_after_successful_pick():
+    station = Workstation(MagicMock(), CONFIG)
+    station._scene_prepared = True
+    station.get_object_positions = MagicMock(return_value={"detections": [{"detection_id": "visual_corn_1"}]})
+    station.pick_and_place = MagicMock(return_value={"placed": "visual_corn_1"})
+    model = FakeModel([
+        ("get_object_positions", {"sku": "corn"}),
+        ("pick_and_place", {"detection_id": "visual_corn_1"}),
+        ("pick_and_place", {"detection_id": "visual_corn_1"}),
+    ])
+    result = station.run(Order("stale-after-pick", "A", (OrderLine("corn", 2),)), model=model)
+    assert result["status"] == "FAILED"
+    assert "get_object_positions" in result["error"]
+    station.pick_and_place.assert_called_once()

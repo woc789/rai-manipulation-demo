@@ -21,6 +21,10 @@ class OrderCancelled(OrderError):
     """Cancellation was accepted at a safe item boundary."""
 
 
+class PerceptionMismatch(OrderError):
+    """A visual candidate failed the simulator safety interlock before motion."""
+
+
 @dataclass(frozen=True)
 class OrderLine:
     sku: str

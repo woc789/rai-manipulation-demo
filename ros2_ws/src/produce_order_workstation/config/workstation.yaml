@@ -36,7 +36,9 @@ agent:
   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
   model: qwen-plus
   timeout_s: 40
-  max_tool_calls_per_item: 3
+  max_tool_calls_per_item: 6
+perception:
+  association_radius_m: 0.065
 workspace:
   x: [0.20, 0.60]
   y: [-0.55, 0.55]
@@ -49,5 +51,5 @@ motion:
   minimum_z_m: 0.135
   service_timeout_s: 45.0
   settle_time_s: 2.0
-startup_timeout_s: 90.0
+startup_timeout_s: 240.0
 perception_timeout_s: 180.0

@@ -20,6 +20,7 @@ from .order import (
     Order,
     OrderCancelled,
     OrderError,
+    PerceptionMismatch,
     choose_source,
     distance_xy,
     parse_centroids,
@@ -49,6 +50,8 @@ class Workstation:
         self._scene_prepared = False
         self._placed_entities: list[tuple] = []
         self._completed_by_sku: dict[str, int] = {}
+        self._visual_candidates: dict[str, tuple[str, tuple[float, float, float]]] = {}
+        self._rejected_visual_positions: dict[str, list[tuple[float, float, float]]] = {}
         self.event_sink = event_sink
         self.cancel_requested = cancel_requested or (lambda: False)
 
@@ -73,17 +76,15 @@ class Workstation:
     def wait_until_ready(self, with_scene: bool = False) -> None:
         self._scene_prepared = False
         timeout = self.config["startup_timeout_s"]
-        services = ["/manipulator_move_to"]
+        services = ["/manipulator_move_to", "/detection", "/segmentation"]
         if with_scene:
             services += ["/spawn_entity", "/delete_entity"]
-        else:
-            camera = self.config["camera"]
-            wait_for_ros2_topics(
-                self.connector,
-                [camera["color"], camera["depth"], camera["info"]],
-                timeout=timeout,
-            )
-            services += ["/detection", "/segmentation"]
+        camera = self.config["camera"]
+        wait_for_ros2_topics(
+            self.connector,
+            [camera["color"], camera["depth"], camera["info"]],
+            timeout=timeout,
+        )
         wait_for_ros2_services(self.connector, services, timeout=timeout)
         if with_scene:
             deadline = time.monotonic() + timeout
@@ -91,7 +92,7 @@ class Workstation:
                 self.check_cancel()
                 try:
                     self.connector.get_transform("world", "odom", timeout_sec=2.0)
-                    return
+                    break
                 except TransformException as exc:
                     if time.monotonic() >= deadline:
                         raise OrderError("Simulator TF world/odom is not ready") from exc
@@ -143,6 +144,8 @@ class Workstation:
         self._scene_prepared = True
         self._placed_entities = []
         self._completed_by_sku = {}
+        self._visual_candidates = {}
+        self._rejected_visual_positions = {}
         zone = self.config["zones"]["A"]
         inventory = {sku: 0 for sku in self.config["aliases"]}
         for entity, _ in self._source_entities(zone).values():
@@ -161,13 +164,8 @@ class Workstation:
             raise OrderError("Preloaded scene is not ready")
         self._placed_entities = []
         self._completed_by_sku = {line.sku: 0 for line in order.lines}
-        inventory = self.inspect_scene(order)["available"]
-        for line in order.lines:
-            if inventory.get(line.sku, 0) < line.quantity:
-                raise OrderError(
-                    f"Insufficient visible {line.sku} stock: need {line.quantity}, "
-                    f"have {inventory.get(line.sku, 0)}"
-                )
+        self._visual_candidates = {}
+        self._rejected_visual_positions = {}
 
     def slot_bin_position(self, zone: dict, index: int, slot: tuple) -> tuple:
         """Confirm that a visible receiving bin actually occupies this slot."""
@@ -199,19 +197,6 @@ class Workstation:
                 return points
         return []
 
-    def locate_source(self, sku: str, zone: dict):
-        """Use simulator entity identity for a prepared scene; otherwise use vision."""
-        if not self._scene_prepared or self._scene_bridge is None:
-            return choose_source(self.detect(sku), self.config, zone), None
-        candidates = []
-        for entity in self._scene_bridge.spawned_entities:
-            if entity.prefab_name == sku:
-                position = self._scene_bridge.get_object_pose(entity).pose.position
-                candidates.append((entity, (position.x, position.y, position.z)))
-        source = choose_source([point for _, point in candidates], self.config, zone)
-        entity = next(entity for entity, point in candidates if point == source)
-        return source, entity
-
     def _source_entities(self, zone: dict) -> dict[str, tuple]:
         if not self._scene_prepared or self._scene_bridge is None:
             raise OrderError("Agent requires a prepared named-entity scene")
@@ -231,33 +216,55 @@ class Workstation:
             result[entity.name] = (entity, xyz)
         return result
 
-    def inspect_scene(self, order: Order) -> dict:
-        """Ground-truth TF observation, not camera recognition."""
+    def get_object_positions(self, order: Order, sku: str) -> dict:
+        """Agent-facing RGB-D perception; never reveal simulator entity labels."""
+        self.check_cancel()
+        requested = {line.sku: line.quantity for line in order.lines}
+        if sku not in requested:
+            raise OrderError(f"SKU {sku!r} is not requested by this order")
         zone = self.config["zones"][order.zone]
-        candidates = self._source_entities(zone)
-        objects = [
-            {
-                "entity_id": name,
-                "sku": entity.prefab_name,
-                "position_m": [round(value, 3) for value in xyz],
-            }
-            for name, (entity, xyz) in sorted(candidates.items())
-        ]
-        available = {sku: 0 for sku in self.config["aliases"]}
-        for item in objects:
-            available[item["sku"]] += 1
-        return {
-            "objects": objects,
-            "available": available,
-            "remaining": {
-                line.sku: line.quantity - self._completed_by_sku.get(line.sku, 0)
-                for line in order.lines
-            },
+        raw_points = self.detect(sku)
+        points = []
+        for point in sorted(raw_points, key=lambda value: (value[1], value[0])):
+            try:
+                choose_source([point], self.config, zone)
+            except OrderError:
+                continue
+            if any(
+                distance_xy(point, rejected) < self.config["perception"]["association_radius_m"]
+                for rejected in self._rejected_visual_positions.get(sku, [])
+            ):
+                continue
+            if any(distance_xy(point, existing) < 0.035 for existing in points):
+                continue
+            points.append(point)
+        self._visual_candidates = {
+            detection_id: value
+            for detection_id, value in self._visual_candidates.items()
+            if value[0] != sku
         }
+        detections = []
+        for index, point in enumerate(points, start=1):
+            detection_id = f"visual_{sku}_{index}"
+            self._visual_candidates[detection_id] = (sku, point)
+            detections.append(
+                {
+                    "detection_id": detection_id,
+                    "position_m": [round(value, 4) for value in point],
+                }
+            )
+        result = {
+            "sku": sku,
+            "frame": self.config["camera"]["target_frame"],
+            "source": "rgbd_detection_segmentation_depth_tf",
+            "classification_verified": False,
+            "detections": detections,
+            "remaining": requested[sku] - self._completed_by_sku.get(sku, 0),
+        }
+        self.event(order.order_id, "PERCEPTION_RESULT", **result)
+        return result
 
     def observe_after_place(self, sku: str, entity):
-        if entity is None:
-            return self.detect(sku)
         position = self._scene_bridge.get_object_pose(entity).pose.position
         return [(position.x, position.y, position.z)]
 
@@ -308,19 +315,43 @@ class Workstation:
         if not result.success:
             raise OrderError(f"Manipulator {grip} motion failed")
 
-    def pick_and_place(self, order: Order, entity_id: str) -> dict:
-        """Validated motion tool: the model supplies an ID, never coordinates."""
+    def pick_and_place(self, order: Order, detection_id: str) -> dict:
+        """Re-localize a visual candidate, then execute validated ROS motion."""
         self.check_cancel()
         zone = self.config["zones"][order.zone]
-        candidates = self._source_entities(zone)
-        if entity_id not in candidates:
-            raise OrderError(f"Object {entity_id!r} is not reachable table stock")
-        entity, source = candidates[entity_id]
-        sku = entity.prefab_name
+        if detection_id not in self._visual_candidates:
+            raise OrderError(f"Unknown or stale visual detection {detection_id!r}")
+        sku, observed_source = self._visual_candidates[detection_id]
         requested = {line.sku: line.quantity for line in order.lines}
         done = self._completed_by_sku.get(sku, 0)
         if sku not in requested or done >= requested[sku]:
-            raise OrderError(f"Object {entity_id!r} is not needed by this order")
+            raise OrderError(f"Visual detection {detection_id!r} is not needed")
+        refreshed = self.detect(sku)
+        if not refreshed:
+            self._visual_candidates.clear()
+            raise PerceptionMismatch("Visual target disappeared; perceive the table again")
+        source = min(refreshed, key=lambda point: distance_xy(point, observed_source))
+        if distance_xy(source, observed_source) > self.config["perception"]["association_radius_m"]:
+            self._visual_candidates.clear()
+            raise PerceptionMismatch("Visual target moved or detection changed; perceive again")
+        choose_source([source], self.config, zone)
+        # Simulation-only safety oracle. Its labels/positions are never exposed
+        # to the Agent and never used as the gripper target; only the RGB-D
+        # estimate above drives the grasp. It prevents a known false positive
+        # (for example a tomato classified as an apple) from causing motion.
+        truth = self._source_entities(zone)
+        if not truth:
+            raise PerceptionMismatch("No physical stock matches the visual candidate")
+        entity, actual = min(
+            truth.values(), key=lambda item: distance_xy(item[1], source)
+        )
+        if (
+            distance_xy(actual, source) > self.config["perception"]["association_radius_m"]
+            or entity.prefab_name != sku
+        ):
+            self._rejected_visual_positions.setdefault(sku, []).append(source)
+            self._visual_candidates.pop(detection_id, None)
+            raise PerceptionMismatch("Visual class/position failed safety check; choose another detection")
         placements = [
             item for item in plan_placements(order, self.config) if item.sku == sku
         ]
@@ -333,12 +364,12 @@ class Workstation:
         if distance_xy(source, target) <= 0.12:
             raise OrderError("Source is too close to destination slot")
         self.event(
-            order.order_id, "GRASPING", sku=sku, entity_id=entity_id,
-            source=source, position_source="scene_tf",
+            order.order_id, "GRASPING", sku=sku, detection_id=detection_id,
+            source=source, position_source="rgbd_perception",
         )
         self.move(source, grip="grab")
         self.event(
-            order.order_id, "PLACING", sku=sku, entity_id=entity_id,
+            order.order_id, "PLACING", sku=sku, detection_id=detection_id,
             slot_id=slot_id, target=target, bin_position=bin_position,
         )
         self.move(
@@ -361,12 +392,17 @@ class Workstation:
             raise OrderError(f"{sku} was not observed inside bin {slot_id}")
         self._completed_by_sku[sku] = done + 1
         self._placed_entities.append((sku, entity, bin_index, source))
+        self._visual_candidates.clear()
         completed = sum(self._completed_by_sku.values())
         self.event(
-            order.order_id, "ITEM_COMPLETED", sku=sku, entity_id=entity_id,
+            order.order_id, "ITEM_COMPLETED", sku=sku, detection_id=detection_id,
             slot_id=slot_id, completed=completed, total=order.total_items,
         )
-        return {"placed": entity_id, "sku": sku, "bin": slot_id, "completed": completed}
+        return {
+            "placed": detection_id, "sku": sku, "bin": slot_id,
+            "completed": completed,
+            "next": "Call get_object_positions again before another pick",
+        }
 
     def finish_order(self, order: Order) -> dict:
         """The Agent can request completion, but cannot declare success itself."""
