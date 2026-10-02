@@ -54,6 +54,13 @@ are excluded for the rest of the order. If no trustworthy candidate remains,
 the order fails safely rather than claiming success. The stock layout remains
 fixed and mixed so perception failures are reproducible.
 
+Each perception call invalidates every earlier visual ID and generates IDs
+with a new generation number. If the Agent attempts a pick without fresh
+perception, or selects a stale detection, the tool returns a retryable error
+without moving the arm. The model can then call `get_object_positions` and
+continue within its bounded tool-call budget. Genuine motion failures still
+stop the order because the physical state may be uncertain.
+
 ## Start
 
 The base RAI repository, O3DE binary/assets, ROS Jazzy, MoveIt, cached RAI

@@ -51,6 +51,7 @@ class Workstation:
         self._placed_entities: list[tuple] = []
         self._completed_by_sku: dict[str, int] = {}
         self._visual_candidates: dict[str, tuple[str, tuple[float, float, float]]] = {}
+        self._perception_generation = 0
         self._rejected_visual_positions: dict[str, list[tuple[float, float, float]]] = {}
         self.motion_attempted = False
         self.event_sink = event_sink
@@ -146,6 +147,7 @@ class Workstation:
         self._placed_entities = []
         self._completed_by_sku = {}
         self._visual_candidates = {}
+        self._perception_generation = 0
         self._rejected_visual_positions = {}
         self.motion_attempted = False
         zone = self.config["zones"]["A"]
@@ -167,6 +169,7 @@ class Workstation:
         self._placed_entities = []
         self._completed_by_sku = {line.sku: 0 for line in order.lines}
         self._visual_candidates = {}
+        self._perception_generation = 0
         self._rejected_visual_positions = {}
         self.motion_attempted = False
 
@@ -226,6 +229,11 @@ class Workstation:
         if sku not in requested:
             raise OrderError(f"SKU {sku!r} is not requested by this order")
         zone = self.config["zones"][order.zone]
+        # Every camera request invalidates all previous visual IDs, including
+        # IDs for a different SKU. Never let an old ID silently refer to a
+        # different candidate after the table changes.
+        self._visual_candidates.clear()
+        self._perception_generation += 1
         raw_points = self.detect(sku)
         points = []
         for point in sorted(raw_points, key=lambda value: (value[1], value[0])):
@@ -241,14 +249,9 @@ class Workstation:
             if any(distance_xy(point, existing) < 0.035 for existing in points):
                 continue
             points.append(point)
-        self._visual_candidates = {
-            detection_id: value
-            for detection_id, value in self._visual_candidates.items()
-            if value[0] != sku
-        }
         detections = []
         for index, point in enumerate(points, start=1):
-            detection_id = f"visual_{sku}_{index}"
+            detection_id = f"visual_{sku}_{self._perception_generation}_{index}"
             self._visual_candidates[detection_id] = (sku, point)
             detections.append(
                 {
@@ -323,12 +326,12 @@ class Workstation:
         self.check_cancel()
         zone = self.config["zones"][order.zone]
         if detection_id not in self._visual_candidates:
-            raise OrderError(f"Unknown or stale visual detection {detection_id!r}")
+            raise PerceptionMismatch(f"Unknown or stale visual detection {detection_id!r}; perceive again")
         sku, observed_source = self._visual_candidates[detection_id]
         requested = {line.sku: line.quantity for line in order.lines}
         done = self._completed_by_sku.get(sku, 0)
         if sku not in requested or done >= requested[sku]:
-            raise OrderError(f"Visual detection {detection_id!r} is not needed")
+            raise PerceptionMismatch(f"Visual detection {detection_id!r} is not needed; choose a requested SKU")
         refreshed = self.detect(sku)
         if not refreshed:
             self._visual_candidates.clear()

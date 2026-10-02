@@ -121,6 +121,25 @@ def test_visual_tool_returns_detected_coordinates_without_simulator_labels():
     station._source_entities.assert_not_called()
 
 
+def test_new_perception_invalidates_old_ids_even_for_other_skus():
+    station = Workstation(MagicMock(), CONFIG)
+    station._scene_prepared = True
+    station.detect = MagicMock(return_value=[(0.29, -0.1, 0.04)])
+    order = Order("fresh-id", "A", (OrderLine("corn", 1), OrderLine("apple", 1)))
+    first = station.get_object_positions(order, "corn")["detections"][0]["detection_id"]
+    second = station.get_object_positions(order, "apple")["detections"][0]["detection_id"]
+    assert first != second
+    assert first not in station._visual_candidates
+    assert second in station._visual_candidates
+    station.move = MagicMock()
+    with pytest.raises(PerceptionMismatch, match="stale"):
+        station.pick_and_place(order, first)
+    station.move.assert_not_called()
+    third = station.get_object_positions(order, "apple")["detections"][0]["detection_id"]
+    assert second != third
+    assert second not in station._visual_candidates
+
+
 def test_agent_tool_rejects_unknown_or_unrequested_visual_id_before_motion():
     station = Workstation(MagicMock(), CONFIG)
     station._scene_prepared = True
@@ -210,27 +229,42 @@ def test_agent_loop_uses_model_chosen_perception_and_motion_tools():
     assert [item["stage"] for item in result["events"]].count("AGENT_TOOL_CALL") == 3
 
 
-def test_agent_cannot_move_without_first_visual_perception():
-    station = Workstation(MagicMock(), CONFIG)
-    station._scene_prepared = True
-    station.pick_and_place = MagicMock()
-    result = station.run(Order("no-inspection", "A", (OrderLine("corn", 1),)), model=FakeModel([("pick_and_place", {"detection_id": "visual_corn_1"})]))
-    assert result["status"] == "FAILED"
-    assert "get_object_positions" in result["error"]
-    station.pick_and_place.assert_not_called()
-
-
-def test_agent_must_reperceive_after_successful_pick():
+def test_agent_rejects_pick_without_perception_and_allows_recovery():
     station = Workstation(MagicMock(), CONFIG)
     station._scene_prepared = True
     station.get_object_positions = MagicMock(return_value={"detections": [{"detection_id": "visual_corn_1"}]})
     station.pick_and_place = MagicMock(return_value={"placed": "visual_corn_1"})
+    station.finish_order = MagicMock(return_value={"status": "verified"})
+    model = FakeModel([
+        ("pick_and_place", {"detection_id": "visual_corn_1"}),
+        ("get_object_positions", {"sku": "corn"}),
+        ("pick_and_place", {"detection_id": "visual_corn_1"}),
+        ("finish_order", {}),
+    ])
+    result = station.run(Order("no-inspection", "A", (OrderLine("corn", 1),)), model=model)
+    assert result["status"] == "COMPLETED"
+    rejected = [event for event in result["events"] if event["stage"] == "AGENT_TOOL_RESULT" and event["result"].get("retryable")]
+    assert len(rejected) == 1
+    assert rejected[0]["result"]["required_tool"] == "get_object_positions"
+    station.pick_and_place.assert_called_once()
+
+
+def test_agent_retries_after_successful_pick_without_reperception():
+    station = Workstation(MagicMock(), CONFIG)
+    station._scene_prepared = True
+    station.get_object_positions = MagicMock(return_value={"detections": [{"detection_id": "visual_corn_1"}]})
+    station.pick_and_place = MagicMock(return_value={"placed": "visual_corn_1"})
+    station.finish_order = MagicMock(return_value={"status": "verified"})
     model = FakeModel([
         ("get_object_positions", {"sku": "corn"}),
         ("pick_and_place", {"detection_id": "visual_corn_1"}),
         ("pick_and_place", {"detection_id": "visual_corn_1"}),
+        ("get_object_positions", {"sku": "corn"}),
+        ("pick_and_place", {"detection_id": "visual_corn_1"}),
+        ("finish_order", {}),
     ])
     result = station.run(Order("stale-after-pick", "A", (OrderLine("corn", 2),)), model=model)
-    assert result["status"] == "FAILED"
-    assert "get_object_positions" in result["error"]
-    station.pick_and_place.assert_called_once()
+    assert result["status"] == "COMPLETED"
+    assert station.pick_and_place.call_count == 2
+    assert station.get_object_positions.call_count == 2
+    assert sum(event["stage"] == "AGENT_TOOL_RESULT" and event["result"].get("retryable", False) for event in result["events"]) == 1

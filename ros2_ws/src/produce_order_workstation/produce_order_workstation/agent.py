@@ -111,7 +111,9 @@ class ProduceAgent:
                     "one returned detection_id for pick_and_place. Re-perceive after "
                     "every successful pick because coordinates become stale. If a "
                     "candidate fails the visual safety check, choose a different "
-                    "detection or perceive again. Fulfil all requested counts, then "
+                    "detection or perceive again. A rejected or stale detection is "
+                    "not a completed pick; follow the tool error and re-perceive. "
+                    "Fulfil all requested counts, then "
                     "call finish_order. Never invent IDs or coordinates. Call one tool at a time."
                 ),
             },
@@ -146,15 +148,21 @@ class ProduceAgent:
                 raise OrderError("Agent returned invalid tool JSON") from exc
             if not isinstance(arguments, dict):
                 raise OrderError("Agent tool arguments must be an object")
-            if not perceived and name == "pick_and_place":
-                raise OrderError("Agent must use get_object_positions before moving")
             self.workstation.event(
                 self.order.order_id, "AGENT_TOOL_CALL", tool=name, arguments=arguments
             )
-            try:
-                result = self._invoke_tool(name, arguments)
-            except PerceptionMismatch as exc:
-                result = {"ok": False, "error": str(exc), "retryable": True}
+            if not perceived and name == "pick_and_place":
+                result = {
+                    "ok": False,
+                    "error": "Call get_object_positions before another pick; previous detections are stale",
+                    "retryable": True,
+                    "required_tool": "get_object_positions",
+                }
+            else:
+                try:
+                    result = self._invoke_tool(name, arguments)
+                except PerceptionMismatch as exc:
+                    result = {"ok": False, "error": str(exc), "retryable": True}
             self.workstation.event(
                 self.order.order_id, "AGENT_TOOL_RESULT", tool=name, result=result
             )
