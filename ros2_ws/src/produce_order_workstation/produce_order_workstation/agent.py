@@ -136,6 +136,7 @@ class ProduceAgent:
             },
         ]
         perceived_sku = None
+        empty_perceptions = 0
         max_calls = self.config["max_tool_calls_per_item"] * self.order.total_items + 6
         for _ in range(max_calls):
             self.workstation.check_cancel()
@@ -213,10 +214,32 @@ class ProduceAgent:
             self.workstation.event(
                 self.order.order_id, "AGENT_TOOL_RESULT", tool=name, result=result
             )
-            if name == "get_object_positions" and result.get("detections"):
-                perceived_sku = arguments["sku"]
+            if name == "get_object_positions" and "detections" in result:
+                if result["detections"]:
+                    perceived_sku = arguments["sku"]
+                    empty_perceptions = 0
+                else:
+                    perceived_sku = None
+                    empty_perceptions += 1
+                    limit = self.config["max_consecutive_empty_perceptions"]
+                    self.workstation.event(
+                        self.order.order_id, "PERCEPTION_EMPTY",
+                        sku=arguments["sku"], attempts=empty_perceptions,
+                        limit=limit, remaining=self._remaining(),
+                    )
+                    if empty_perceptions >= limit:
+                        self.workstation.event(
+                            self.order.order_id, "PERCEPTION_EXHAUSTED",
+                            sku=arguments["sku"], attempts=empty_perceptions,
+                            remaining=self._remaining(),
+                        )
+                        raise OrderError(
+                            f"No {arguments['sku']} detected after {limit} consecutive "
+                            f"visual attempts; {self._remaining()[arguments['sku']]} still needed"
+                        )
             elif name == "pick_and_place" and result.get("placed"):
                 perceived_sku = None
+                empty_perceptions = 0
             if name == "finish_order" and result.get("status") == "verified":
                 return
             if name == "pick_and_place" and result.get("placed"):

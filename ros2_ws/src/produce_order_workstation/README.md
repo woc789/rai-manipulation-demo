@@ -74,6 +74,10 @@ for every pick; the service owns the count and rejects premature completion.
 Unexpected zero/multiple tool calls are returned as retryable feedback without
 moving the arm. `ITEM_COMPLETED` feedback includes the per-SKU count and all
 remaining quantities, and reports retain the submitted order lines.
+Five consecutive empty visual results for the same needed SKU stop the order
+with `PERCEPTION_EXHAUSTED` and an explicit remaining count; unrelated model
+responses do not silently reset this counter. A successful detection or pick
+resets it.
 
 Each perception call invalidates every earlier visual ID and generates IDs
 with a new generation number. If the Agent attempts a pick without fresh

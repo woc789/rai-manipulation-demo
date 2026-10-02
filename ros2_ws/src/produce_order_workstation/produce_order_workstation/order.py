@@ -29,6 +29,14 @@ def readable_error(error: str) -> str:
     """Translate a known API failure without hiding the report's original error."""
     if "Arrearage" in error or "overdue-payment" in error:
         return "百炼 API 账户欠费或额度不可用；请检查百炼账户。是否需要重置场景请看工作台状态。"
+    empty = re.fullmatch(
+        r"No (\w+) detected after (\d+) consecutive visual attempts; (\d+) still needed",
+        error,
+    )
+    if empty:
+        sku, attempts, remaining = empty.groups()
+        name = {"corn": "玉米", "carrot": "胡萝卜", "apple": "苹果", "tomato": "番茄"}.get(sku, sku)
+        return f"连续 {attempts} 次视觉定位未找到{name}，还差 {remaining} 件；订单已停止。"
     return error
 
 

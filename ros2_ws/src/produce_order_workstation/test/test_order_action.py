@@ -351,3 +351,25 @@ def test_agent_finishes_both_corn_before_switching_sku_and_recovers_bad_steps():
     ]
     assert station.finish_order.call_count == 1
     assert any(event["stage"] == "AGENT_RETRY" for event in station.events)
+
+
+def test_agent_stops_after_five_empty_visual_attempts():
+    station = Workstation(MagicMock(), CONFIG)
+    station._scene_prepared = True
+    station._completed_by_sku = {"tomato": 3}
+    station.get_object_positions = MagicMock(return_value={
+        "sku": "tomato", "detections": [], "remaining": 1,
+    })
+    model = FakeModel([("get_object_positions", {"sku": "tomato"})] * 5)
+    order = Order("missing-tomato", "A", (OrderLine("tomato", 4),))
+
+    result = station.run(order, model=model)
+
+    assert result["status"] == "FAILED"
+    assert "No tomato detected after 5 consecutive visual attempts" in result["error"]
+    assert station.get_object_positions.call_count == 5
+    assert [event["attempts"] for event in result["events"]
+            if event["stage"] == "PERCEPTION_EMPTY"] == [1, 2, 3, 4, 5]
+    assert [event["remaining"] for event in result["events"]
+            if event["stage"] == "PERCEPTION_EXHAUSTED"] == [{"tomato": 1}]
+    assert readable_error(result["error"]) == "连续 5 次视觉定位未找到番茄，还差 1 件；订单已停止。"

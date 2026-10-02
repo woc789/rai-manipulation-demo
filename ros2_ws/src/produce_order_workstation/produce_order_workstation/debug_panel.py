@@ -523,6 +523,12 @@ class DebugPanel(QWidget):
                     f"整单 {event['completed']}/{event['total']}，"
                     f"剩余 {event['remaining_by_sku']}"
                 )
+            elif stage == "PERCEPTION_EMPTY":
+                self._append(
+                    f"未找到 {event['sku']}：第 {event['attempts']}/{event['limit']} 次空检测"
+                )
+            elif stage == "PERCEPTION_EXHAUSTED":
+                self._append(f"连续空检测达到上限，订单停止：剩余 {event['remaining']}")
             self._append(json.dumps(event, ensure_ascii=False))
         except json.JSONDecodeError:
             self._append(detail)
