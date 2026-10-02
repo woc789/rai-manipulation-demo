@@ -1,0 +1,10 @@
+# One bounded arm/gripper motion. The order layer owns pick/place sequencing.
+geometry_msgs/PoseStamped target_pose
+bool initial_gripper_state
+bool final_gripper_state
+string step
+---
+bool success
+string error
+---
+string stage

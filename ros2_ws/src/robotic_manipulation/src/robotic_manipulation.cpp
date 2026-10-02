@@ -27,22 +27,12 @@ int main(int argc, char * argv[])
   auto armController = std::make_shared<ArmController>();
   armController->Initialize();
 
-  double constexpr EndEffectorBaseX = 0.3;
-  double constexpr EndEffectorBaseY = 0.0;
-  double constexpr EndEffectorBaseZ = 0.35;
-
-  if (!armController->MoveThroughWaypoints(
-        {armController->CalculatePose(EndEffectorBaseX, EndEffectorBaseY, EndEffectorBaseZ)})) {
-    RCLCPP_ERROR(rclcpp::get_logger("robotic_manipulation"), "Could not reach startup pose");
-    rclcpp::shutdown();
-    return 1;
-  }
-
-  std::vector<double> startingPose;
-  startingPose = armController->CaptureJointValues();
-
-  if (!armController->SetJointValues(startingPose)) {
-    RCLCPP_ERROR(rclcpp::get_logger("robotic_manipulation"), "Could not restore startup joints");
+  // The previous single-waypoint Cartesian startup move could return a 0% path
+  // and silently execute a no-op. Keep the actual simulated startup state as
+  // the shutdown reference; real motion must pass the full-path safety check.
+  const std::vector<double> startingPose = armController->CaptureJointValues();
+  if (startingPose.empty()) {
+    RCLCPP_ERROR(rclcpp::get_logger("robotic_manipulation"), "Could not read startup joints");
     rclcpp::shutdown();
     return 1;
   }

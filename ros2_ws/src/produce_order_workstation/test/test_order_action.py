@@ -7,16 +7,80 @@ from unittest.mock import MagicMock, call
 
 import pytest
 import yaml
+from action_msgs.msg import GoalStatus
 
 from produce_order_interfaces.action import ExecuteOrder
 from produce_order_interfaces.msg import OrderLine as OrderLineMsg
-from produce_order_workstation.order import Order, OrderError, OrderLine, PerceptionMismatch, plan_placements, readable_error, validate_order
+from produce_order_workstation.order import Order, OrderCancelled, OrderError, OrderLine, PerceptionMismatch, plan_placements, readable_error, validate_order
 from produce_order_workstation.order_server import order_from_goal, state_after_order
+from produce_order_workstation import runtime
 from produce_order_workstation.runtime import Workstation
 
 
 PACKAGE = Path(__file__).resolve().parents[1]
 CONFIG = yaml.safe_load((PACKAGE / "config/workstation.yaml").read_text())
+
+
+def test_move_uses_motion_action_and_forwards_stage_feedback(monkeypatch):
+    station = Workstation(MagicMock(), CONFIG)
+    station._active_order_id = "motion-test"
+    client = MagicMock()
+    station._motion_client = client
+    handle = MagicMock(accepted=True)
+    handle.get_result_async.return_value.done.return_value = True
+    handle.get_result_async.return_value.result.return_value = SimpleNamespace(
+        status=GoalStatus.STATUS_SUCCEEDED,
+        result=SimpleNamespace(success=True, error=""),
+    )
+    monkeypatch.setattr(runtime, "get_future_result", lambda *_args, **_kwargs: handle)
+    station.move((0.3, 0.1, 0.05), grip="grab")
+    goal = client.send_goal_async.call_args.args[0]
+    assert goal.step == "grab"
+    assert goal.target_pose.header.frame_id == "panda_link0"
+    assert goal.initial_gripper_state is True
+    assert goal.final_gripper_state is False
+    feedback = client.send_goal_async.call_args.kwargs["feedback_callback"]
+    feedback(SimpleNamespace(feedback=SimpleNamespace(stage="grab:MOVING_TO_TARGET")))
+    assert station.events[-1]["motion_stage"] == "grab:MOVING_TO_TARGET"
+
+
+def test_move_reports_motion_action_cancel_and_failure(monkeypatch):
+    station = Workstation(MagicMock(), CONFIG)
+    client = MagicMock()
+    station._motion_client = client
+    handle = MagicMock(accepted=True)
+    handle.get_result_async.return_value.done.return_value = True
+    monkeypatch.setattr(runtime, "get_future_result", lambda *_args, **_kwargs: handle)
+    handle.get_result_async.return_value.result.return_value = SimpleNamespace(
+        status=GoalStatus.STATUS_CANCELED,
+        result=SimpleNamespace(success=False, error="canceled"),
+    )
+    with pytest.raises(OrderCancelled, match="canceled"):
+        station.move((0.3, 0.1, 0.05), grip="hold")
+    handle.get_result_async.return_value.result.return_value = SimpleNamespace(
+        status=GoalStatus.STATUS_ABORTED,
+        result=SimpleNamespace(success=False, error="Initial gripper command failed"),
+    )
+    with pytest.raises(OrderError, match="Initial gripper command failed"):
+        station.move((0.3, 0.1, 0.05), grip="release")
+
+
+def test_move_forwards_order_cancel_to_motion_action(monkeypatch):
+    station = Workstation(MagicMock(), CONFIG, cancel_requested=lambda: True)
+    client = MagicMock()
+    station._motion_client = client
+    handle = MagicMock(accepted=True)
+    future = handle.get_result_async.return_value
+    future.done.side_effect = [False, True]
+    future.result.return_value = SimpleNamespace(
+        status=GoalStatus.STATUS_CANCELED,
+        result=SimpleNamespace(success=False, error="canceled at boundary"),
+    )
+    monkeypatch.setattr(runtime, "get_future_result", lambda *_args, **_kwargs: handle)
+    monkeypatch.setattr(runtime.time, "sleep", lambda _seconds: None)
+    with pytest.raises(OrderCancelled):
+        station.move((0.3, 0.1, 0.05), grip="hold")
+    handle.cancel_goal_async.assert_called_once()
 
 
 def test_scene_has_four_bins_and_mixed_order_independent_stock():

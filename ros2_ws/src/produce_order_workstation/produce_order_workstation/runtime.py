@@ -7,14 +7,16 @@ from pathlib import Path
 from typing import Callable
 
 from geometry_msgs.msg import Point, Pose, PoseStamped, Quaternion
+from action_msgs.msg import GoalStatus
 from rai.communication.ros2 import wait_for_ros2_services, wait_for_ros2_topics
 from rai.communication.ros2.connectors import ROS2Connector
 from rai.communication.ros2.ros_async import get_future_result
-from rai_interfaces.srv import ManipulatorMoveTo
+from rclpy.action import ActionClient
 from rai_sim.o3de.o3de_bridge import O3DExROS2Bridge
 from rai_sim.simulation_bridge import SceneConfig
 from std_msgs.msg import String
 from tf2_ros import TransformException
+from produce_order_interfaces.action import ExecuteMotion
 
 from .order import (
     Order,
@@ -55,6 +57,8 @@ class Workstation:
         self._perception_generation = 0
         self._rejected_visual_positions: dict[str, list[tuple[float, float, float]]] = {}
         self.motion_attempted = False
+        self._motion_client = None
+        self._active_order_id: str | None = None
         self.event_sink = event_sink
         self.cancel_requested = cancel_requested or (lambda: False)
 
@@ -118,6 +122,12 @@ class Workstation:
                 self.connector.node.declare_parameter(parameter_name, value)
         if self._position_tool is None:
             self._position_tool = GetObjectPositionsTool(connector=self.connector)
+        if self._motion_client is None:
+            self._motion_client = ActionClient(
+                self.connector.node, ExecuteMotion, "/produce_orders/execute_motion"
+            )
+        if not self._motion_client.wait_for_server(timeout_sec=timeout):
+            raise OrderError("Manipulator Action is not ready")
 
     def build_scene(self, path: Path) -> SceneConfig:
         """Load receiving bins and an order-independent mixed table inventory."""
@@ -151,6 +161,7 @@ class Workstation:
         self._perception_generation = 0
         self._rejected_visual_positions = {}
         self.motion_attempted = False
+        self._active_order_id = None
         zone = self.config["zones"]["A"]
         inventory = {sku: 0 for sku in self.config["aliases"]}
         for entity, _ in self._source_entities(zone).values():
@@ -173,6 +184,7 @@ class Workstation:
         self._perception_generation = 0
         self._rejected_visual_positions = {}
         self.motion_attempted = False
+        self._active_order_id = order.order_id
 
     def slot_bin_position(self, zone: dict, index: int, slot: tuple) -> tuple:
         """Confirm that a visible receiving bin actually occupies this slot."""
@@ -285,19 +297,20 @@ class Workstation:
         grip: str,
         target_z: float | None = None,
     ) -> None:
-        """Call the existing typed ROS service; stop on timeout or failure."""
+        """Send a bounded ROS Action goal and report motion-stage feedback."""
         if grip not in ("grab", "hold", "release"):
             raise ValueError(f"Unsupported gripper mode {grip!r}")
         motion = self.config["motion"]
-        request = ManipulatorMoveTo.Request()
-        request.target_pose = PoseStamped()
-        request.target_pose.header.frame_id = self.config["camera"]["target_frame"]
+        goal = ExecuteMotion.Goal()
+        goal.step = grip
+        goal.target_pose = PoseStamped()
+        goal.target_pose.header.frame_id = self.config["camera"]["target_frame"]
         extra_z = motion["grasp_z_offset_m"]
         if grip == "release":
             extra_z += motion["place_extra_height_m"]
         if target_z is None:
             target_z = point[2] + extra_z
-        request.target_pose.pose = Pose(
+        goal.target_pose.pose = Pose(
             position=Point(
                 x=point[0],
                 y=point[1],
@@ -310,22 +323,49 @@ class Workstation:
                 w=0.0,
             ),
         )
-        request.initial_gripper_state = grip == "grab"
-        request.final_gripper_state = grip == "release"
-        client = self.connector.node.create_client(
-            ManipulatorMoveTo, "/manipulator_move_to"
-        )
-        if not client.wait_for_service(timeout_sec=5.0):
-            raise OrderError("Manipulator service is unavailable")
-        result = get_future_result(
-            client.call_async(request), timeout_sec=motion["service_timeout_s"]
-        )
-        if result is None:
-            raise OrderError(
-                "Manipulator service timed out; physical state is unknown, stopping order"
+        goal.initial_gripper_state = grip == "grab"
+        goal.final_gripper_state = grip == "release"
+        if self._motion_client is None:
+            self._motion_client = ActionClient(
+                self.connector.node, ExecuteMotion, "/produce_orders/execute_motion"
             )
-        if not result.success:
-            raise OrderError(f"Manipulator {grip} motion failed")
+        if not self._motion_client.wait_for_server(timeout_sec=5.0):
+            raise OrderError("Manipulator Action is unavailable")
+
+        def on_feedback(message):
+            self.event(
+                self._active_order_id or "", "MOTION_STAGE",
+                step=grip, motion_stage=message.feedback.stage,
+            )
+
+        handle = get_future_result(
+            self._motion_client.send_goal_async(goal, feedback_callback=on_feedback),
+            timeout_sec=5.0,
+        )
+        if handle is None:
+            raise OrderError("Manipulator Action acceptance timed out; state is unknown")
+        if not handle.accepted:
+            raise OrderError(f"Manipulator {grip} goal was rejected")
+        result_future = handle.get_result_async()
+        deadline = time.monotonic() + motion["service_timeout_s"]
+        cancel_sent = False
+        while not result_future.done():
+            if self.cancel_requested() and not cancel_sent:
+                handle.cancel_goal_async()
+                cancel_sent = True
+                self.event(self._active_order_id or "", "MOTION_CANCEL_REQUESTED", step=grip)
+            if time.monotonic() >= deadline:
+                handle.cancel_goal_async()
+                raise OrderError(
+                    f"Manipulator {grip} Action timed out; physical state is unknown"
+                )
+            time.sleep(0.05)
+        wrapped = result_future.result()
+        if wrapped.status == GoalStatus.STATUS_CANCELED:
+            raise OrderCancelled(f"Manipulator {grip} canceled at a motion boundary")
+        if wrapped.status != GoalStatus.STATUS_SUCCEEDED or not wrapped.result.success:
+            reason = wrapped.result.error or f"Manipulator {grip} motion failed"
+            raise OrderError(reason)
 
     def pick_and_place(self, order: Order, detection_id: str) -> dict:
         """Re-localize a visual candidate, then execute validated ROS motion."""

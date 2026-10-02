@@ -9,11 +9,13 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(moveit_ros_planning_interface REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rclcpp_action REQUIRED)
 find_package(gazebo_msgs REQUIRED)
 find_package(vision_msgs REQUIRED)
 find_package(control_msgs REQUIRED)
 find_package(rosbag2_cpp REQUIRED)
 find_package(rai_interfaces REQUIRED)
+find_package(produce_order_interfaces REQUIRED)
 
 add_executable(robotic_manipulation src/robotic_manipulation.cpp src/arm_controller.cpp src/rai_manipulation_interface_node.cpp)
 target_include_directories(robotic_manipulation PUBLIC
@@ -24,11 +26,13 @@ ament_target_dependencies(
   robotic_manipulation
   "moveit_ros_planning_interface"
   "rclcpp"
+  "rclcpp_action"
   "gazebo_msgs"
   "vision_msgs"
   "control_msgs"
   "rosbag2_cpp"
   "rai_interfaces"
+  "produce_order_interfaces"
 )
 
 install(TARGETS robotic_manipulation

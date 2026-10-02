@@ -15,9 +15,11 @@ one-by-one in response to order lines.
 | `config/workstation.yaml` | Stock counts, Agent endpoint/model, fixed SKU-bin mapping, workspace and motion limits. |
 | `order.py` | Validate order and bin capacity, parse 3D perception results, determine drop offsets and verify placement. |
 | `agent.py` | Bounded OpenAI-compatible tool-calling loop; goal prompt and three tool schemas. |
-| `runtime.py` | RGB-D perception adapter, visual-candidate registry, validated pick/place tool, ROS motion service and final audit. |
+| `runtime.py` | RGB-D perception adapter, visual-candidate registry, validated pick/place tool, ROS motion Action client and final audit. |
 | `order_server.py` | Persistent ROS Action server, one order at a time, cancellation and JSON reports. |
 | `debug_panel.py` | Temporary PyQt debug UI: enter counts, watch Agent calls and ROS feedback, retry or recover the workcell. |
+| `produce_order_interfaces/action/ExecuteMotion.action` | Typed single-motion goal, stage feedback and failure result. |
+| `robotic_manipulation` | MoveIt/hand Action server; retains the legacy `/manipulator_move_to` service. |
 
 ```text
 Order goal (SKU quantities)
@@ -61,12 +63,29 @@ not a simulator-pose replacement. After closing the gripper the arm lifts the
 object while staying closed. A simulation-only `GRASP_CHECK` verifies that the
 selected object's Z actually increased before the arm transports it to a bin.
 If the lift fails, the order stops before placing and requires scene recovery.
-The movement service's `success` flag alone does not prove a successful grasp.
+The motion Action's `success` flag alone does not prove a successful grasp.
 On 2026-10-02, live visual-Agent orders completed one carrot (`1/1`, report
 `repair-carrot-lift-20261002-01.json`) and then three carrots into A2 (`3/3`,
 report `repair-carrot-lift-20261002-03.json`); every `GRASP_CHECK` recorded a
 real lift. This validates the repeated carrot failure path, not the full
 ten-item mixed order.
+
+The order Action and motion Action have different responsibilities. The order
+Action owns an entire customer order; `/produce_orders/execute_motion` executes
+one bounded arm/gripper motion. `Workstation` sends separate grab, hold/lift,
+release and retract goals, so it can verify an actual lift *before* transporting
+the item. Each motion goal sends `INITIAL_GRIPPER`, `MOVING_TO_TARGET`,
+`FINAL_GRIPPER` and `DONE` feedback, which is forwarded as
+`MOTION_STAGE` order events. The C++ server refuses concurrent motion goals,
+legacy service calls and resets. Cancellation is honored at stage boundaries;
+it does not interrupt a blocking MoveIt trajectory mid-flight. A canceled or
+timed-out motion leaves the workcell in `RECOVERY_REQUIRED` because the physical
+state may be uncertain. The legacy service remains available to old RAI tools.
+
+The C++ controller rejects incomplete Cartesian plans (fraction below 0.999),
+limits gripper retries, and bounds gripper Action waits. This does not impose a
+hard deadline on MoveIt's own synchronous `move()`/`execute()` calls; that is a
+remaining controller-level limitation.
 
 The Agent processes requested SKUs in order and must finish the full quantity
 of one SKU before switching. The model still selects a fresh RGB-D detection
@@ -202,9 +221,10 @@ PYTHONPATH=ros2_ws/src/produce_order_workstation:$PYTHONPATH \
 - `pick_and_place` rejects unknown/stale visual IDs, unrequested items,
   unstable coordinates and candidates failing the hidden simulation check.
   The configured SKU→bin mapping cannot be changed by model output.
-- A service timeout or failed placement stops the order, because the physical
-  state may be unknown. Cancellation is checked before a motion and between
-  items, but cannot interrupt a grasp already in flight.
+- An Action timeout or failed placement stops the order, because the physical
+  state may be unknown. Cancellation is forwarded to the motion Action and
+  honored at the next motion-stage boundary, not in the middle of a MoveIt
+  trajectory.
 - Scene preparation requires an empty/known simulator world. Restarting only
   the order-server process while keeping O3DE alive can leave orphan entities;
   restart the full launch if old stock remains visible. The server rejects
