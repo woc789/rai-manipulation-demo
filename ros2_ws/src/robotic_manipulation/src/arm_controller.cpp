@@ -76,18 +76,17 @@ bool ArmController::MoveThroughWaypoints(std::vector<geometry_msgs::msg::Pose> c
   int constexpr NumTries = 10;
   for (int i = 0; i < NumTries; i++) {
     moveit_msgs::msg::RobotTrajectory trajectory;
-    if (m_pandaArm->computeCartesianPath(waypoints, 0.01, 0.0, trajectory) == -1) {
-      RCLCPP_ERROR(logger, "MoveThroughWaypoints: Failed to compute Cartesian path");
+    const double fraction = m_pandaArm->computeCartesianPath(waypoints, 0.01, trajectory);
+    if (fraction < 0.999) {
+      RCLCPP_ERROR(logger, "MoveThroughWaypoints: Incomplete Cartesian path (fraction %.3f)", fraction);
       continue;
     }
 
     if (m_pandaArm->execute(trajectory) == moveit::core::MoveItErrorCode::SUCCESS) {
       return true;
     }
-    RCLCPP_ERROR(
-      logger,
-      "MoveThroughWaypoints: Failed to execute "
-      "trajectory, trying again...");
+    RCLCPP_ERROR(logger, "MoveThroughWaypoints: Trajectory execution failed; state is uncertain");
+    return false;
   }
 
   RCLCPP_ERROR(
@@ -95,34 +94,46 @@ bool ArmController::MoveThroughWaypoints(std::vector<geometry_msgs::msg::Pose> c
   return false;
 }
 
-void ArmController::Open()
+bool ArmController::Open()
 {
-  gripper.store(true);
-
   m_hand->setJointValueTarget("panda_finger_joint1", OpenGripperJointValue);
-  while (m_hand->move() != moveit::core::MoveItErrorCode::SUCCESS) {
-    RCLCPP_ERROR(m_node->get_logger(), "Failed to open hand");
+  bool moved = false;
+  for (int attempt = 0; attempt < 3; ++attempt) {
+    if (m_hand->move() == moveit::core::MoveItErrorCode::SUCCESS) {
+      moved = true;
+      break;
+    }
+    RCLCPP_ERROR(m_node->get_logger(), "Failed to open hand (attempt %d/3)", attempt + 1);
   }
 
   // Use action client to send open command. Small max_effort allows free opening.
-  if (!SendGripperCommand(1.0)) {
-    RCLCPP_ERROR(m_node->get_logger(), "Failed to open hand via gripper action");
+  if (!moved || !SendGripperCommand(1.0)) {
+    RCLCPP_ERROR(m_node->get_logger(), "Failed to open hand");
+    return false;
   }
+  gripper.store(true);
+  return true;
 }
 
-void ArmController::Close()
+bool ArmController::Close()
 {
-  gripper.store(false);
-
   m_hand->setJointValueTarget("panda_finger_joint1", 0.02);
-  while (m_hand->move() != moveit::core::MoveItErrorCode::SUCCESS) {
-    RCLCPP_ERROR(m_node->get_logger(), "Failed to close hand");
+  bool moved = false;
+  for (int attempt = 0; attempt < 3; ++attempt) {
+    if (m_hand->move() == moveit::core::MoveItErrorCode::SUCCESS) {
+      moved = true;
+      break;
+    }
+    RCLCPP_ERROR(m_node->get_logger(), "Failed to close hand (attempt %d/3)", attempt + 1);
   }
 
   // Use action client to send close command. Increase max_effort for gripping.
-  if (!SendGripperCommand(0.0)) {
-    RCLCPP_ERROR(m_node->get_logger(), "Failed to close hand via gripper action");
+  if (!moved || !SendGripperCommand(0.0)) {
+    RCLCPP_ERROR(m_node->get_logger(), "Failed to close hand");
+    return false;
   }
+  gripper.store(false);
+  return true;
 }
 
 bool ArmController::SendGripperCommand(double position)
@@ -143,18 +154,9 @@ bool ArmController::SendGripperCommand(double position)
   goal_msg.command.position = position;
 
   auto goal_handle_future = m_gripperClient->async_send_goal(goal_msg);
-  {
-    auto const timeout = std::chrono::milliseconds(10);
-    while (goal_handle_future.wait_for(timeout) != std::future_status::ready) {
-      // Give up CPU briefly — the other thread runs the executor and will
-      // make the future ready when the goal is accepted/rejected.
-      std::this_thread::yield();
-    }
-    if (goal_handle_future.wait_for(std::chrono::seconds(0)) !=
-        std::future_status::ready) {
-      RCLCPP_ERROR(logger, "Failed to send gripper goal");
-      return false;
-    }
+  if (goal_handle_future.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
+    RCLCPP_ERROR(logger, "Timed out waiting for gripper goal acceptance");
+    return false;
   }
 
   auto goal_handle = goal_handle_future.get();
@@ -164,16 +166,10 @@ bool ArmController::SendGripperCommand(double position)
   }
 
   auto result_future = m_gripperClient->async_get_result(goal_handle);
-  {
-    auto const timeout = std::chrono::milliseconds(10);
-    while (result_future.wait_for(timeout) != std::future_status::ready) {
-      std::this_thread::yield();
-    }
-    if (result_future.wait_for(std::chrono::seconds(0)) !=
-        std::future_status::ready) {
-      RCLCPP_ERROR(logger, "Failed to get result from gripper action server");
-      return false;
-    }
+  if (result_future.wait_for(std::chrono::seconds(30)) != std::future_status::ready) {
+    RCLCPP_ERROR(logger, "Timed out waiting for gripper action result");
+    m_gripperClient->async_cancel_goal(goal_handle);
+    return false;
   }
 
   auto result = result_future.get();

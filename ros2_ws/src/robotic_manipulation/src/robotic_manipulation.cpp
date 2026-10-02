@@ -31,14 +31,26 @@ int main(int argc, char * argv[])
   double constexpr EndEffectorBaseY = 0.0;
   double constexpr EndEffectorBaseZ = 0.35;
 
-  armController->MoveThroughWaypoints(
-    {armController->CalculatePose(EndEffectorBaseX, EndEffectorBaseY, EndEffectorBaseZ)});
+  if (!armController->MoveThroughWaypoints(
+        {armController->CalculatePose(EndEffectorBaseX, EndEffectorBaseY, EndEffectorBaseZ)})) {
+    RCLCPP_ERROR(rclcpp::get_logger("robotic_manipulation"), "Could not reach startup pose");
+    rclcpp::shutdown();
+    return 1;
+  }
 
   std::vector<double> startingPose;
   startingPose = armController->CaptureJointValues();
 
-  armController->SetJointValues(startingPose);
-  armController->Close();
+  if (!armController->SetJointValues(startingPose)) {
+    RCLCPP_ERROR(rclcpp::get_logger("robotic_manipulation"), "Could not restore startup joints");
+    rclcpp::shutdown();
+    return 1;
+  }
+  if (!armController->Close()) {
+    RCLCPP_ERROR(rclcpp::get_logger("robotic_manipulation"), "Could not initialize gripper");
+    rclcpp::shutdown();
+    return 1;
+  }
 
   {
     RaiManipulationInterfaceNode raiInterface;

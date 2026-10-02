@@ -71,9 +71,9 @@ void RaiManipulationInterfaceNode::Initialize(ArmController & arm)
         request->target_pose.pose.orientation.z);
 
       if (request->initial_gripper_state) {
-        arm.Open();
+        if (!arm.Open()) return;
       } else {
-        arm.Close();
+        if (!arm.Close()) return;
       }
 
       {
@@ -98,9 +98,9 @@ void RaiManipulationInterfaceNode::Initialize(ArmController & arm)
           return;
 
         if (request->final_gripper_state) {
-          arm.Open();
+          if (!arm.Open()) return;
         } else {
-          arm.Close();
+          if (!arm.Close()) return;
         }
       }
 

@@ -41,8 +41,8 @@ public:
 
   bool MoveThroughWaypoints(std::vector<geometry_msgs::msg::Pose> const & waypoints);
 
-  void Open();
-  void Close();
+  bool Open();
+  bool Close();
 
   std::vector<double> GetEffectorPose();
   bool GetGripper();
