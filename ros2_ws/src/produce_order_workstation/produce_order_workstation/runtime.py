@@ -432,6 +432,11 @@ class Workstation:
         self.event(
             order.order_id, "ITEM_COMPLETED", sku=sku, detection_id=detection_id,
             slot_id=slot_id, completed=completed, total=order.total_items,
+            sku_completed=done + 1, sku_requested=requested[sku],
+            remaining_by_sku={
+                line.sku: line.quantity - self._completed_by_sku.get(line.sku, 0)
+                for line in order.lines
+            },
         )
         return {
             "placed": detection_id, "sku": sku, "bin": slot_id,
@@ -485,5 +490,6 @@ class Workstation:
         return {
             "order_id": order.order_id, "status": status,
             "completed": len(self._placed_entities), "requested": order.total_items,
+            "lines": [{"sku": line.sku, "quantity": line.quantity} for line in order.lines],
             "error": failure, "events": self.events,
         }

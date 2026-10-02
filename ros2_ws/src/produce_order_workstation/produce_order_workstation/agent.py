@@ -99,6 +99,15 @@ class ProduceAgent:
             return self.workstation.finish_order(self.order)
         raise OrderError(f"Unknown tool or invalid tool arguments: {name}")
 
+    def _remaining(self) -> dict[str, int]:
+        return {
+            line.sku: line.quantity - self.workstation._completed_by_sku.get(line.sku, 0)
+            for line in self.order.lines
+        }
+
+    def _next_sku(self) -> str | None:
+        return next((sku for sku, count in self._remaining().items() if count), None)
+
     def run(self) -> None:
         goal = {line.sku: line.quantity for line in self.order.lines}
         messages = [
@@ -113,8 +122,9 @@ class ProduceAgent:
                     "candidate fails the visual safety check, choose a different "
                     "detection or perceive again. A rejected or stale detection is "
                     "not a completed pick; follow the tool error and re-perceive. "
-                    "Fulfil all requested counts, then "
-                    "call finish_order. Never invent IDs or coordinates. Call one tool at a time."
+                    "Complete each requested SKU in order before switching to the next. "
+                    "Fulfil all requested counts, then call finish_order. "
+                    "Never invent IDs or coordinates. Call one tool at a time."
                 ),
             },
             {
@@ -125,7 +135,7 @@ class ProduceAgent:
                 ),
             },
         ]
-        perceived = False
+        perceived_sku = None
         max_calls = self.config["max_tool_calls_per_item"] * self.order.total_items + 6
         for _ in range(max_calls):
             self.workstation.check_cancel()
@@ -139,7 +149,30 @@ class ProduceAgent:
             message = response.choices[0].message
             calls = message.tool_calls or []
             if len(calls) != 1:
-                raise OrderError("Agent must select exactly one tool per step")
+                self.workstation.event(
+                    self.order.order_id, "AGENT_RETRY",
+                    reason="Expected exactly one tool call", received=len(calls),
+                    remaining=self._remaining(), required_sku=self._next_sku(),
+                )
+                if calls:
+                    messages.append({
+                        "role": "assistant", "content": message.content,
+                        "tool_calls": [
+                            {"id": item.id, "type": "function", "function": {
+                                "name": item.function.name,
+                                "arguments": item.function.arguments,
+                            }} for item in calls
+                        ],
+                    })
+                    messages.extend({
+                        "role": "tool", "tool_call_id": item.id,
+                        "content": json.dumps({"ok": False, "retryable": True,
+                                               "error": "Call exactly one tool; no action was executed"}),
+                    } for item in calls)
+                else:
+                    messages.append({"role": "assistant", "content": message.content or ""})
+                    messages.append({"role": "user", "content": "Call exactly one tool now."})
+                continue
             call = calls[0]
             name = call.function.name
             try:
@@ -151,12 +184,26 @@ class ProduceAgent:
             self.workstation.event(
                 self.order.order_id, "AGENT_TOOL_CALL", tool=name, arguments=arguments
             )
-            if not perceived and name == "pick_and_place":
+            required_sku = self._next_sku()
+            if name == "finish_order" and required_sku is not None:
+                result = {
+                    "ok": False, "retryable": True,
+                    "error": "Requested quantities are not complete",
+                    "remaining": self._remaining(), "required_sku": required_sku,
+                }
+            elif name == "get_object_positions" and arguments.get("sku") != required_sku:
+                result = {
+                    "ok": False, "retryable": True,
+                    "error": "Complete the current SKU before switching",
+                    "remaining": self._remaining(), "required_sku": required_sku,
+                }
+            elif perceived_sku is None and name == "pick_and_place":
                 result = {
                     "ok": False,
                     "error": "Call get_object_positions before another pick; previous detections are stale",
                     "retryable": True,
                     "required_tool": "get_object_positions",
+                    "required_sku": required_sku,
                 }
             else:
                 try:
@@ -166,12 +213,24 @@ class ProduceAgent:
             self.workstation.event(
                 self.order.order_id, "AGENT_TOOL_RESULT", tool=name, result=result
             )
-            if name == "get_object_positions":
-                perceived = True
+            if name == "get_object_positions" and result.get("detections"):
+                perceived_sku = arguments["sku"]
             elif name == "pick_and_place" and result.get("placed"):
-                perceived = False
-            if name == "finish_order":
+                perceived_sku = None
+            if name == "finish_order" and result.get("status") == "verified":
                 return
+            if name == "pick_and_place" and result.get("placed"):
+                # A fresh goal summary avoids carrying old visual IDs and large
+                # perception results through a long order.
+                messages = messages[:2] + [{
+                    "role": "user",
+                    "content": json.dumps({
+                        "remaining": self._remaining(),
+                        "next_sku": self._next_sku(),
+                        "instruction": "Get fresh object positions before the next pick; finish only when all counts are zero",
+                    }, ensure_ascii=False),
+                }]
+                continue
             messages.append(
                 {
                     "role": "assistant",

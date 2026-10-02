@@ -264,8 +264,9 @@ class OrderActionServer(Node):
         return {
             "order_id": order.order_id,
             "status": status,
-            "completed": 0,
+            "completed": len(self.workstation._placed_entities),
             "requested": order.total_items,
+            "lines": [{"sku": line.sku, "quantity": line.quantity} for line in order.lines],
             "error": error,
             "events": self.workstation.events,
         }

@@ -344,6 +344,7 @@ class DebugPanel(QWidget):
         log_box = QGroupBox("③ 实时事件与输出")
         log_layout = QVBoxLayout(log_box)
         self.log = QPlainTextEdit()
+        self.log.document().setMaximumBlockCount(1000)
         self.log.setReadOnly(True)
         log_layout.addWidget(self.log)
         root.addWidget(log_box, 1)
@@ -515,6 +516,12 @@ class DebugPanel(QWidget):
                 self._append(
                     f"视觉定位 {result.get('sku')}：{len(result.get('detections', []))} 个候选，"
                     f"坐标系 {result.get('frame')}"
+                )
+            elif stage == "ITEM_COMPLETED":
+                self._append(
+                    f"{event['sku']} 已装 {event['sku_completed']}/{event['sku_requested']}；"
+                    f"整单 {event['completed']}/{event['total']}，"
+                    f"剩余 {event['remaining_by_sku']}"
                 )
             self._append(json.dumps(event, ensure_ascii=False))
         except json.JSONDecodeError:

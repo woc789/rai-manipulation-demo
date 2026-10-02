@@ -238,10 +238,15 @@ class FakeModel:
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
 
     def create(self, **_):
-        name, arguments = next(self.calls)
-        function = SimpleNamespace(name=name, arguments=json.dumps(arguments))
-        tool_call = SimpleNamespace(id=f"test-{name}", function=function)
-        message = SimpleNamespace(content=None, tool_calls=[tool_call])
+        step = next(self.calls)
+        selected = step if isinstance(step, list) else [step]
+        tool_calls = [
+            SimpleNamespace(
+                id=f"test-{index}-{name}",
+                function=SimpleNamespace(name=name, arguments=json.dumps(arguments)),
+            ) for index, (name, arguments) in enumerate(selected)
+        ]
+        message = SimpleNamespace(content=None, tool_calls=tool_calls)
         return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
 
@@ -249,7 +254,10 @@ def test_agent_loop_uses_model_chosen_perception_and_motion_tools():
     station = Workstation(MagicMock(), CONFIG)
     station._scene_prepared = True
     station.get_object_positions = MagicMock(return_value={"detections": [{"detection_id": "visual_corn_2"}]})
-    station.pick_and_place = MagicMock(return_value={"placed": "visual_corn_2"})
+    def pick(*_):
+        station._completed_by_sku["corn"] = 1
+        return {"placed": "visual_corn_2"}
+    station.pick_and_place = MagicMock(side_effect=pick)
     station.finish_order = MagicMock(return_value={"status": "verified"})
     model = FakeModel([("get_object_positions", {"sku": "corn"}), ("pick_and_place", {"detection_id": "visual_corn_2"}), ("finish_order", {})])
     result = station.run(Order("agent", "A", (OrderLine("corn", 1),)), model=model)
@@ -263,7 +271,10 @@ def test_agent_rejects_pick_without_perception_and_allows_recovery():
     station = Workstation(MagicMock(), CONFIG)
     station._scene_prepared = True
     station.get_object_positions = MagicMock(return_value={"detections": [{"detection_id": "visual_corn_1"}]})
-    station.pick_and_place = MagicMock(return_value={"placed": "visual_corn_1"})
+    def pick(*_):
+        station._completed_by_sku["corn"] = 1
+        return {"placed": "visual_corn_1"}
+    station.pick_and_place = MagicMock(side_effect=pick)
     station.finish_order = MagicMock(return_value={"status": "verified"})
     model = FakeModel([
         ("pick_and_place", {"detection_id": "visual_corn_1"}),
@@ -283,7 +294,10 @@ def test_agent_retries_after_successful_pick_without_reperception():
     station = Workstation(MagicMock(), CONFIG)
     station._scene_prepared = True
     station.get_object_positions = MagicMock(return_value={"detections": [{"detection_id": "visual_corn_1"}]})
-    station.pick_and_place = MagicMock(return_value={"placed": "visual_corn_1"})
+    def pick(*_):
+        station._completed_by_sku["corn"] = station._completed_by_sku.get("corn", 0) + 1
+        return {"placed": "visual_corn_1"}
+    station.pick_and_place = MagicMock(side_effect=pick)
     station.finish_order = MagicMock(return_value={"status": "verified"})
     model = FakeModel([
         ("get_object_positions", {"sku": "corn"}),
@@ -298,3 +312,42 @@ def test_agent_retries_after_successful_pick_without_reperception():
     assert station.pick_and_place.call_count == 2
     assert station.get_object_positions.call_count == 2
     assert sum(event["stage"] == "AGENT_TOOL_RESULT" and event["result"].get("retryable", False) for event in result["events"]) == 1
+
+
+def test_agent_finishes_both_corn_before_switching_sku_and_recovers_bad_steps():
+    station = Workstation(MagicMock(), CONFIG)
+    station._scene_prepared = True
+    station._completed_by_sku = {"corn": 0, "carrot": 0}
+    station.get_object_positions = MagicMock(side_effect=lambda _order, sku: {
+        "detections": [{"detection_id": f"visual_{sku}_1"}]
+    })
+
+    def pick(_order, detection_id):
+        sku = detection_id.split("_")[1]
+        station._completed_by_sku[sku] += 1
+        return {"placed": detection_id, "sku": sku}
+
+    station.pick_and_place = MagicMock(side_effect=pick)
+    station.finish_order = MagicMock(return_value={"status": "verified"})
+    model = FakeModel([
+        ("get_object_positions", {"sku": "corn"}),
+        ("pick_and_place", {"detection_id": "visual_corn_1"}),
+        ("get_object_positions", {"sku": "carrot"}),  # cannot skip second corn
+        ("finish_order", {}),  # cannot claim partial order complete
+        [("get_object_positions", {"sku": "corn"}), ("finish_order", {})],
+        ("get_object_positions", {"sku": "corn"}),
+        ("pick_and_place", {"detection_id": "visual_corn_1"}),
+        ("get_object_positions", {"sku": "carrot"}),
+        ("pick_and_place", {"detection_id": "visual_carrot_1"}),
+        ("finish_order", {}),
+    ])
+    order = Order("ordered", "A", (OrderLine("corn", 2), OrderLine("carrot", 1)))
+    assert station.run(order, model=model)["status"] == "COMPLETED"
+    assert [call.args[1] for call in station.get_object_positions.call_args_list] == [
+        "corn", "corn", "carrot"
+    ]
+    assert [call.args[1] for call in station.pick_and_place.call_args_list] == [
+        "visual_corn_1", "visual_corn_1", "visual_carrot_1"
+    ]
+    assert station.finish_order.call_count == 1
+    assert any(event["stage"] == "AGENT_RETRY" for event in station.events)

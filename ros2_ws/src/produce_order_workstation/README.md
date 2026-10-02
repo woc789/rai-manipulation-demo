@@ -68,6 +68,13 @@ report `repair-carrot-lift-20261002-03.json`); every `GRASP_CHECK` recorded a
 real lift. This validates the repeated carrot failure path, not the full
 ten-item mixed order.
 
+The Agent processes requested SKUs in order and must finish the full quantity
+of one SKU before switching. The model still selects a fresh RGB-D detection
+for every pick; the service owns the count and rejects premature completion.
+Unexpected zero/multiple tool calls are returned as retryable feedback without
+moving the arm. `ITEM_COMPLETED` feedback includes the per-SKU count and all
+remaining quantities, and reports retain the submitted order lines.
+
 Each perception call invalidates every earlier visual ID and generates IDs
 with a new generation number. If the Agent attempts a pick without fresh
 perception, or selects a stale detection, the tool returns a retryable error
@@ -92,6 +99,30 @@ source src/examples/rai-manipulation-demo/ros2_ws/install/setup.bash
 unset ALL_PROXY all_proxy  # this host has an unsupported socks:// proxy setting
 ros2 launch produce_order_workstation workstation.launch.py
 ```
+
+On the 16 GiB desktop, the preferred GUI launch is a separate user service so
+an out-of-memory kill of the simulator does not terminate the Codex desktop
+process. The start scripts clear inherited ROS Kilted paths before loading
+Jazzy; the simulator script also bounds allocator arenas and BLAS threads.
+Run these from a graphical login (adjust `DISPLAY` and `XAUTHORITY` if needed):
+
+```bash
+systemd-run --user --unit=produce-order-workstation --collect \
+  --property=WorkingDirectory=/home/wang/rai_embodied_project \
+  --setenv=DISPLAY=:1 --setenv=XAUTHORITY=/run/user/1000/gdm/Xauthority \
+  /bin/bash /home/wang/rai_embodied_project/src/examples/rai-manipulation-demo/ros2_ws/src/produce_order_workstation/scripts/start_workstation.sh
+systemd-run --user --unit=produce-order-panel --collect \
+  --property=WorkingDirectory=/home/wang/rai_embodied_project \
+  --setenv=DISPLAY=:1 --setenv=XAUTHORITY=/run/user/1000/gdm/Xauthority \
+  /bin/bash /home/wang/rai_embodied_project/src/examples/rai-manipulation-demo/ros2_ws/src/produce_order_workstation/scripts/start_debug_panel.sh
+```
+
+Check `systemctl --user show produce-order-workstation.service -p ActiveState
+-p MemoryCurrent -p MemoryPeak` and `journalctl --user -u
+produce-order-workstation.service -f` if the machine becomes slow. This
+isolates failures and lowers allocator overhead; it does not guarantee that
+every possible high-memory order can complete. Stop the units only when no
+order is running.
 
 The Agent uses the installed `openai` Python package and the Bailian
 OpenAI-compatible API. `DASHSCOPE_API_KEY` may be set in the launch environment;
