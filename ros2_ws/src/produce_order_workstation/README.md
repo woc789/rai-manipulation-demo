@@ -76,7 +76,11 @@ The Agent uses the installed `openai` Python package and the Bailian
 OpenAI-compatible API. `DASHSCOPE_API_KEY` may be set in the launch environment;
 on this workstation it can also be read from the existing mode-600
 `~/.config/rai/bailian.env` file. The key is never stored in this repository.
-The defaults are `qwen-plus` and the Beijing compatible endpoint. Override
+The defaults are `qwen3.8-flash` and the Beijing compatible endpoint. The
+model supports Function Calling, and a live tool-call smoke test succeeded
+on 2026-10-02 with the existing private API key. The model may be covered by
+the account's time-limited free quota only while quota remains and its
+"free-tier-only" switch is enabled; this is not a permanent free API. Override
 with `PRODUCE_AGENT_MODEL` and `PRODUCE_AGENT_BASE_URL` if needed. Model API
 calls may consume paid quota; there is **no scripted fallback** when the key or
 API is unavailable.

@@ -20,6 +20,7 @@ CONFIG = yaml.safe_load((PACKAGE / "config/workstation.yaml").read_text())
 
 
 def test_scene_has_four_bins_and_mixed_order_independent_stock():
+    assert CONFIG["agent"]["model"] == "qwen3.8-flash"
     scene = yaml.safe_load((PACKAGE / "config/demo_scene.yaml").read_text())
     entities = {item["name"]: item for item in scene["entities"]}
     zone = CONFIG["zones"]["A"]
