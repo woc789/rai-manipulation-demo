@@ -165,19 +165,49 @@ def test_agent_chosen_entity_runs_motion_and_audit(monkeypatch):
     station._source_entities = MagicMock(return_value={entity.name: (entity, source)})
     station.slot_bin_position = MagicMock(return_value=slot)
     station.observe_after_place = MagicMock(return_value=[(*slot, 0.05)])
+    station.entity_position = MagicMock(return_value=(source[0], source[1], source[2] + 0.1))
     station.move = MagicMock()
     order = Order("motion", "A", (OrderLine("corn", 1),))
     assert station.pick_and_place(order, "visual_corn_1")["bin"] == "A1"
     assert station.motion_attempted is True
     assert station.move.call_args_list == [
         call(source, grip="grab"),
+        call(source, grip="hold", target_z=CONFIG["motion"]["post_grasp_lift_z_m"]),
         call((*slot, source[2]), grip="release", target_z=CONFIG["motion"]["bin_release_z_m"]),
         call((*slot, source[2]), grip="release", target_z=CONFIG["motion"]["bin_clearance_z_m"]),
     ]
+    assert any(event["stage"] == "GRASP_CHECK" and event["verified"] for event in station.events)
     assert station.finish_order(order)["status"] == "verified"
     station.observe_after_place.return_value = [(slot[0] + 0.2, slot[1], 0.05)]
     with pytest.raises(OrderError, match="Final audit"):
         station.finish_order(order)
+
+
+def test_failed_lift_stops_before_transport(monkeypatch):
+    monkeypatch.setattr("produce_order_workstation.runtime.time.sleep", lambda _: None)
+    station = Workstation(MagicMock(), CONFIG)
+    station._scene_prepared = True
+    station._completed_by_sku = {"carrot": 0}
+    visual = (0.414, -0.347, 0.041)
+    actual = (0.390, -0.347, 0.027)
+    entity = SimpleNamespace(name="stock_carrot_3", prefab_name="carrot")
+    station._visual_candidates = {"visual_carrot_1_1": ("carrot", visual)}
+    station.detect = MagicMock(return_value=[visual])
+    station._source_entities = MagicMock(return_value={entity.name: (entity, actual)})
+    station.slot_bin_position = MagicMock(return_value=tuple(CONFIG["zones"]["A"]["slots"][1]))
+    station.entity_position = MagicMock(return_value=actual)
+    station.move = MagicMock()
+    order = Order("missed-grasp", "A", (OrderLine("carrot", 1),))
+    with pytest.raises(OrderError, match="not lifted"):
+        station.pick_and_place(order, "visual_carrot_1_1")
+    corrected = pytest.approx((0.390, -0.347, 0.027))
+    assert station.move.call_count == 2
+    assert station.move.call_args_list[0].args[0] == corrected
+    assert station.move.call_args_list[1].kwargs == {
+        "grip": "hold", "target_z": CONFIG["motion"]["post_grasp_lift_z_m"]
+    }
+    assert not any(event["stage"] == "PLACING" for event in station.events)
+    assert any(event["stage"] == "GRASP_CHECK" and not event["verified"] for event in station.events)
 
 
 def test_misclassified_visual_candidate_cannot_move_robot():

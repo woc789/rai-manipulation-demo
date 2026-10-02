@@ -7,6 +7,7 @@ import yaml
 
 from produce_order_workstation.order import (
     OrderError,
+    calibrated_grasp_point,
     choose_source,
     load_order,
     parse_centroids,
@@ -18,6 +19,14 @@ from produce_order_workstation.runtime import Workstation
 
 PACKAGE = Path(__file__).resolve().parents[1]
 CONFIG = yaml.safe_load((PACKAGE / "config/workstation.yaml").read_text())
+
+
+def test_carrot_visual_grasp_calibration_is_sku_specific():
+    visual = (0.414, -0.347, 0.041)
+    assert calibrated_grasp_point(visual, "carrot", CONFIG) == pytest.approx(
+        (0.390, -0.347, 0.027)
+    )
+    assert calibrated_grasp_point(visual, "corn", CONFIG) == visual
 
 
 def test_demo_order_has_two_unique_items_and_slots():

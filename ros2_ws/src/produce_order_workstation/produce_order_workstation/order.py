@@ -32,6 +32,16 @@ def readable_error(error: str) -> str:
     return error
 
 
+def calibrated_grasp_point(
+    visual_point: tuple[float, float, float], sku: str, config: dict
+) -> tuple[float, float, float]:
+    """Apply a measured workcell calibration to a camera-derived point."""
+    correction = config["motion"].get("grasp_correction_m", {}).get(sku, [0.0, 0.0, 0.0])
+    if len(correction) != 3:
+        raise ValueError(f"grasp_correction_m[{sku}] must contain x, y and z offsets")
+    return tuple(value + offset for value, offset in zip(visual_point, correction))
+
+
 @dataclass(frozen=True)
 class OrderLine:
     sku: str

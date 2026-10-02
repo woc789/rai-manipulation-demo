@@ -21,6 +21,7 @@ from .order import (
     OrderCancelled,
     OrderError,
     PerceptionMismatch,
+    calibrated_grasp_point,
     choose_source,
     distance_xy,
     parse_centroids,
@@ -270,9 +271,12 @@ class Workstation:
         self.event(order.order_id, "PERCEPTION_RESULT", **result)
         return result
 
-    def observe_after_place(self, sku: str, entity):
+    def entity_position(self, entity) -> tuple[float, float, float]:
         position = self._scene_bridge.get_object_pose(entity).pose.position
-        return [(position.x, position.y, position.z)]
+        return (position.x, position.y, position.z)
+
+    def observe_after_place(self, sku: str, entity):
+        return [self.entity_position(entity)]
 
     def move(
         self,
@@ -282,6 +286,8 @@ class Workstation:
         target_z: float | None = None,
     ) -> None:
         """Call the existing typed ROS service; stop on timeout or failure."""
+        if grip not in ("grab", "hold", "release"):
+            raise ValueError(f"Unsupported gripper mode {grip!r}")
         motion = self.config["motion"]
         request = ManipulatorMoveTo.Request()
         request.target_pose = PoseStamped()
@@ -358,6 +364,8 @@ class Workstation:
             self._rejected_visual_positions.setdefault(sku, []).append(source)
             self._visual_candidates.pop(detection_id, None)
             raise PerceptionMismatch("Visual class/position failed safety check; choose another detection")
+        grasp_source = calibrated_grasp_point(source, sku, self.config)
+        choose_source([grasp_source], self.config, zone)
         placements = [
             item for item in plan_placements(order, self.config) if item.sku == sku
         ]
@@ -371,10 +379,30 @@ class Workstation:
             raise OrderError("Source is too close to destination slot")
         self.event(
             order.order_id, "GRASPING", sku=sku, detection_id=detection_id,
-            source=source, position_source="rgbd_perception",
+            source=grasp_source, visual_source=source,
+            position_source="rgbd_perception_with_workcell_calibration",
         )
         self.motion_attempted = True
-        self.move(source, grip="grab")
+        self.move(grasp_source, grip="grab")
+        self.event(order.order_id, "LIFTING", sku=sku, detection_id=detection_id)
+        self.move(
+            grasp_source, grip="hold",
+            target_z=self.config["motion"]["post_grasp_lift_z_m"],
+        )
+        time.sleep(self.config["motion"]["lift_settle_time_s"])
+        lifted = self.entity_position(entity)
+        min_lift = self.config["motion"]["min_object_lift_m"]
+        grasp_verified = lifted[2] - actual[2] >= min_lift
+        self.event(
+            order.order_id, "GRASP_CHECK", sku=sku, detection_id=detection_id,
+            before=actual, after=lifted, min_lift_m=min_lift,
+            verified=grasp_verified,
+        )
+        if not grasp_verified:
+            raise OrderError(
+                f"{sku} was not lifted after closing the gripper; "
+                "stopping before transport"
+            )
         self.event(
             order.order_id, "PLACING", sku=sku, detection_id=detection_id,
             slot_id=slot_id, target=target, bin_position=bin_position,

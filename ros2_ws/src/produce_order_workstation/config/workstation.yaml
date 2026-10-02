@@ -45,6 +45,13 @@ workspace:
   source_exclusion_radius_m: 0.08
 motion:
   grasp_z_offset_m: 0.10
+  # Measured RGB-D centroid bias for the narrow carrot prefab in this O3DE camera.
+  # These offsets adjust the visual grasp target; simulator poses are only a safety check.
+  grasp_correction_m:
+    carrot: [-0.024, 0.0, -0.014]
+  post_grasp_lift_z_m: 0.30
+  min_object_lift_m: 0.06
+  lift_settle_time_s: 0.3
   place_extra_height_m: 0.05
   bin_release_z_m: 0.32
   bin_clearance_z_m: 0.40

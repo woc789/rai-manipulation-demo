@@ -54,6 +54,20 @@ are excluded for the rest of the order. If no trustworthy candidate remains,
 the order fails safely rather than claiming success. The stock layout remains
 fixed and mixed so perception failures are reproducible.
 
+The carrot prefab has a repeatable RGB-D centroid bias of roughly +2–3 cm in
+X in this fixed camera/workcell. `motion.grasp_correction_m.carrot` applies a
+measured offset to the visual point before motion; it is a fixed calibration,
+not a simulator-pose replacement. After closing the gripper the arm lifts the
+object while staying closed. A simulation-only `GRASP_CHECK` verifies that the
+selected object's Z actually increased before the arm transports it to a bin.
+If the lift fails, the order stops before placing and requires scene recovery.
+The movement service's `success` flag alone does not prove a successful grasp.
+On 2026-10-02, live visual-Agent orders completed one carrot (`1/1`, report
+`repair-carrot-lift-20261002-01.json`) and then three carrots into A2 (`3/3`,
+report `repair-carrot-lift-20261002-03.json`); every `GRASP_CHECK` recorded a
+real lift. This validates the repeated carrot failure path, not the full
+ten-item mixed order.
+
 Each perception call invalidates every earlier visual ID and generates IDs
 with a new generation number. If the Agent attempts a pick without fresh
 perception, or selects a stale detection, the tool returns a retryable error
