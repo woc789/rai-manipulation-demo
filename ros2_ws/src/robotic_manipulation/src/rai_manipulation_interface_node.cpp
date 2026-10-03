@@ -41,7 +41,8 @@ RaiManipulationInterfaceNode::~RaiManipulationInterfaceNode()
 }
 
 bool RaiManipulationInterfaceNode::RunMove(
-  ArmController & arm, const geometry_msgs::msg::PoseStamped & target_pose,
+  ArmController & arm, const std::string & step,
+  const geometry_msgs::msg::PoseStamped & target_pose,
   bool initial_gripper_state, bool final_gripper_state,
   const std::function<void(const std::string &)> & publish_stage,
   const std::function<bool()> & cancel_requested, std::string & error)
@@ -72,19 +73,75 @@ bool RaiManipulationInterfaceNode::RunMove(
   if (check_cancel()) return false;
 
   const auto current = arm.GetEffectorPose();
+  if (current.size() < 3) {
+    error = "Current end-effector pose is unavailable";
+    return false;
+  }
   auto above_current = current;
-  auto safe_z = [](double z) {return std::clamp(z + 0.1, 0.3, 0.4);};
+  // The order route is planned through the real centre divider at the lowest
+  // clearance that still protects stock and bin rims. A fixed 0.4 m waypoint
+  // simply passed over the divider and never exercised obstacle avoidance.
+  auto safe_z = [step](double z) {
+      return step == "legacy" ? std::clamp(z + 0.1, 0.3, 0.4) : std::max(z, 0.3);
+    };
   above_current[2] = safe_z(above_current[2]);
   auto above_target = pose;
   above_target.position.z = safe_z(pose.position.z);
 
-  publish_stage("MOVING_TO_TARGET");
-  if (!arm.MoveThroughWaypoints(
-      {arm.CalculatePose(above_current[0], above_current[1], above_current[2]),
-        above_target, pose}))
+  // Keep the legacy service unchanged. For order Actions, only the transfer
+  // between clearance poses is planned freely; contact motions stay Cartesian.
+  if (step == "legacy") {
+    publish_stage("MOVING_TO_TARGET");
+    if (!arm.MoveThroughWaypoints(
+        {arm.CalculatePose(above_current[0], above_current[1], above_current[2]),
+          above_target, pose}))
+    {
+      error = "Manipulator path planning or execution failed";
+      return false;
+    }
+  } else if (step == "hold" ||
+    (step == "release" &&
+    std::hypot(pose.position.x - current[0], pose.position.y - current[1]) < 0.02))
   {
-    error = "Manipulator path planning or execution failed";
-    return false;
+    publish_stage("LOCAL_CARTESIAN");
+    if (!arm.MoveThroughWaypoints({pose})) {
+      error = "Local lift or retract could not be completed";
+      return false;
+    }
+  } else {
+    if (above_current[2] > current[2] + 0.005) {
+      publish_stage("CLEARING_WORKSPACE");
+      auto rise_pose = pose;
+      rise_pose.position.x = current[0];
+      rise_pose.position.y = current[1];
+      rise_pose.position.z = above_current[2];
+      if (!arm.MoveThroughWaypoints({rise_pose}))
+      {
+        error = "Could not rise to the transit clearance pose";
+        return false;
+      }
+    }
+    if (check_cancel()) return false;
+    ArmController::ArmPlan plan;
+    publish_stage("PLANNING_TRANSIT");
+    if (!arm.PlanFreeSpaceToPose(above_target, plan)) {
+      error = "MoveIt could not plan a collision-free transit route";
+      return false;
+    }
+    if (check_cancel()) return false;
+    publish_stage("EXECUTING_TRANSIT");
+    if (!arm.ExecutePlan(plan)) {
+      error = "MoveIt transit route did not execute successfully";
+      return false;
+    }
+    if (check_cancel()) return false;
+    if (std::abs(above_target.position.z - pose.position.z) > 0.005) {
+      publish_stage("FINAL_APPROACH");
+      if (!arm.MoveThroughWaypoints({pose})) {
+        error = "Local Cartesian approach failed";
+        return false;
+      }
+    }
   }
   if (check_cancel()) return false;
 
@@ -120,7 +177,7 @@ void RaiManipulationInterfaceNode::Initialize(ArmController & arm)
       std::string error;
       try {
         response->success = RunMove(
-          arm, request->target_pose, request->initial_gripper_state,
+          arm, "legacy", request->target_pose, request->initial_gripper_state,
           request->final_gripper_state, [](const std::string &) {},
           []() {return false;}, error);
       } catch (const std::exception & exc) {
@@ -180,7 +237,7 @@ void RaiManipulationInterfaceNode::ExecuteAction(
     };
   try {
     result->success = RunMove(
-      *m_arm, goal->target_pose, goal->initial_gripper_state,
+      *m_arm, goal->step, goal->target_pose, goal->initial_gripper_state,
       goal->final_gripper_state, feedback,
       [goal_handle]() {return goal_handle->is_canceling();}, result->error);
   } catch (const std::exception & exc) {

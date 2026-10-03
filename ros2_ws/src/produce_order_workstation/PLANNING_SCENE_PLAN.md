@@ -87,3 +87,59 @@ calibration values that must be checked against the live scene.
   needs end-effector calibration and failure reconciliation, while MTC needs
   fixed/dynamic scene reliability. Neither is silently bundled into this
   fixed-scene delivery.
+
+## Follow-up: physical divider and free-space transit (2026-10-03)
+
+This follow-up implements the next bounded step without introducing MTC.
+`demo_scene.yaml` spawns a real `toy_box` on its side at (0.41, 0, 0.11).
+The prefab's physics colliders give an approximately 0.125 × 0.20 × 0.20 m
+world-space envelope. An early eight-cube stack was tried in the simulator;
+it collapsed and scattered, so it was removed. A single side-lying crate
+held its pose in O3DE and needs no new engine asset or download.
+
+`Workstation.prepare_scene()` reads the crate's settled pose. The planning
+scene rejects it if the physical body is absent, displaced or tipped, then
+publishes a conservative box enclosing the actual crate. The obstacle is
+therefore both visible/physical in O3DE and collision-relevant in MoveIt.
+The stock rows moved to x=0.24/0.30, with the second row staggered 5.5 cm
+in Y; A2/A3 moved to y=±0.23. A first attempt at x=0.34 blocked Cartesian
+grasp approaches near the divider, so the row was shifted again and all 16
+nominal source approaches were plan-checked. This changes the historical bin coordinates,
+so the previous 7/7 order is a baseline, not a pass for the new layout.
+The closest pair after physics settling was about 7 cm (a corn and carrot);
+the present vision model may still miss or confuse nearby produce, so a
+loaded order remains the required end-to-end check.
+
+`ArmController::PlanFreeSpaceToPose()` now asks MoveIt/OMPL for the transit
+route; `ExecutePlan()` executes it. `RaiManipulationInterfaceNode::RunMove()`
+keeps local lift/approach/retract Cartesian, but order Actions use the planner
+for cross-workcell travel at a low 0.30–0.32 m clearance. The old service
+keeps its legacy waypoint behaviour. After a verified real lift,
+`PlanningSceneSync.attach_carried()` places a sphere at the measured object
+centre in `panda_hand`; release detaches it, and recovery clears stale
+workstation attachments. The Agent still obtains grasp coordinates only from
+RGB-D perception.
+
+Plan-only comparison before deploying the crate: the same crossing had a
+100% Cartesian fraction without it, 66.1% with it; the OMPL free-space plan
+remained successful. After deployment, the read-only probe confirmed the
+live scene still gives 66.1% Cartesian fraction and a successful free-space
+plan for that original crossing. For an actual final-layout source at
+(0.30, 0.33), the straight route is about 71% complete, the source approach
+100% complete and the free-space plan successful. Use
+`python scripts/probe_obstacle.py` from this package's
+source directory in the Jazzy/`rai-jazzy` ROS environment to repeat that
+read-only plan check. It synthesizes a carried sphere and **does not execute
+motion or submit an order**. `--compare-temporary` is an invasive diagnostic
+for an explicitly idle scene, not the normal operation mode.
+
+The new C++/Python packages built and all 39 workstation tests passed. In a
+live idle scene the order service reported `READY`; `/get_planning_scene`
+listed `produce_workstation/route_barrier`. A no-order motion-Action smoke
+test moved the empty hand from the stock side to the bin side and back; all
+three Actions returned `SUCCEEDED`, including `PLANNING_TRANSIT` and
+`EXECUTING_TRANSIT`. A separate live test attached a diagnostic sphere to
+`panda_hand`, read it back, removed it and verified its removal. No customer
+order was submitted during this follow-up, so loaded grasp/place acceptance
+remains for the operator to test with their own order. Do not claim
+that an empty-hand smoke test proves loaded pick-and-place success.

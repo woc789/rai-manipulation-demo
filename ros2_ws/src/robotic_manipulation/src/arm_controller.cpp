@@ -42,6 +42,8 @@ void ArmController::Initialize()
 
   m_pandaArm->setMaxVelocityScalingFactor(1.0);
   m_pandaArm->setMaxAccelerationScalingFactor(1.0);
+  m_pandaArm->setPlanningTime(5.0);
+  m_pandaArm->setNumPlanningAttempts(3);
 }
 
 ArmController::~ArmController()
@@ -92,6 +94,35 @@ bool ArmController::MoveThroughWaypoints(std::vector<geometry_msgs::msg::Pose> c
   RCLCPP_ERROR(
     logger, "MoveThroughWaypoints: Failed to execute trajectory after %d tries", NumTries);
   return false;
+}
+
+bool ArmController::PlanFreeSpaceToPose(
+  const geometry_msgs::msg::Pose & target, ArmPlan & plan)
+{
+  m_pandaArm->setStartStateToCurrentState();
+  if (!m_pandaArm->setPoseTarget(target)) {
+    RCLCPP_ERROR(m_node->get_logger(), "No IK target for free-space motion");
+    m_pandaArm->clearPoseTargets();
+    return false;
+  }
+  const auto result = m_pandaArm->plan(plan);
+  m_pandaArm->clearPoseTargets();
+  if (result != moveit::core::MoveItErrorCode::SUCCESS ||
+    plan.trajectory.joint_trajectory.points.empty())
+  {
+    RCLCPP_ERROR(m_node->get_logger(), "MoveIt could not find a free-space route");
+    return false;
+  }
+  return true;
+}
+
+bool ArmController::ExecutePlan(const ArmPlan & plan)
+{
+  if (m_pandaArm->execute(plan) != moveit::core::MoveItErrorCode::SUCCESS) {
+    RCLCPP_ERROR(m_node->get_logger(), "Free-space route execution failed");
+    return false;
+  }
+  return true;
 }
 
 bool ArmController::Open()

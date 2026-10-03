@@ -1,6 +1,7 @@
 from collections import Counter
 from copy import deepcopy
 import json
+from math import hypot
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call
@@ -93,10 +94,21 @@ def test_scene_has_four_bins_and_mixed_order_independent_stock():
         assert entities[name]["prefab_name"] == "toy_box"
         pos = entities[name]["pose"]["translation"]
         assert [pos["x"], pos["y"]] == slot
+    barrier = entities[CONFIG["planning_scene"]["barrier"]["entity"]]
+    assert barrier["prefab_name"] == "toy_box"
+    assert barrier["pose"]["rotation"]["y"] == pytest.approx(2 ** -0.5)
     stock = Counter(item["prefab_name"] for item in entities.values() if item["prefab_name"] != "toy_box")
     assert stock == CONFIG["stock"]["initial_counts"]
+    positions = [
+        item["pose"]["translation"] for item in entities.values()
+        if item["prefab_name"] in CONFIG["aliases"]
+    ]
+    assert min(
+        hypot(a["x"] - b["x"], a["y"] - b["y"])
+        for i, a in enumerate(positions) for b in positions[i + 1:]
+    ) > 0.08
     scene_config = Workstation(MagicMock(), CONFIG).build_scene(PACKAGE / "config/demo_scene.yaml")
-    assert len(scene_config.entities) == 20
+    assert len(scene_config.entities) == 21
 
 
 def test_stock_quantity_is_distinct_from_bin_capacity():
@@ -227,6 +239,7 @@ def test_agent_chosen_entity_runs_motion_and_audit(monkeypatch):
     station._visual_candidates = {"visual_corn_1": ("corn", source)}
     station.detect = MagicMock(return_value=[source])
     station._source_entities = MagicMock(return_value={entity.name: (entity, source)})
+    station._planning_scene = MagicMock()
     station.slot_bin_position = MagicMock(return_value=slot)
     station.observe_after_place = MagicMock(return_value=[(*slot, 0.05)])
     station.entity_position = MagicMock(return_value=(source[0], source[1], source[2] + 0.1))
@@ -241,6 +254,15 @@ def test_agent_chosen_entity_runs_motion_and_audit(monkeypatch):
         call((*slot, source[2]), grip="release", target_z=CONFIG["motion"]["bin_clearance_z_m"]),
     ]
     assert any(event["stage"] == "GRASP_CHECK" and event["verified"] for event in station.events)
+    carried_id = "produce_workstation/carried_stock_corn_1"
+    station._planning_scene.attach_carried.assert_called_once_with(
+        carried_id,
+        (source[0], source[1], source[2] + 0.1),
+        CONFIG["planning_scene"]["carried_radius_m"]["corn"],
+        station.connector,
+        CONFIG["camera"]["target_frame"],
+    )
+    station._planning_scene.detach_carried.assert_called_once_with(carried_id)
     assert station.finish_order(order)["status"] == "verified"
     station.observe_after_place.return_value = [(slot[0] + 0.2, slot[1], 0.05)]
     with pytest.raises(OrderError, match="Final audit"):

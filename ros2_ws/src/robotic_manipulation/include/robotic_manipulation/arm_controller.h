@@ -32,6 +32,8 @@
 class ArmController
 {
 public:
+  using ArmPlan = moveit::planning_interface::MoveGroupInterface::Plan;
+
   ArmController() = default;
   ~ArmController();
 
@@ -40,6 +42,8 @@ public:
   geometry_msgs::msg::Pose CalculatePose(double x, double y, double z, double r = 0.0);
 
   bool MoveThroughWaypoints(std::vector<geometry_msgs::msg::Pose> const & waypoints);
+  bool PlanFreeSpaceToPose(const geometry_msgs::msg::Pose & target, ArmPlan & plan);
+  bool ExecutePlan(const ArmPlan & plan);
 
   bool Open();
   bool Close();

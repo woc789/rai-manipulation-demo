@@ -21,8 +21,8 @@ zones:
       tomato: 3
     slots:
       - [0.50, -0.48]
-      - [0.57, -0.16]
-      - [0.57, 0.16]
+      - [0.57, -0.23]
+      - [0.57, 0.23]
       - [0.50, 0.48]
     slot_entities:
       - order_bin_A1
@@ -56,6 +56,18 @@ planning_scene:
   bin_floor_thickness_m: 0.02
   bin_wall_thickness_m: 0.008
   bin_wall_height_m: 0.07
+  # Conservative transit proxies; grasped pose comes from the verified O3DE
+  # lift audit and is never shown to the Agent as a perception result.
+  carried_radius_m: {corn: 0.035, carrot: 0.035, apple: 0.030, tomato: 0.030}
+  # Measured AABB of toy_box lying on its side (90 degrees around Y). Offsets
+  # are relative to the settled prefab origin, not the spawning table frame.
+  barrier:
+    entity: route_barrier
+    expected_origin: [0.41, 0.0, 0.11]
+    center_offset_m: [0.0525, 0.0, 0.0]
+    dimensions_m: [0.125, 0.20, 0.20]
+    pose_tolerance_m: 0.015
+    orientation_tolerance_rad: 0.08
 motion:
   grasp_z_offset_m: 0.10
   # Measured RGB-D centroid bias for the narrow carrot prefab in this O3DE camera.

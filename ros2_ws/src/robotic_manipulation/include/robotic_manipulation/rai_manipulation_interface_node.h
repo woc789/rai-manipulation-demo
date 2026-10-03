@@ -39,7 +39,8 @@ private:
   using MotionGoalHandle = rclcpp_action::ServerGoalHandle<ExecuteMotion>;
 
   bool RunMove(
-    ArmController & arm, const geometry_msgs::msg::PoseStamped & target_pose,
+    ArmController & arm, const std::string & step,
+    const geometry_msgs::msg::PoseStamped & target_pose,
     bool initial_gripper_state, bool final_gripper_state,
     const std::function<void(const std::string &)> & publish_stage,
     const std::function<bool()> & cancel_requested, std::string & error);

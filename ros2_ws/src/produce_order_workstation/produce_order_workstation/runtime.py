@@ -165,12 +165,22 @@ class Workstation:
                 )
                 pose = self._scene_bridge.get_object_pose(entity).pose.position
                 bin_positions[name] = (xy[0], xy[1], pose.z)
+        barrier_name = self.config["planning_scene"]["barrier"]["entity"]
+        barrier_entity = next(
+            (item for item in self._scene_bridge.spawned_entities if item.name == barrier_name),
+            None,
+        )
+        if barrier_entity is None or barrier_entity.prefab_name != "toy_box":
+            raise OrderError(f"Physical route barrier {barrier_name} is missing")
+        barrier_pose = self._scene_bridge.get_object_pose(barrier_entity).pose
         if self._planning_scene is None:
             self._planning_scene = PlanningSceneSync(
                 self.connector.node,
                 timeout_s=self.config["planning_scene"]["service_timeout_s"],
             )
-        scene_objects = self._planning_scene.synchronize(self.config, bin_positions)
+        scene_objects = self._planning_scene.synchronize(
+            self.config, bin_positions, barrier_pose
+        )
         self._scene_prepared = True
         self._placed_entities = []
         self._completed_by_sku = {}
@@ -462,6 +472,15 @@ class Workstation:
                 f"{sku} was not lifted after closing the gripper; "
                 "stopping before transport"
             )
+        carried_id = f"produce_workstation/carried_{entity.name}"
+        self._planning_scene.attach_carried(
+            carried_id,
+            lifted,
+            self.config["planning_scene"]["carried_radius_m"][sku],
+            self.connector,
+            self.config["camera"]["target_frame"],
+        )
+        self.event(order.order_id, "OBJECT_ATTACHED", sku=sku, object_id=carried_id)
         self.event(
             order.order_id, "PLACING", sku=sku, detection_id=detection_id,
             slot_id=slot_id, target=target, bin_position=bin_position,
@@ -470,6 +489,8 @@ class Workstation:
             (target[0], target[1], source[2]),
             grip="release", target_z=self.config["motion"]["bin_release_z_m"],
         )
+        self._planning_scene.detach_carried(carried_id)
+        self.event(order.order_id, "OBJECT_DETACHED", sku=sku, object_id=carried_id)
         self.event(order.order_id, "RETRACTING", sku=sku, slot_id=slot_id)
         self.move(
             (target[0], target[1], source[2]),

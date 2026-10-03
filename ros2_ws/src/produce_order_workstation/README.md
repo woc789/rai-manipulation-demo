@@ -2,7 +2,8 @@
 
 This ROS 2/O3DE workcell accepts a structured produce order as a **goal**. On
 server startup the scene is preloaded with 16 mixed products (four each of
-corn, carrot, apple and tomato), plus four visible receiving bins. A Bailian
+corn, carrot, apple and tomato), four visible receiving bins, and a physical
+side-lying crate dividing the transit route. A Bailian
 model chooses perception and grasp tools plus visual candidates; ROS tools own the
 physical motion, bin mapping and verification. The products are never generated
 one-by-one in response to order lines.
@@ -11,14 +12,14 @@ one-by-one in response to order lines.
 
 | File | Responsibility |
 | --- | --- |
-| `config/demo_scene.yaml` | Reproducible mixed table inventory and four receiving bins; independent of the order. |
+| `config/demo_scene.yaml` | Reproducible mixed inventory, four bins and a physical route barrier; independent of the order. |
 | `config/workstation.yaml` | Stock counts, Agent endpoint/model, fixed SKU-bin mapping, workspace and motion limits. |
 | `order.py` | Validate order and bin capacity, parse 3D perception results, determine drop offsets and verify placement. |
 | `agent.py` | Bounded OpenAI-compatible tool-calling loop; goal prompt and three tool schemas. |
 | `runtime.py` | RGB-D perception adapter, visual-candidate registry, validated pick/place tool, ROS motion Action client and final audit. |
 | `order_server.py` | Persistent ROS Action server, one order at a time, cancellation and JSON reports. |
 | `debug_panel.py` | Temporary PyQt debug UI: enter counts, watch Agent calls and ROS feedback, retry or recover the workcell. |
-| `planning_scene.py` | Synchronize conservative table and A1–A4 bin collision proxies to MoveIt and verify readback before accepting orders. |
+| `planning_scene.py` | Synchronize table, bin and verified barrier proxies; attach/detach the audited carried-item sphere. |
 | `PLANNING_SCENE_PLAN.md` | Phased design, validation gates, geometry assumptions and rollback risks. |
 | `produce_order_interfaces/action/ExecuteMotion.action` | Typed single-motion goal, stage feedback and failure result. |
 | `robotic_manipulation` | MoveIt/hand Action server; retains the legacy `/manipulator_move_to` service. |
@@ -26,7 +27,7 @@ one-by-one in response to order lines.
 ```text
 Order goal (SKU quantities)
    ↓
-Server startup: 16 mixed products + A1–A4 receiving bins
+Server startup: 16 mixed products + A1–A4 receiving bins + centre barrier
    ↓
 Agent: get_object_positions(SKU) → choose pick_and_place(detection_id)
        → re-perceive after each pick → finish_order
@@ -76,8 +77,9 @@ The order Action and motion Action have different responsibilities. The order
 Action owns an entire customer order; `/produce_orders/execute_motion` executes
 one bounded arm/gripper motion. `Workstation` sends separate grab, hold/lift,
 release and retract goals, so it can verify an actual lift *before* transporting
-the item. Each motion goal sends `INITIAL_GRIPPER`, `MOVING_TO_TARGET`,
-`FINAL_GRIPPER` and `DONE` feedback, which is forwarded as
+the item. Order motion goals report `INITIAL_GRIPPER`, `PLANNING_TRANSIT`,
+`EXECUTING_TRANSIT`, optional local Cartesian stages, `FINAL_GRIPPER` and
+`DONE` feedback, which is forwarded as
 `MOTION_STAGE` order events. The C++ server refuses concurrent motion goals,
 legacy service calls and resets. Cancellation is honored at stage boundaries;
 it does not interrupt a blocking MoveIt trajectory mid-flight. A canceled or
@@ -88,6 +90,30 @@ The C++ controller rejects incomplete Cartesian plans (fraction below 0.999),
 limits gripper retries, and bounds gripper Action waits. This does not impose a
 hard deadline on MoveIt's own synchronous `move()`/`execute()` calls; that is a
 remaining controller-level limitation.
+
+For `grab` and cross-workcell `release`, the C++ controller splits one motion
+Action into a clearance move, a collision-aware MoveIt/OMPL transit plan and
+a short Cartesian final approach. The `hold` lift and same-XY `release`
+retract remain local Cartesian motions. The legacy service retains its old
+Cartesian waypoint route. After a verified physical lift, the workstation
+transforms the selected entity's centre into `panda_hand` and attaches a
+conservative sphere to MoveIt's robot state. It removes that sphere after
+release; scene recovery clears stale attachments. This simulated pose is used
+only for collision safety, never as an Agent observation or grasp target.
+
+The route barrier is the existing `toy_box` prefab turned 90° around Y. Its
+settled physical bounding box is approximately 0.125 × 0.20 × 0.20 m, centred
+at (0.4625, 0, 0.11) in `panda_link0`. Startup fails closed if the crate is
+missing, moves over 1.5 cm or tips over 0.08 rad. The second stock row and
+middle bin pair were offset to leave clearance. The second stock row is also
+staggered in Y so neighbouring products do not overlap. The MoveIt proxy encloses the
+crate's hollow space, so it is intentionally conservative. A plan-only
+crossing probe with a simulated carried sphere found the direct Cartesian
+route 100% complete without the obstacle, but only 66.1% complete with it.
+After the final stock relocation, an actual source-to-bin probe completed
+only about 71% of its straight Cartesian transit, while free-space planning found
+a route and its source approach completed 100%. This is not yet an operator-order
+acceptance result.
 
 The Agent processes requested SKUs in order and must finish the full quantity
 of one SKU before switching. The model still selects a fresh RGB-D detection
