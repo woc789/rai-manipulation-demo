@@ -31,6 +31,7 @@ from .order import (
     verify_bin_placement,
 )
 from .agent import ProduceAgent
+from .planning_scene import PlanningSceneSync
 
 
 class Workstation:
@@ -50,6 +51,7 @@ class Workstation:
         self.events: list[dict] = []
         self._position_tool = None
         self._scene_bridge = None
+        self._planning_scene = None
         self._scene_prepared = False
         self._placed_entities: list[tuple] = []
         self._completed_by_sku: dict[str, int] = {}
@@ -135,6 +137,7 @@ class Workstation:
 
     def prepare_scene(self, path: Path, order: Order | None = None) -> None:
         """Populate the benchmark with visible bins and mixed, fixed stock."""
+        self._scene_prepared = False
         if self._scene_bridge is None:
             self._scene_bridge = O3DExROS2Bridge(self.connector)
         # The Action server outlives O3DE. After a simulator restart its bridge
@@ -151,9 +154,23 @@ class Workstation:
                 self._scene_bridge.spawned_entities.remove(stale)
         self._scene_bridge.setup_scene(self.build_scene(path))
         time.sleep(self.config["stock"]["settle_time_s"])
+        bin_positions = {}
         for zone in self.config["zones"].values():
             for index, slot in enumerate(zone["slots"]):
-                self.slot_bin_position(zone, index, slot)
+                xy = self.slot_bin_position(zone, index, slot)
+                name = zone["slot_entities"][index]
+                entity = next(
+                    item for item in self._scene_bridge.spawned_entities
+                    if item.name == name
+                )
+                pose = self._scene_bridge.get_object_pose(entity).pose.position
+                bin_positions[name] = (xy[0], xy[1], pose.z)
+        if self._planning_scene is None:
+            self._planning_scene = PlanningSceneSync(
+                self.connector.node,
+                timeout_s=self.config["planning_scene"]["service_timeout_s"],
+            )
+        scene_objects = self._planning_scene.synchronize(self.config, bin_positions)
         self._scene_prepared = True
         self._placed_entities = []
         self._completed_by_sku = {}
@@ -168,9 +185,11 @@ class Workstation:
             inventory[entity.prefab_name] += 1
         for sku, expected in self.config["stock"]["initial_counts"].items():
             if inventory[sku] < expected:
+                self._scene_prepared = False
                 raise OrderError(
                     f"Prepared scene has only {inventory[sku]}/{expected} reachable {sku}"
                 )
+        self.event("", "PLANNING_SCENE_READY", objects=scene_objects)
         if order is not None:
             self.begin_order(order)
 

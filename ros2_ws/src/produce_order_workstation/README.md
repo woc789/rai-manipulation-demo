@@ -18,6 +18,8 @@ one-by-one in response to order lines.
 | `runtime.py` | RGB-D perception adapter, visual-candidate registry, validated pick/place tool, ROS motion Action client and final audit. |
 | `order_server.py` | Persistent ROS Action server, one order at a time, cancellation and JSON reports. |
 | `debug_panel.py` | Temporary PyQt debug UI: enter counts, watch Agent calls and ROS feedback, retry or recover the workcell. |
+| `planning_scene.py` | Synchronize conservative table and A1–A4 bin collision proxies to MoveIt and verify readback before accepting orders. |
+| `PLANNING_SCENE_PLAN.md` | Phased design, validation gates, geometry assumptions and rollback risks. |
 | `produce_order_interfaces/action/ExecuteMotion.action` | Typed single-motion goal, stage feedback and failure result. |
 | `robotic_manipulation` | MoveIt/hand Action server; retains the legacy `/manipulator_move_to` service. |
 
