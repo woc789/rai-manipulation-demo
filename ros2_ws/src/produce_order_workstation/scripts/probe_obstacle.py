@@ -30,6 +30,7 @@ from shape_msgs.msg import SolidPrimitive
 
 
 PROBE_ID = "produce_workstation/diagnostic_obstacle"
+PERMANENT_ID = "produce_workstation/route_barrier"
 FRAME = "panda_link0"
 LINK = "panda_link8"
 ORIENTATION = Quaternion(x=0.9238795325112867, y=-0.3826834323650898)
@@ -75,6 +76,17 @@ def set_probe(node, apply_client, operation, args):
     request.scene = diff
     if not call(node, apply_client, request).success:
         raise RuntimeError("MoveIt rejected the diagnostic obstacle")
+
+
+def apply_object(node, apply_client, collision):
+    diff = PlanningScene()
+    diff.is_diff = True
+    diff.robot_state.is_diff = True
+    diff.world.collision_objects = [collision]
+    request = ApplyPlanningScene.Request()
+    request.scene = diff
+    if not call(node, apply_client, request).success:
+        raise RuntimeError(f"MoveIt rejected collision-object update for {collision.id}")
 
 
 def plan_pair(node, cart_client, plan_client, fk_client, validity_client, state, args):
@@ -166,6 +178,10 @@ def main():
         "--compare-temporary", action="store_true",
         help="Temporarily add another obstacle for a controlled idle-scene comparison",
     )
+    parser.add_argument(
+        "--replace-permanent", action="store_true",
+        help="Temporarily hide the current route barrier during the comparison, then restore it",
+    )
     args = parser.parse_args()
     rclpy.init()
     node = rclpy.create_node("workcell_obstacle_probe")
@@ -177,6 +193,8 @@ def main():
     fk_client = node.create_client(GetPositionFK, "/compute_fk")
     validity_client = node.create_client(GetStateValidity, "/check_state_validity")
     added = False
+    original_barrier = None
+    removed_barrier = False
     try:
         get_request = GetPlanningScene.Request()
         get_request.components.components = (
@@ -186,6 +204,20 @@ def main():
         scene = call(node, get_client, get_request).scene
         if any(obj.id == PROBE_ID for obj in scene.world.collision_objects):
             raise RuntimeError("A diagnostic obstacle already exists; refusing to overwrite it")
+        if args.replace_permanent:
+            if not args.compare_temporary:
+                raise ValueError("--replace-permanent requires --compare-temporary")
+            original_barrier = next(
+                (obj for obj in scene.world.collision_objects if obj.id == PERMANENT_ID), None
+            )
+            if original_barrier is None:
+                raise RuntimeError("Current route barrier is missing from MoveIt")
+            remove = CollisionObject()
+            remove.id = PERMANENT_ID
+            remove.header.frame_id = FRAME
+            remove.operation = CollisionObject.REMOVE
+            apply_object(node, apply_client, remove)
+            removed_barrier = True
         ik = GetPositionIK.Request()
         ik.ik_request.group_name = "panda_arm"
         ik.ik_request.robot_state = scene.robot_state
@@ -248,10 +280,17 @@ def main():
               f"attached={obstructed[3]}, cart_points={obstructed[4]}, "
               f"midpoint={obstructed[5]}")
     finally:
-        if added:
-            set_probe(node, apply_client, CollisionObject.REMOVE, args)
-        node.destroy_node()
-        rclpy.shutdown()
+        try:
+            if added:
+                set_probe(node, apply_client, CollisionObject.REMOVE, args)
+        finally:
+            try:
+                if removed_barrier:
+                    original_barrier.operation = CollisionObject.ADD
+                    apply_object(node, apply_client, original_barrier)
+            finally:
+                node.destroy_node()
+                rclpy.shutdown()
 
 
 if __name__ == "__main__":

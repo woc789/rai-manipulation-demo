@@ -152,8 +152,23 @@ class Workstation:
                 if "Could not find entity with given name" not in str(exc):
                     raise
                 self._scene_bridge.spawned_entities.remove(stale)
-        self._scene_bridge.setup_scene(self.build_scene(path))
+        scene = self.build_scene(path)
+        barrier_names = self.config["planning_scene"]["barrier"]["cube_entities"]
+        barrier_entities = [item for item in scene.entities if item.name in barrier_names]
+        if [item.name for item in barrier_entities] != barrier_names or any(
+            item.prefab_name != "yellow_cube" for item in barrier_entities
+        ):
+            raise OrderError("Physical route marker is incomplete or out of order")
+        self._scene_bridge.setup_scene(SceneConfig(
+            entities=[item for item in scene.entities if item.name not in barrier_names]
+        ))
         time.sleep(self.config["stock"]["settle_time_s"])
+        # These are dynamic rigid bodies. Spawn them one at a time so the stack
+        # settles instead of exploding apart when O3DE resolves simultaneous
+        # collider penetration. The bridge records each entity for later cleanup.
+        for item in barrier_entities:
+            self._scene_bridge._spawn_entity(item)
+            time.sleep(self.config["planning_scene"]["barrier"]["spawn_settle_time_s"])
         bin_positions = {}
         for zone in self.config["zones"].values():
             for index, slot in enumerate(zone["slots"]):
@@ -165,21 +180,22 @@ class Workstation:
                 )
                 pose = self._scene_bridge.get_object_pose(entity).pose.position
                 bin_positions[name] = (xy[0], xy[1], pose.z)
-        barrier_name = self.config["planning_scene"]["barrier"]["entity"]
-        barrier_entity = next(
-            (item for item in self._scene_bridge.spawned_entities if item.name == barrier_name),
-            None,
-        )
-        if barrier_entity is None or barrier_entity.prefab_name != "toy_box":
-            raise OrderError(f"Physical route barrier {barrier_name} is missing")
-        barrier_pose = self._scene_bridge.get_object_pose(barrier_entity).pose
+        barrier_poses = []
+        for name in barrier_names:
+            entity = next(
+                (item for item in self._scene_bridge.spawned_entities if item.name == name),
+                None,
+            )
+            if entity is None or entity.prefab_name != "yellow_cube":
+                raise OrderError(f"Physical route marker cube {name} is missing")
+            barrier_poses.append(self._scene_bridge.get_object_pose(entity).pose)
         if self._planning_scene is None:
             self._planning_scene = PlanningSceneSync(
                 self.connector.node,
                 timeout_s=self.config["planning_scene"]["service_timeout_s"],
             )
         scene_objects = self._planning_scene.synchronize(
-            self.config, bin_positions, barrier_pose
+            self.config, bin_positions, barrier_poses
         )
         self._scene_prepared = True
         self._placed_entities = []

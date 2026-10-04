@@ -49,7 +49,7 @@ def _box_at(
 def build_collision_objects(
     config: dict,
     bin_positions: dict[str, tuple[float, float, float]],
-    barrier_pose: Pose,
+    barrier_poses: list[Pose],
 ) -> list[CollisionObject]:
     """Create a low table slab and open-top bin proxies, not stock objects.
 
@@ -120,33 +120,42 @@ def build_collision_objects(
                         (2 * half_x, wall_thickness, wall_height))
             objects.append(obj)
     barrier = scene["barrier"]
-    expected = barrier["expected_origin"]
-    position = barrier_pose.position
-    actual = (position.x, position.y, position.z)
+    cube_names = barrier["cube_entities"]
+    if len(barrier_poses) != len(cube_names) or not barrier_poses:
+        raise ValueError("Physical route marker is incomplete")
     tolerance = _positive(barrier["pose_tolerance_m"], "barrier pose tolerance")
-    if not all(isfinite(value) for value in actual) or any(
-        abs(want - got) > tolerance for want, got in zip(expected, actual)
-    ):
-        raise ValueError(f"Physical route barrier moved from its expected pose: {actual}")
-    q = barrier_pose.orientation
-    norm = sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w)
-    if not isfinite(norm) or abs(norm - 1.0) > 0.02:
-        raise ValueError("Physical route barrier has an invalid orientation")
-    dot = abs((q.y + q.w) / (sqrt(2) * norm))
-    angle = 2 * acos(min(1.0, dot))
-    if angle > _positive(barrier["orientation_tolerance_rad"], "barrier orientation tolerance"):
-        raise ValueError(f"Physical route barrier tipped over: {angle:.3f} rad")
+    expected_x, expected_y = barrier["expected_xy"]
+    for index, cube_pose in enumerate(barrier_poses):
+        position = cube_pose.position
+        actual = (position.x, position.y, position.z)
+        expected_z = barrier["first_center_z_m"] + index * barrier["cube_step_z_m"]
+        if not all(isfinite(value) for value in actual) or any(
+            abs(want - got) > tolerance
+            for want, got in zip((expected_x, expected_y, expected_z), actual)
+        ):
+            raise ValueError(f"Physical route marker cube {index + 1} moved: {actual}")
+        q = cube_pose.orientation
+        norm = sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w)
+        if not isfinite(norm) or abs(norm - 1.0) > 0.02:
+            raise ValueError("Physical route marker cube has an invalid orientation")
+        angle = 2 * acos(min(1.0, abs(q.w) / norm))
+        if angle > _positive(barrier["orientation_tolerance_rad"], "barrier orientation tolerance"):
+            raise ValueError(f"Physical route marker cube {index + 1} tipped: {angle:.3f} rad")
     dimensions = tuple(
         _positive(value, "barrier dimension") for value in barrier["dimensions_m"]
     )
-    if len(dimensions) != 3 or len(barrier["center_offset_m"]) != 3:
-        raise ValueError("Route barrier geometry needs three dimensions and offsets")
+    if len(dimensions) != 3:
+        raise ValueError("Route marker geometry needs three dimensions")
     obstacle = CollisionObject()
     obstacle.id = OBJECT_PREFIX + barrier["entity"]
     obstacle.header.frame_id = frame
     obstacle.pose.orientation.w = 1.0
     obstacle.operation = CollisionObject.ADD
-    center = tuple(a + float(b) for a, b in zip(actual, barrier["center_offset_m"]))
+    center = (
+        sum(p.position.x for p in barrier_poses) / len(barrier_poses),
+        sum(p.position.y for p in barrier_poses) / len(barrier_poses),
+        (barrier_poses[0].position.z + barrier_poses[-1].position.z) / 2,
+    )
     _box_at(obstacle, center, dimensions)
     objects.append(obstacle)
     return objects
@@ -278,9 +287,9 @@ class PlanningSceneSync:
 
     def synchronize(
         self, config: dict, bin_positions: dict[str, tuple[float, float, float]],
-        barrier_pose: Pose,
+        barrier_poses: list[Pose],
     ) -> list[str]:
-        desired = build_collision_objects(config, bin_positions, barrier_pose)
+        desired = build_collision_objects(config, bin_positions, barrier_poses)
         if not self._apply.wait_for_service(timeout_sec=self.timeout_s):
             raise RuntimeError("MoveIt apply_planning_scene service is unavailable")
         if not self._get.wait_for_service(timeout_sec=self.timeout_s):

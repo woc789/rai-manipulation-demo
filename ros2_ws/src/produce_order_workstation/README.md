@@ -2,8 +2,8 @@
 
 This ROS 2/O3DE workcell accepts a structured produce order as a **goal**. On
 server startup the scene is preloaded with 16 mixed products (four each of
-corn, carrot, apple and tomato), four visible receiving bins, and a physical
-side-lying crate dividing the transit route. A Bailian
+corn, carrot, apple and tomato), four visible receiving bins, and a narrow
+physical route marker. A Bailian
 model chooses perception and grasp tools plus visual candidates; ROS tools own the
 physical motion, bin mapping and verification. The products are never generated
 one-by-one in response to order lines.
@@ -27,7 +27,7 @@ one-by-one in response to order lines.
 ```text
 Order goal (SKU quantities)
    ↓
-Server startup: 16 mixed products + A1–A4 receiving bins + centre barrier
+Server startup: 16 mixed products + A1–A4 receiving bins + narrow route marker
    ↓
 Agent: get_object_positions(SKU) → choose pick_and_place(detection_id)
        → re-perceive after each pick → finish_order
@@ -101,19 +101,19 @@ conservative sphere to MoveIt's robot state. It removes that sphere after
 release; scene recovery clears stale attachments. This simulated pose is used
 only for collision safety, never as an Agent observation or grasp target.
 
-The route barrier is the existing `toy_box` prefab turned 90° around Y. Its
-settled physical bounding box is approximately 0.125 × 0.20 × 0.20 m, centred
-at (0.4625, 0, 0.11) in `panda_link0`. Startup fails closed if the crate is
-missing, moves over 1.5 cm or tips over 0.08 rad. The second stock row and
-middle bin pair were offset to leave clearance. The second stock row is also
-staggered in Y so neighbouring products do not overlap. The MoveIt proxy encloses the
-crate's hollow space, so it is intentionally conservative. A plan-only
-crossing probe with a simulated carried sphere found the direct Cartesian
-route 100% complete without the obstacle, but only 66.1% complete with it.
-After the final stock relocation, an actual source-to-bin probe completed
-only about 71% of its straight Cartesian transit, while free-space planning found
-a route and its source approach completed 100%. This is not yet an operator-order
-acceptance result.
+The original side-lying `toy_box` divided the route but blocked the oblique
+RGB-D camera's view of some products. The current route marker instead stacks
+four existing 5 cm rigid-body `yellow_cube` prefabs at (0.37, 0). They are
+spawned sequentially to let each settle. Startup reads all four physical
+poses and rejects a missing, displaced or tipped cube before adding one
+conservative 0.06 × 0.06 × 0.21 m MoveIt proxy. Two products were moved
+from the marker's camera projection into nearby open positions; inventory
+counts and SKU-bin mapping are unchanged. A plan-only crossing probe with a
+simulated carried sphere found the direct Cartesian route 100% complete
+without the marker and about 73% complete with it, while the OMPL free-space
+plan remained successful. This demonstrates a planning effect, not a loaded
+operator-order acceptance result. The unchanged Grounding DINO model may
+still miss or misclassify objects that are visible to a human.
 
 The Agent processes requested SKUs in order and must finish the full quantity
 of one SKU before switching. The model still selects a fresh RGB-D detection

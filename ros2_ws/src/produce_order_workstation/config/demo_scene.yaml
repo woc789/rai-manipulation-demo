@@ -19,14 +19,28 @@ entities:
     pose:
       translation: {x: 0.50, y: 0.48, z: 0.05}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
-  # A real O3DE rigid-body crate lies on its side. Its long face forms the
-  # centre divider; MoveIt gets an AABB proxy only after its settled pose is
-  # verified. This object is not a receiving bin or a stock item.
-  - name: route_barrier
-    prefab_name: toy_box
+  # A narrow, four-cube marker leaves the camera's view of the stock clear.
+  # It is stacked after the other entities settle; each rigid body is physical.
+  - name: route_barrier_1
+    prefab_name: yellow_cube
     pose:
-      translation: {x: 0.41, y: 0.0, z: 0.11}
-      rotation: {x: 0.0, y: 0.7071068, z: 0.0, w: 0.7071068}
+      translation: {x: 0.37, y: 0.0, z: 0.025}
+      rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+  - name: route_barrier_2
+    prefab_name: yellow_cube
+    pose:
+      translation: {x: 0.37, y: 0.0, z: 0.075}
+      rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+  - name: route_barrier_3
+    prefab_name: yellow_cube
+    pose:
+      translation: {x: 0.37, y: 0.0, z: 0.125}
+      rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+  - name: route_barrier_4
+    prefab_name: yellow_cube
+    pose:
+      translation: {x: 0.37, y: 0.0, z: 0.175}
+      rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
   # Sixteen mixed objects exist before the Agent sees the order. Names are stable
   # entity IDs; TF positions are measured again before each pick.
   - name: stock_carrot_1
@@ -52,7 +66,7 @@ entities:
   - name: stock_tomato_2
     prefab_name: tomato
     pose:
-      translation: {x: 0.24, y: 0.055, z: 0.05}
+      translation: {x: 0.37, y: 0.165, z: 0.05}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
   - name: stock_apple_2
     prefab_name: apple
@@ -87,7 +101,7 @@ entities:
   - name: stock_tomato_3
     prefab_name: tomato
     pose:
-      translation: {x: 0.30, y: 0.0, z: 0.05}
+      translation: {x: 0.37, y: 0.40, z: 0.05}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
   - name: stock_apple_4
     prefab_name: apple

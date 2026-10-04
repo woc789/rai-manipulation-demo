@@ -21,14 +21,15 @@ BIN_POSITIONS = {
     for zone in CONFIG["zones"].values()
     for name, slot in zip(zone["slot_entities"], zone["slots"])
 }
-BARRIER_POSE = Pose(
-    position=Point(x=0.41, y=0.0, z=0.11),
-    orientation=Quaternion(y=2 ** -0.5, w=2 ** -0.5),
-)
+BARRIER_POSES = [
+    Pose(position=Point(x=0.37, y=0.0, z=0.035 + i * 0.049),
+         orientation=Quaternion(w=1.0))
+    for i in range(4)
+]
 
 
 def test_collision_geometry_has_low_table_and_open_top_bins():
-    objects = planning_scene.build_collision_objects(CONFIG, BIN_POSITIONS, BARRIER_POSE)
+    objects = planning_scene.build_collision_objects(CONFIG, BIN_POSITIONS, BARRIER_POSES)
     assert {obj.id for obj in objects} == {
         "produce_workstation/table",
         *(f"produce_workstation/{name}" for name in BIN_POSITIONS),
@@ -48,33 +49,37 @@ def test_collision_geometry_has_low_table_and_open_top_bins():
             for pose, primitive in zip(obj.primitive_poses, obj.primitives)
         ) == pytest.approx(0.11)
     barrier = objects[-1]
-    assert barrier.primitives[0].dimensions == pytest.approx([0.125, 0.2, 0.2])
-    assert barrier.primitive_poses[0].position.x == pytest.approx(0.4625)
-    assert barrier.primitive_poses[0].position.z == pytest.approx(0.11)
+    assert barrier.primitives[0].dimensions == pytest.approx([0.06, 0.06, 0.21])
+    assert barrier.primitive_poses[0].position.x == pytest.approx(0.37)
+    assert barrier.primitive_poses[0].position.z == pytest.approx(0.1085)
 
 
-def test_barrier_proxy_requires_actual_untipped_physical_crate():
-    shifted = Pose(position=Point(x=0.45, z=0.11), orientation=BARRIER_POSE.orientation)
+def test_barrier_proxy_requires_actual_untipped_physical_stack():
+    shifted = list(BARRIER_POSES)
+    shifted[2] = Pose(position=Point(x=0.45, z=0.133), orientation=Quaternion(w=1.0))
     with pytest.raises(ValueError, match="moved"):
         planning_scene.build_collision_objects(CONFIG, BIN_POSITIONS, shifted)
-    flat = Pose(position=BARRIER_POSE.position, orientation=Quaternion(w=1.0))
+    flat = list(BARRIER_POSES)
+    flat[3] = Pose(position=BARRIER_POSES[3].position, orientation=Quaternion(x=0.5, w=0.8660254))
     with pytest.raises(ValueError, match="tipped"):
         planning_scene.build_collision_objects(CONFIG, BIN_POSITIONS, flat)
+    with pytest.raises(ValueError, match="incomplete"):
+        planning_scene.build_collision_objects(CONFIG, BIN_POSITIONS, BARRIER_POSES[:3])
 
 
 def test_collision_geometry_rejects_missing_bin_or_invalid_size():
     positions = dict(BIN_POSITIONS)
     positions.pop("order_bin_A4")
     with pytest.raises(ValueError, match="do not match"):
-        planning_scene.build_collision_objects(CONFIG, positions, BARRIER_POSE)
+        planning_scene.build_collision_objects(CONFIG, positions, BARRIER_POSES)
     broken = {**CONFIG, "planning_scene": {**CONFIG["planning_scene"], "bin_wall_height_m": -1}}
     with pytest.raises(ValueError, match="bin wall height"):
-        planning_scene.build_collision_objects(broken, BIN_POSITIONS, BARRIER_POSE)
+        planning_scene.build_collision_objects(broken, BIN_POSITIONS, BARRIER_POSES)
 
 
 def test_geometry_check_detects_wrong_size_and_normalized_pose():
-    original = planning_scene.build_collision_objects(CONFIG, BIN_POSITIONS, BARRIER_POSE)[0]
-    normalized = planning_scene.build_collision_objects(CONFIG, BIN_POSITIONS, BARRIER_POSE)[0]
+    original = planning_scene.build_collision_objects(CONFIG, BIN_POSITIONS, BARRIER_POSES)[0]
+    normalized = planning_scene.build_collision_objects(CONFIG, BIN_POSITIONS, BARRIER_POSES)[0]
     original_center = normalized.primitive_poses[0].position
     normalized.pose.position.x = original_center.x
     normalized.pose.position.y = original_center.y
@@ -93,7 +98,7 @@ def test_sync_removes_only_own_stale_objects_and_verifies_readback(monkeypatch):
     node = MagicMock()
     node.create_client.side_effect = [apply_client, get_client]
     sync = planning_scene.PlanningSceneSync(node)
-    desired = planning_scene.build_collision_objects(CONFIG, BIN_POSITIONS, BARRIER_POSE)
+    desired = planning_scene.build_collision_objects(CONFIG, BIN_POSITIONS, BARRIER_POSES)
     other = CollisionObject(id="another_package/keep")
     stale = CollisionObject(id="produce_workstation/old_bin")
     readbacks = iter([
@@ -110,7 +115,7 @@ def test_sync_removes_only_own_stale_objects_and_verifies_readback(monkeypatch):
         return SimpleNamespace(success=True)
 
     monkeypatch.setattr(planning_scene, "get_future_result", future_result)
-    assert sync.synchronize(CONFIG, BIN_POSITIONS, BARRIER_POSE) == [obj.id for obj in desired]
+    assert sync.synchronize(CONFIG, BIN_POSITIONS, BARRIER_POSES) == [obj.id for obj in desired]
     changes = apply_client.call_async.call_args.args[0].scene.world.collision_objects
     assert changes[0].id == stale.id
     assert changes[0].operation == CollisionObject.REMOVE
@@ -132,7 +137,7 @@ def test_sync_fails_closed_when_moveit_does_not_confirm_objects(monkeypatch):
         planning_scene, "get_future_result", lambda *_args, **_kwargs: next(replies)
     )
     with pytest.raises(RuntimeError, match="did not match"):
-        sync.synchronize(CONFIG, BIN_POSITIONS, BARRIER_POSE)
+        sync.synchronize(CONFIG, BIN_POSITIONS, BARRIER_POSES)
 
 
 def test_carried_object_is_attached_and_removed_with_readback(monkeypatch):
@@ -185,10 +190,12 @@ def test_scene_preparation_requires_moveit_sync(monkeypatch):
         SimpleNamespace(name=name, prefab_name="toy_box")
         for name in BIN_POSITIONS
     ]
-    barrier = SimpleNamespace(name="route_barrier", prefab_name="toy_box")
-    bridge.setup_scene.side_effect = lambda _config: bridge.spawned_entities.extend([*bins, barrier])
+    barriers = [SimpleNamespace(name=name, prefab_name="yellow_cube")
+                for name in CONFIG["planning_scene"]["barrier"]["cube_entities"]]
+    bridge.setup_scene.side_effect = lambda _config: bridge.spawned_entities.extend(bins)
+    bridge._spawn_entity.side_effect = lambda item: bridge.spawned_entities.append(item)
     bridge.get_object_pose.side_effect = lambda entity: SimpleNamespace(
-        pose=BARRIER_POSE if entity.name == "route_barrier" else Pose(
+        pose=BARRIER_POSES[barriers.index(entity)] if entity in barriers else Pose(
             position=Point(
                 x=BIN_POSITIONS[entity.name][0],
                 y=BIN_POSITIONS[entity.name][1],
@@ -200,7 +207,7 @@ def test_scene_preparation_requires_moveit_sync(monkeypatch):
     station._scene_bridge = bridge
     station._planning_scene = MagicMock()
     station._planning_scene.synchronize.side_effect = RuntimeError("MoveIt unavailable")
-    monkeypatch.setattr(station, "build_scene", lambda _path: MagicMock())
+    monkeypatch.setattr(station, "build_scene", lambda _path: MagicMock(entities=barriers))
     monkeypatch.setattr(runtime.time, "sleep", lambda _seconds: None)
     with pytest.raises(RuntimeError, match="MoveIt unavailable"):
         station.prepare_scene(Path("unused.yaml"))

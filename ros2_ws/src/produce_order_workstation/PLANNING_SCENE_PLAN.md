@@ -131,7 +131,9 @@ plan for that original crossing. For an actual final-layout source at
 source directory in the Jazzy/`rai-jazzy` ROS environment to repeat that
 read-only plan check. It synthesizes a carried sphere and **does not execute
 motion or submit an order**. `--compare-temporary` is an invasive diagnostic
-for an explicitly idle scene, not the normal operation mode.
+for an explicitly idle scene, not the normal operation mode. Use
+`--replace-permanent` with `--compare-temporary` to temporarily remove the
+current proxy while comparing a candidate; the script restores it in `finally`.
 
 The new C++/Python packages built and all 39 workstation tests passed. In a
 live idle scene the order service reported `READY`; `/get_planning_scene`
@@ -143,3 +145,26 @@ three Actions returned `SUCCEEDED`, including `PLANNING_TRANSIT` and
 order was submitted during this follow-up, so loaded grasp/place acceptance
 remains for the operator to test with their own order. Do not claim
 that an empty-hand smoke test proves loaded pick-and-place success.
+
+## Follow-up: reduce camera occlusion (2026-10-04)
+
+The side-lying crate was visibly blocking products in `/color_image5`, and two
+operator orders failed at corn perception before motion. This establishes a
+scene occlusion problem, although it does not prove that all detection misses
+were caused by the crate. The replacement is a narrow physical column built
+from four pre-existing 5 cm O3DE cubes, stacked and settled one at a time.
+Two products behind its camera projection were repositioned without changing
+inventory counts or destination bins. On startup, all four settled poses are
+validated before a single conservative MoveIt collision proxy is published.
+
+For a plan-only source-to-bin crossing at (0.30, 0.33) → (0.57, -0.23),
+the straight Cartesian path completes 100% with no marker and 73% with
+the 0.06 × 0.06 × 0.21 m proxy; the OMPL route succeeds in both cases. The
+deployed physical stack and MoveIt proxy produced the same 73% result. This
+confirms that the smaller obstacle is not merely decorative. The perception
+model is unchanged. In the final scene, all four corn are visually discernible
+in the camera, but the live `corn cob` query returned only one centroid near a
+carrot position; `tomato` returned six centroids despite there being only four
+tomatoes. This is independent evidence of detector misclassification beyond
+the original crate's occlusion. No operator order was submitted as part of
+this change.

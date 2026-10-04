@@ -59,15 +59,17 @@ planning_scene:
   # Conservative transit proxies; grasped pose comes from the verified O3DE
   # lift audit and is never shown to the Agent as a perception result.
   carried_radius_m: {corn: 0.035, carrot: 0.035, apple: 0.030, tomato: 0.030}
-  # Measured AABB of toy_box lying on its side (90 degrees around Y). Offsets
-  # are relative to the settled prefab origin, not the spawning table frame.
+  # Four settled 5 cm rigid-body cubes; a single conservative MoveIt envelope.
   barrier:
     entity: route_barrier
-    expected_origin: [0.41, 0.0, 0.11]
-    center_offset_m: [0.0525, 0.0, 0.0]
-    dimensions_m: [0.125, 0.20, 0.20]
-    pose_tolerance_m: 0.015
-    orientation_tolerance_rad: 0.08
+    cube_entities: [route_barrier_1, route_barrier_2, route_barrier_3, route_barrier_4]
+    expected_xy: [0.37, 0.0]
+    first_center_z_m: 0.035
+    cube_step_z_m: 0.049
+    pose_tolerance_m: 0.018
+    orientation_tolerance_rad: 0.15
+    spawn_settle_time_s: 2.0
+    dimensions_m: [0.06, 0.06, 0.21]
 motion:
   grasp_z_offset_m: 0.10
   # Measured RGB-D centroid bias for the narrow carrot prefab in this O3DE camera.
