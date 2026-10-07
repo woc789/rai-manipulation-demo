@@ -75,8 +75,8 @@ ten-item mixed order.
 
 The order Action and motion Action have different responsibilities. The order
 Action owns an entire customer order; `/produce_orders/execute_motion` executes
-one bounded arm/gripper motion. `Workstation` sends separate grab, hold/lift,
-release and retract goals, so it can verify an actual lift *before* transporting
+one bounded arm/gripper motion. `Workstation` sends explicit `grab`, `lift`,
+`place` and `retreat` goals, so it can verify an actual lift *before* transporting
 the item. Order motion goals report `INITIAL_GRIPPER`, `PLANNING_TRANSIT`,
 `EXECUTING_TRANSIT`, optional local Cartesian stages, `FINAL_GRIPPER` and
 `DONE` feedback, which is forwarded as
@@ -91,10 +91,14 @@ limits gripper retries, and bounds gripper Action waits. This does not impose a
 hard deadline on MoveIt's own synchronous `move()`/`execute()` calls; that is a
 remaining controller-level limitation.
 
-For `grab` and cross-workcell `release`, the C++ controller splits one motion
+For `grab` and `place`, the C++ controller splits one motion
 Action into a clearance move, a collision-aware MoveIt/OMPL transit plan and
-a short Cartesian final approach. The `hold` lift and same-XY `release`
-retract remain local Cartesian motions. The legacy service retains its old
+a short Cartesian final approach when needed. `lift` and `retreat` are explicit
+local Cartesian motions; an XY displacement of 2 cm or more is rejected before
+operating the gripper. `grab` uses open -> closed, `lift` closed -> closed,
+`place` closed -> open, and `retreat` open -> open gripper commands. The server
+rejects unknown phases and inconsistent gripper flags at goal acceptance.
+The old `hold`/`release` Action phase names are no longer supported. The legacy service retains its old
 Cartesian waypoint route. After a verified physical lift, the workstation
 transforms the selected entity's centre into `panda_hand` and attaches a
 conservative sphere to MoveIt's robot state. It removes that sphere after

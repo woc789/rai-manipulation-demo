@@ -339,22 +339,30 @@ class Workstation:
         self,
         point: tuple[float, float, float],
         *,
-        grip: str,
+        step: str,
         target_z: float | None = None,
     ) -> None:
         """Send a bounded ROS Action goal and report motion-stage feedback."""
-        if grip not in ("grab", "hold", "release"):
-            raise ValueError(f"Unsupported gripper mode {grip!r}")
+        gripper_states = {
+            "grab": (True, False),
+            "lift": (False, False),
+            "place": (False, True),
+            "retreat": (True, True),
+        }
+        if step not in gripper_states:
+            raise ValueError(f"Unsupported motion step {step!r}")
         motion = self.config["motion"]
         goal = ExecuteMotion.Goal()
-        goal.step = grip
+        goal.step = step
         goal.target_pose = PoseStamped()
         goal.target_pose.header.frame_id = self.config["camera"]["target_frame"]
-        extra_z = motion["grasp_z_offset_m"]
-        if grip == "release":
-            extra_z += motion["place_extra_height_m"]
         if target_z is None:
-            target_z = point[2] + extra_z
+            target_z = {
+                "grab": point[2] + motion["grasp_z_offset_m"],
+                "lift": motion["post_grasp_lift_z_m"],
+                "place": motion["bin_release_z_m"],
+                "retreat": motion["bin_clearance_z_m"],
+            }[step]
         goal.target_pose.pose = Pose(
             position=Point(
                 x=point[0],
@@ -368,8 +376,7 @@ class Workstation:
                 w=0.0,
             ),
         )
-        goal.initial_gripper_state = grip == "grab"
-        goal.final_gripper_state = grip == "release"
+        goal.initial_gripper_state, goal.final_gripper_state = gripper_states[step]
         if self._motion_client is None:
             self._motion_client = ActionClient(
                 self.connector.node, ExecuteMotion, "/produce_orders/execute_motion"
@@ -380,7 +387,7 @@ class Workstation:
         def on_feedback(message):
             self.event(
                 self._active_order_id or "", "MOTION_STAGE",
-                step=grip, motion_stage=message.feedback.stage,
+                step=step, motion_stage=message.feedback.stage,
             )
 
         handle = get_future_result(
@@ -390,7 +397,7 @@ class Workstation:
         if handle is None:
             raise OrderError("Manipulator Action acceptance timed out; state is unknown")
         if not handle.accepted:
-            raise OrderError(f"Manipulator {grip} goal was rejected")
+            raise OrderError(f"Manipulator {step} goal was rejected")
         result_future = handle.get_result_async()
         deadline = time.monotonic() + motion["service_timeout_s"]
         cancel_sent = False
@@ -398,18 +405,18 @@ class Workstation:
             if self.cancel_requested() and not cancel_sent:
                 handle.cancel_goal_async()
                 cancel_sent = True
-                self.event(self._active_order_id or "", "MOTION_CANCEL_REQUESTED", step=grip)
+                self.event(self._active_order_id or "", "MOTION_CANCEL_REQUESTED", step=step)
             if time.monotonic() >= deadline:
                 handle.cancel_goal_async()
                 raise OrderError(
-                    f"Manipulator {grip} Action timed out; physical state is unknown"
+                    f"Manipulator {step} Action timed out; physical state is unknown"
                 )
             time.sleep(0.05)
         wrapped = result_future.result()
         if wrapped.status == GoalStatus.STATUS_CANCELED:
-            raise OrderCancelled(f"Manipulator {grip} canceled at a motion boundary")
+            raise OrderCancelled(f"Manipulator {step} canceled at a motion boundary")
         if wrapped.status != GoalStatus.STATUS_SUCCEEDED or not wrapped.result.success:
-            reason = wrapped.result.error or f"Manipulator {grip} motion failed"
+            reason = wrapped.result.error or f"Manipulator {step} motion failed"
             raise OrderError(reason)
 
     def pick_and_place(self, order: Order, detection_id: str) -> dict:
@@ -468,10 +475,10 @@ class Workstation:
             position_source="rgbd_perception_with_workcell_calibration",
         )
         self.motion_attempted = True
-        self.move(grasp_source, grip="grab")
+        self.move(grasp_source, step="grab")
         self.event(order.order_id, "LIFTING", sku=sku, detection_id=detection_id)
         self.move(
-            grasp_source, grip="hold",
+            grasp_source, step="lift",
             target_z=self.config["motion"]["post_grasp_lift_z_m"],
         )
         time.sleep(self.config["motion"]["lift_settle_time_s"])
@@ -503,14 +510,14 @@ class Workstation:
         )
         self.move(
             (target[0], target[1], source[2]),
-            grip="release", target_z=self.config["motion"]["bin_release_z_m"],
+            step="place", target_z=self.config["motion"]["bin_release_z_m"],
         )
         self._planning_scene.detach_carried(carried_id)
         self.event(order.order_id, "OBJECT_DETACHED", sku=sku, object_id=carried_id)
         self.event(order.order_id, "RETRACTING", sku=sku, slot_id=slot_id)
         self.move(
             (target[0], target[1], source[2]),
-            grip="release", target_z=self.config["motion"]["bin_clearance_z_m"],
+            step="retreat", target_z=self.config["motion"]["bin_clearance_z_m"],
         )
         time.sleep(self.config["motion"]["settle_time_s"])
         bin_position = self.slot_bin_position(zone, bin_index, slot)

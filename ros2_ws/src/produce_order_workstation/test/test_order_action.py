@@ -34,7 +34,7 @@ def test_move_uses_motion_action_and_forwards_stage_feedback(monkeypatch):
         result=SimpleNamespace(success=True, error=""),
     )
     monkeypatch.setattr(runtime, "get_future_result", lambda *_args, **_kwargs: handle)
-    station.move((0.3, 0.1, 0.05), grip="grab")
+    station.move((0.3, 0.1, 0.05), step="grab")
     goal = client.send_goal_async.call_args.args[0]
     assert goal.step == "grab"
     assert goal.target_pose.header.frame_id == "panda_link0"
@@ -43,6 +43,40 @@ def test_move_uses_motion_action_and_forwards_stage_feedback(monkeypatch):
     feedback = client.send_goal_async.call_args.kwargs["feedback_callback"]
     feedback(SimpleNamespace(feedback=SimpleNamespace(stage="grab:MOVING_TO_TARGET")))
     assert station.events[-1]["motion_stage"] == "grab:MOVING_TO_TARGET"
+
+
+@pytest.mark.parametrize("step,initial,final,height", [
+    ("grab", True, False, 0.15),
+    ("lift", False, False, CONFIG["motion"]["post_grasp_lift_z_m"]),
+    ("place", False, True, CONFIG["motion"]["bin_release_z_m"]),
+    ("retreat", True, True, CONFIG["motion"]["bin_clearance_z_m"]),
+])
+def test_motion_phases_have_explicit_gripper_states_and_heights(monkeypatch, step, initial, final, height):
+    station = Workstation(MagicMock(), CONFIG)
+    client = MagicMock()
+    station._motion_client = client
+    handle = MagicMock(accepted=True)
+    handle.get_result_async.return_value.done.return_value = True
+    handle.get_result_async.return_value.result.return_value = SimpleNamespace(
+        status=GoalStatus.STATUS_SUCCEEDED,
+        result=SimpleNamespace(success=True, error=""),
+    )
+    monkeypatch.setattr(runtime, "get_future_result", lambda *_args, **_kwargs: handle)
+    station.move((0.3, 0.1, 0.05), step=step)
+    goal = client.send_goal_async.call_args.args[0]
+    assert goal.step == step
+    assert goal.initial_gripper_state is initial
+    assert goal.final_gripper_state is final
+    assert goal.target_pose.pose.position.z == pytest.approx(height)
+
+
+@pytest.mark.parametrize("step", ["hold", "release", "unknown"])
+def test_old_or_unknown_motion_steps_are_rejected_before_sending(step):
+    station = Workstation(MagicMock(), CONFIG)
+    station._motion_client = MagicMock()
+    with pytest.raises(ValueError, match="Unsupported motion step"):
+        station.move((0.3, 0.1, 0.05), step=step)
+    station._motion_client.send_goal_async.assert_not_called()
 
 
 def test_move_reports_motion_action_cancel_and_failure(monkeypatch):
@@ -57,13 +91,13 @@ def test_move_reports_motion_action_cancel_and_failure(monkeypatch):
         result=SimpleNamespace(success=False, error="canceled"),
     )
     with pytest.raises(OrderCancelled, match="canceled"):
-        station.move((0.3, 0.1, 0.05), grip="hold")
+        station.move((0.3, 0.1, 0.05), step="lift")
     handle.get_result_async.return_value.result.return_value = SimpleNamespace(
         status=GoalStatus.STATUS_ABORTED,
         result=SimpleNamespace(success=False, error="Initial gripper command failed"),
     )
     with pytest.raises(OrderError, match="Initial gripper command failed"):
-        station.move((0.3, 0.1, 0.05), grip="release")
+        station.move((0.3, 0.1, 0.05), step="place")
 
 
 def test_move_forwards_order_cancel_to_motion_action(monkeypatch):
@@ -80,7 +114,7 @@ def test_move_forwards_order_cancel_to_motion_action(monkeypatch):
     monkeypatch.setattr(runtime, "get_future_result", lambda *_args, **_kwargs: handle)
     monkeypatch.setattr(runtime.time, "sleep", lambda _seconds: None)
     with pytest.raises(OrderCancelled):
-        station.move((0.3, 0.1, 0.05), grip="hold")
+        station.move((0.3, 0.1, 0.05), step="lift")
     handle.cancel_goal_async.assert_called_once()
 
 
@@ -251,10 +285,10 @@ def test_agent_chosen_entity_runs_motion_and_audit(monkeypatch):
     assert station.pick_and_place(order, "visual_corn_1")["bin"] == "A1"
     assert station.motion_attempted is True
     assert station.move.call_args_list == [
-        call(source, grip="grab"),
-        call(source, grip="hold", target_z=CONFIG["motion"]["post_grasp_lift_z_m"]),
-        call((*slot, source[2]), grip="release", target_z=CONFIG["motion"]["bin_release_z_m"]),
-        call((*slot, source[2]), grip="release", target_z=CONFIG["motion"]["bin_clearance_z_m"]),
+        call(source, step="grab"),
+        call(source, step="lift", target_z=CONFIG["motion"]["post_grasp_lift_z_m"]),
+        call((*slot, source[2]), step="place", target_z=CONFIG["motion"]["bin_release_z_m"]),
+        call((*slot, source[2]), step="retreat", target_z=CONFIG["motion"]["bin_clearance_z_m"]),
     ]
     assert any(event["stage"] == "GRASP_CHECK" and event["verified"] for event in station.events)
     carried_id = "produce_workstation/carried_stock_corn_1"
@@ -293,7 +327,7 @@ def test_failed_lift_stops_before_transport(monkeypatch):
     assert station.move.call_count == 2
     assert station.move.call_args_list[0].args[0] == corrected
     assert station.move.call_args_list[1].kwargs == {
-        "grip": "hold", "target_z": CONFIG["motion"]["post_grasp_lift_z_m"]
+        "step": "lift", "target_z": CONFIG["motion"]["post_grasp_lift_z_m"]
     }
     assert not any(event["stage"] == "PLACING" for event in station.events)
     assert any(event["stage"] == "GRASP_CHECK" and not event["verified"] for event in station.events)

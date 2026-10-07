@@ -48,6 +48,12 @@ bool RaiManipulationInterfaceNode::RunMove(
   const std::function<bool()> & cancel_requested, std::string & error)
 {
   const auto & pose = target_pose.pose;
+  if (step != "legacy" && step != "grab" && step != "lift" &&
+    step != "place" && step != "retreat" && step != "smoke")
+  {
+    error = "Unsupported motion step";
+    return false;
+  }
   if (target_pose.header.frame_id.empty() ||
     !std::isfinite(pose.position.x) || !std::isfinite(pose.position.y) ||
     !std::isfinite(pose.position.z))
@@ -65,6 +71,17 @@ bool RaiManipulationInterfaceNode::RunMove(
   if (check_cancel()) return false;
 
   arm.SetReferenceFrame(target_pose.header.frame_id);
+  const auto current = arm.GetEffectorPose();
+  if (current.size() < 3) {
+    error = "Current end-effector pose is unavailable";
+    return false;
+  }
+  if ((step == "lift" || step == "retreat") &&
+    std::hypot(pose.position.x - current[0], pose.position.y - current[1]) >= 0.02)
+  {
+    error = "Local lift/retreat requires an unchanged XY target (within 2 cm)";
+    return false;
+  }
   publish_stage("INITIAL_GRIPPER");
   if (initial_gripper_state ? !arm.Open() : !arm.Close()) {
     error = "Initial gripper command failed";
@@ -72,11 +89,6 @@ bool RaiManipulationInterfaceNode::RunMove(
   }
   if (check_cancel()) return false;
 
-  const auto current = arm.GetEffectorPose();
-  if (current.size() < 3) {
-    error = "Current end-effector pose is unavailable";
-    return false;
-  }
   auto above_current = current;
   // The order route is planned through the real centre divider at the lowest
   // clearance that still protects stock and bin rims. A fixed 0.4 m waypoint
@@ -99,9 +111,7 @@ bool RaiManipulationInterfaceNode::RunMove(
       error = "Manipulator path planning or execution failed";
       return false;
     }
-  } else if (step == "hold" ||
-    (step == "release" &&
-    std::hypot(pose.position.x - current[0], pose.position.y - current[1]) < 0.02))
+  } else if (step == "lift" || step == "retreat")
   {
     publish_stage("LOCAL_CARTESIAN");
     if (!arm.MoveThroughWaypoints({pose})) {
@@ -191,7 +201,17 @@ void RaiManipulationInterfaceNode::Initialize(ArmController & arm)
   m_motionAction = rclcpp_action::create_server<ExecuteMotion>(
     m_node, "/produce_orders/execute_motion",
     [this](const rclcpp_action::GoalUUID &, std::shared_ptr<const ExecuteMotion::Goal> goal) {
-      if (goal->step.empty() || goal->target_pose.header.frame_id.empty()) {
+      const auto & step = goal->step;
+      const bool supported = step == "grab" || step == "lift" ||
+        step == "place" || step == "retreat" || step == "smoke";
+      // True means open. Reject inconsistent phase/gripper combinations
+      // before any physical command; smoke is an empty-hand diagnostic.
+      const bool initially_open = step == "grab" || step == "retreat" || step == "smoke";
+      const bool finally_open = step == "place" || step == "retreat" || step == "smoke";
+      if (!supported || goal->target_pose.header.frame_id.empty() ||
+        goal->initial_gripper_state != initially_open ||
+        goal->final_gripper_state != finally_open)
+      {
         return rclcpp_action::GoalResponse::REJECT;
       }
       bool expected = false;

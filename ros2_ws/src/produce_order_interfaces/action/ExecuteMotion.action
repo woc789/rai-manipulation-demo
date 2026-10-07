@@ -2,6 +2,8 @@
 geometry_msgs/PoseStamped target_pose
 bool initial_gripper_state
 bool final_gripper_state
+# Order phases: grab, lift, place, retreat. smoke is an empty-hand diagnostic.
+# Gripper booleans: true=open, false=closed.
 string step
 ---
 bool success
