@@ -19,27 +19,52 @@ entities:
     pose:
       translation: {x: 0.50, y: 0.48, z: 0.05}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
-  # A narrow, four-cube marker leaves the camera's view of the stock clear.
-  # It is stacked after the other entities settle; each rigid body is physical.
-  - name: route_barrier_1
+  # Approximation of a tabletop equipment support: wide foot and taller mast.
+  # Existing physical 5 cm cubes are settled base-first, then bottom-to-top.
+  - name: route_base_1
     prefab_name: yellow_cube
     pose:
-      translation: {x: 0.37, y: 0.0, z: 0.025}
+      translation: {x: 0.355, y: -0.055, z: 0.025}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
-  - name: route_barrier_2
+  - name: route_base_2
     prefab_name: yellow_cube
     pose:
-      translation: {x: 0.37, y: 0.0, z: 0.075}
+      translation: {x: 0.405, y: -0.055, z: 0.025}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
-  - name: route_barrier_3
+  - name: route_base_3
     prefab_name: yellow_cube
     pose:
-      translation: {x: 0.37, y: 0.0, z: 0.125}
+      translation: {x: 0.355, y: -0.005, z: 0.025}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
-  - name: route_barrier_4
+  - name: route_base_4
     prefab_name: yellow_cube
     pose:
-      translation: {x: 0.37, y: 0.0, z: 0.175}
+      translation: {x: 0.405, y: -0.005, z: 0.025}
+      rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+  - name: route_mast_1
+    prefab_name: yellow_cube
+    pose:
+      translation: {x: 0.38, y: -0.03, z: 0.075}
+      rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+  - name: route_mast_2
+    prefab_name: yellow_cube
+    pose:
+      translation: {x: 0.38, y: -0.03, z: 0.125}
+      rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+  - name: route_mast_3
+    prefab_name: yellow_cube
+    pose:
+      translation: {x: 0.38, y: -0.03, z: 0.175}
+      rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+  - name: route_mast_4
+    prefab_name: yellow_cube
+    pose:
+      translation: {x: 0.38, y: -0.03, z: 0.225}
+      rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+  - name: route_mast_5
+    prefab_name: yellow_cube
+    pose:
+      translation: {x: 0.38, y: -0.03, z: 0.275}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
   # Sixteen mixed objects exist before the Agent sees the order. Names are stable
   # entity IDs; TF positions are measured again before each pick.

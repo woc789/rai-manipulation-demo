@@ -1,6 +1,7 @@
 """The simulator scene and MoveIt scene must agree before accepting orders."""
 
 from pathlib import Path
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -22,9 +23,9 @@ BIN_POSITIONS = {
     for name, slot in zip(zone["slot_entities"], zone["slots"])
 }
 BARRIER_POSES = [
-    Pose(position=Point(x=0.37, y=0.0, z=0.035 + i * 0.049),
+    Pose(position=Point(x=center[0], y=center[1], z=center[2]),
          orientation=Quaternion(w=1.0))
-    for i in range(4)
+    for center in CONFIG["planning_scene"]["barrier"]["expected_centers_m"]
 ]
 
 
@@ -49,9 +50,11 @@ def test_collision_geometry_has_low_table_and_open_top_bins():
             for pose, primitive in zip(obj.primitive_poses, obj.primitives)
         ) == pytest.approx(0.11)
     barrier = objects[-1]
-    assert barrier.primitives[0].dimensions == pytest.approx([0.06, 0.06, 0.21])
-    assert barrier.primitive_poses[0].position.x == pytest.approx(0.37)
-    assert barrier.primitive_poses[0].position.z == pytest.approx(0.1085)
+    assert len(barrier.primitives) == 2
+    assert barrier.primitives[0].dimensions == pytest.approx([0.11, 0.11, 0.06])
+    assert barrier.primitives[1].dimensions == pytest.approx([0.06, 0.06, 0.256])
+    assert barrier.primitive_poses[1].position.x == pytest.approx(0.38)
+    assert barrier.primitive_poses[1].position.z == pytest.approx(0.182)
 
 
 def test_barrier_proxy_requires_actual_untipped_physical_stack():
@@ -65,6 +68,24 @@ def test_barrier_proxy_requires_actual_untipped_physical_stack():
         planning_scene.build_collision_objects(CONFIG, BIN_POSITIONS, flat)
     with pytest.raises(ValueError, match="incomplete"):
         planning_scene.build_collision_objects(CONFIG, BIN_POSITIONS, BARRIER_POSES[:3])
+
+
+def test_barrier_proxy_groups_must_cover_every_cube_exactly_once():
+    broken = deepcopy(CONFIG)
+    broken["planning_scene"]["barrier"]["proxy_groups"] = [[0, 1, 2, 3], [3, 4, 5, 6, 7, 8]]
+    with pytest.raises(ValueError, match="cover each physical cube once"):
+        planning_scene.build_collision_objects(broken, BIN_POSITIONS, BARRIER_POSES)
+
+
+def test_small_physical_rotation_expands_proxy_instead_of_underestimating_it():
+    from math import cos, sin
+
+    rotated = deepcopy(BARRIER_POSES)
+    for pose in rotated[4:]:
+        pose.orientation = Quaternion(z=sin(0.05), w=cos(0.05))
+    barrier = planning_scene.build_collision_objects(CONFIG, BIN_POSITIONS, rotated)[-1]
+    assert barrier.primitives[1].dimensions[0] > 0.06
+    assert barrier.primitives[1].dimensions[2] == pytest.approx(0.256)
 
 
 def test_collision_geometry_rejects_missing_bin_or_invalid_size():

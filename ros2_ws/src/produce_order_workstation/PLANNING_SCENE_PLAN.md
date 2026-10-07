@@ -168,3 +168,60 @@ carrot position; `tomato` returned six centroids despite there being only four
 tomatoes. This is independent evidence of detector misclassification beyond
 the original crate's occlusion. No operator order was submitted as part of
 this change.
+
+## Follow-up: taller support in the transfer corridor (2026-10-07)
+
+The operator could not see a meaningful detour around the previous 20 cm
+marker. Replace it with a tabletop equipment-support approximation at
+(0.38, -0.03) m: four 5 cm cubes make a 10 x 10 cm foot, followed by five
+vertically stacked cubes. Its settled physical top is approximately 0.305 m.
+This is an approximation using the existing prebuilt O3DE dynamic prefabs,
+not a newly imported, monolithic static equipment asset.
+
+The stock layout and SKU-bin mapping stay unchanged. Camera-ray checks were
+used to choose the position away from stock-centre projections. This reduces
+occlusion risk but does not guarantee that GroundingDINO detects every item.
+
+Implementation changes:
+
+- `demo_scene.yaml`: replace four marker bodies with nine support bodies.
+- `workstation.yaml`: explicit expected centre per body and two proxy groups.
+- `planning_scene.py`: validate all actual TF positions and orientations;
+  derive rotated-cube world AABBs, then separately envelope the low foot and
+  narrow mast with 5 mm padding. No fictitious full-height wide base.
+- Startup still spawns bodies sequentially with settling time. Any incomplete,
+  moved or tipped support prevents the scene from becoming ready.
+- Tests cover nine bodies, both proxy dimensions, duplicate group membership,
+  and conservative bounds under small rotations (41 tests passed).
+- `scripts/trace_motion.py`: record actual `/joint_states` and compute FK of
+  `panda_link8`. Default mode performs an empty-gripper apple-to-A3 diagnostic;
+  `--observe-seconds 40` records the operator's motions without sending goals.
+  It never submits an order. Run active diagnostics only when the operator is
+  not submitting orders; the initial READY check is not a reservation lock.
+
+A preliminary **plan-only**, temporarily substituted proxy comparison for
+(0.253815, -0.167219) -> (0.57, 0.23) at z=0.32 m returned approximately
+99% Cartesian completion without the support and 54.9% with it; OMPL found
+a route in both cases. This establishes route interference for that tested
+configuration, not the amount of detour in an executed customer order.
+
+The deployed scene passed the physical-pose and MoveIt-readback startup gates
+and became READY. `/color_image5` was checked visually. An operator order
+started before the active diagnostic, so the diagnostic correctly refused
+to issue a competing motion. Execution evidence must be reported separately
+from the plan-only comparison; empty-gripper evidence cannot certify loaded
+grasp/place success.
+
+Execution follow-up: the operator's order `debug-20261007-210907-520717`
+completed 4/4 with final audit verified. The read-only recorder captured 367
+actual FK samples over 40 seconds at `/tmp/new_support_operator_trace.json`,
+covering later items, not the first corn. Therefore it cannot explain the
+first corn's observed large excursion. Its corn grasp point was
+(0.311776, -0.135059, 0.038312), with target A1=(0.50, -0.48).
+The transfer was planned by MoveIt RRTConnect, not by an Agent waypoint.
+
+After replenishment, the empty-gripper diagnostic failed to plan its initial
+apple_1 clearance pose at z=0.30; it stopped without executing that transfer.
+Do not report this diagnostic as a successful avoidance test. The successful
+operator order selected a different apple, near (0.313338, -0.329956).
+Route appearance and reachability remain configuration-dependent.

@@ -121,17 +121,22 @@ def build_collision_objects(
             objects.append(obj)
     barrier = scene["barrier"]
     cube_names = barrier["cube_entities"]
-    if len(barrier_poses) != len(cube_names) or not barrier_poses:
+    expected_centers = barrier["expected_centers_m"]
+    if len(barrier_poses) != len(cube_names) or len(expected_centers) != len(cube_names) or not barrier_poses:
         raise ValueError("Physical route marker is incomplete")
     tolerance = _positive(barrier["pose_tolerance_m"], "barrier pose tolerance")
-    expected_x, expected_y = barrier["expected_xy"]
+    half_size = _positive(barrier["cube_size_m"], "barrier cube size") / 2
+    padding = _positive(barrier["proxy_padding_m"], "barrier proxy padding")
+    bounds = []
     for index, cube_pose in enumerate(barrier_poses):
         position = cube_pose.position
         actual = (position.x, position.y, position.z)
-        expected_z = barrier["first_center_z_m"] + index * barrier["cube_step_z_m"]
+        expected = expected_centers[index]
+        if len(expected) != 3 or not all(isfinite(float(value)) for value in expected):
+            raise ValueError("Invalid expected physical route marker position")
         if not all(isfinite(value) for value in actual) or any(
             abs(want - got) > tolerance
-            for want, got in zip((expected_x, expected_y, expected_z), actual)
+            for want, got in zip(expected, actual)
         ):
             raise ValueError(f"Physical route marker cube {index + 1} moved: {actual}")
         q = cube_pose.orientation
@@ -141,22 +146,33 @@ def build_collision_objects(
         angle = 2 * acos(min(1.0, abs(q.w) / norm))
         if angle > _positive(barrier["orientation_tolerance_rad"], "barrier orientation tolerance"):
             raise ValueError(f"Physical route marker cube {index + 1} tipped: {angle:.3f} rad")
-    dimensions = tuple(
-        _positive(value, "barrier dimension") for value in barrier["dimensions_m"]
-    )
-    if len(dimensions) != 3:
-        raise ValueError("Route marker geometry needs three dimensions")
+        # World AABB of the actual rotated physical cube, not an invented tall
+        # box. Keep the foot and mast separate so low base width stays low.
+        x, y, z, w = (q.x / norm, q.y / norm, q.z / norm, q.w / norm)
+        rotation = (
+            (1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)),
+            (2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)),
+            (2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)),
+        )
+        half_extents = [half_size * sum(abs(v) for v in row) for row in rotation]
+        bounds.append((
+            tuple(a - b for a, b in zip(actual, half_extents)),
+            tuple(a + b for a, b in zip(actual, half_extents)),
+        ))
+    groups = barrier["proxy_groups"]
+    indices = [index for group in groups for index in group]
+    if not groups or any(not group for group in groups) or sorted(indices) != list(range(len(bounds))):
+        raise ValueError("Route marker proxy groups must cover each physical cube once")
     obstacle = CollisionObject()
     obstacle.id = OBJECT_PREFIX + barrier["entity"]
     obstacle.header.frame_id = frame
     obstacle.pose.orientation.w = 1.0
     obstacle.operation = CollisionObject.ADD
-    center = (
-        sum(p.position.x for p in barrier_poses) / len(barrier_poses),
-        sum(p.position.y for p in barrier_poses) / len(barrier_poses),
-        (barrier_poses[0].position.z + barrier_poses[-1].position.z) / 2,
-    )
-    _box_at(obstacle, center, dimensions)
+    for group in groups:
+        lo = [min(bounds[i][0][axis] for i in group) - padding for axis in range(3)]
+        hi = [max(bounds[i][1][axis] for i in group) + padding for axis in range(3)]
+        _box_at(obstacle, tuple((a + b) / 2 for a, b in zip(lo, hi)),
+                tuple(b - a for a, b in zip(lo, hi)))
     objects.append(obstacle)
     return objects
 

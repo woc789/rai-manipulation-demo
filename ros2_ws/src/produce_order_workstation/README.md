@@ -2,8 +2,8 @@
 
 This ROS 2/O3DE workcell accepts a structured produce order as a **goal**. On
 server startup the scene is preloaded with 16 mixed products (four each of
-corn, carrot, apple and tomato), four visible receiving bins, and a narrow
-physical route marker. A Bailian
+corn, carrot, apple and tomato), four visible receiving bins, and an approximately
+30 cm physical equipment-support obstacle. A Bailian
 model chooses perception and grasp tools plus visual candidates; ROS tools own the
 physical motion, bin mapping and verification. The products are never generated
 one-by-one in response to order lines.
@@ -27,7 +27,7 @@ one-by-one in response to order lines.
 ```text
 Order goal (SKU quantities)
    ↓
-Server startup: 16 mixed products + A1–A4 receiving bins + narrow route marker
+Server startup: 16 mixed products + A1–A4 receiving bins + equipment support
    ↓
 Agent: get_object_positions(SKU) → choose pick_and_place(detection_id)
        → re-perceive after each pick → finish_order

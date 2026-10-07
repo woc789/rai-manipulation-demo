@@ -95,9 +95,11 @@ def test_scene_has_four_bins_and_mixed_order_independent_stock():
         pos = entities[name]["pose"]["translation"]
         assert [pos["x"], pos["y"]] == slot
     barrier_names = CONFIG["planning_scene"]["barrier"]["cube_entities"]
-    assert len(barrier_names) == 4
+    assert len(barrier_names) == 9
     assert all(entities[name]["prefab_name"] == "yellow_cube" for name in barrier_names)
-    assert all(entities[name]["pose"]["translation"]["x"] == 0.37 for name in barrier_names)
+    for name, center in zip(barrier_names, CONFIG["planning_scene"]["barrier"]["expected_centers_m"]):
+        pos = entities[name]["pose"]["translation"]
+        assert [pos["x"], pos["y"]] == center[:2]
     stock = Counter(item["prefab_name"] for item in entities.values() if item["prefab_name"] in CONFIG["aliases"])
     assert stock == CONFIG["stock"]["initial_counts"]
     positions = [
@@ -109,7 +111,7 @@ def test_scene_has_four_bins_and_mixed_order_independent_stock():
         for i, a in enumerate(positions) for b in positions[i + 1:]
     ) > 0.08
     scene_config = Workstation(MagicMock(), CONFIG).build_scene(PACKAGE / "config/demo_scene.yaml")
-    assert len(scene_config.entities) == 24
+    assert len(scene_config.entities) == 29
 
 
 def test_stock_quantity_is_distinct_from_bin_capacity():
