@@ -8,7 +8,9 @@
 
 机械臂姿态与路线优选、降速设置见 [轨迹优化说明](docs/MOTION_PREFERENCES.md)。
 
-后续针对实测关节大幅摆动的优化、失败迭代与复测记录见 [关节摆幅排查（尚未解决）](docs/JOINT_EXCURSION_FIX.md)。
+后续针对实测关节大幅摆动的优化、失败迭代与复测记录见 [关节摆幅排查（旧布局）](docs/JOINT_EXCURSION_FIX.md)。
+
+经用户允许调整库存分布后的实测改善、初始化布局检查及保留的限制见 [备货工作区调整](docs/STOCK_WORKSPACE_LAYOUT.md)。
 
 ![配货工作台](docs/images/order-workbench.png)
 

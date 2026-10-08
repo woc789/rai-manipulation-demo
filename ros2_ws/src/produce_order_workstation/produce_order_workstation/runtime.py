@@ -34,6 +34,7 @@ from .order import (
 from .agent import ProduceAgent
 from .planning_scene import PlanningSceneSync
 from .inventory import InventoryLedger
+from .stock_layout import validate_stock_layout
 
 
 class Workstation:
@@ -145,6 +146,9 @@ class Workstation:
     def prepare_scene(self, path: Path, order: Order | None = None) -> None:
         """Populate the benchmark with visible bins and mixed, fixed stock."""
         self._scene_prepared = False
+        scene = self.build_scene(path)
+        # Fail before deleting the previous scene if the new layout is invalid.
+        validate_stock_layout(scene, self.config)
         if self._scene_bridge is None:
             self._scene_bridge = O3DExROS2Bridge(self.connector)
         # The Action server outlives O3DE. After a simulator restart its bridge
@@ -159,7 +163,6 @@ class Workstation:
                 if "Could not find entity with given name" not in str(exc):
                     raise
                 self._scene_bridge.spawned_entities.remove(stale)
-        scene = self.build_scene(path)
         bin_names = {name for zone in self.config["zones"].values() for name in zone["slot_entities"]}
         self._bin_templates = {item.name: item for item in scene.entities if item.name in bin_names}
         if set(self._bin_templates) != bin_names:

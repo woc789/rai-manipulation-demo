@@ -215,7 +215,11 @@ def test_carried_object_is_attached_and_removed_with_readback(monkeypatch):
 
 
 def test_scene_preparation_requires_moveit_sync(monkeypatch):
-    station = runtime.Workstation(MagicMock(), CONFIG)
+    # This legacy cube fixture exercises MoveIt synchronization only, without
+    # simulated stock. Mixed-stock layout validation has separate startup tests.
+    sync_config = deepcopy(CONFIG)
+    sync_config["stock"].pop("layout", None)
+    station = runtime.Workstation(MagicMock(), sync_config)
     bridge = MagicMock()
     bridge.spawned_entities = []
     bins = [
