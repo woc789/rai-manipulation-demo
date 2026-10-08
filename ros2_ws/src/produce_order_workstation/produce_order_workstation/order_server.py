@@ -264,6 +264,7 @@ class OrderActionServer(Node):
         try:
             allocation = self.bin_manager.orders[order.order_id]
             self.workstation.begin_order(order, bin_index=allocation.bin_indices[0])
+            self.workstation.ensure_order_bins(order, allocation.bin_indices)
             self.workstation.event(order.order_id, "STARTING")
             self.workstation.check_cancel()
             self.workstation.event(order.order_id, "USING_PRELOADED_SCENE")
@@ -282,6 +283,13 @@ class OrderActionServer(Node):
 
         try:
             allocation = self.bin_manager.orders[order.order_id]
+            scene_uncertain = False
+            if result["status"] != "COMPLETED" and not self.workstation.motion_attempted:
+                try:
+                    self.workstation.remove_order_bins(order, allocation.bin_indices)
+                except Exception as exc:
+                    scene_uncertain = True
+                    self.get_logger().error(f"Failed to remove unused order bin: {exc}")
             result["operation_mode"] = self.config.get("operation_mode", "classification")
             result["bin_ids"] = [f"{order.zone}{i + 1}" for i in allocation.bin_indices]
             result["delivery_state"] = "WAITING_PICKUP" if result["status"] == "COMPLETED" else result["status"]
@@ -305,11 +313,11 @@ class OrderActionServer(Node):
             return response
         finally:
             state, reason, ready = state_after_order(
-                result["status"], self.workstation.motion_attempted
+                result["status"], self.workstation.motion_attempted or scene_uncertain
             )
             with self._lock:
                 self.bin_manager.finish(order.order_id, result["status"],
-                                        self.workstation.motion_attempted,
+                                        self.workstation.motion_attempted or scene_uncertain,
                                         self.workstation._placed_entities)
                 self._state, self._state_reason, self._scene_ready = state, reason, ready
                 self._busy = False

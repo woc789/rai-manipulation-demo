@@ -26,6 +26,7 @@ from .order import (
     calibrated_grasp_point,
     choose_source,
     distance_xy,
+    fulfillment_mode,
     parse_centroids,
     plan_placements,
     verify_bin_placement,
@@ -56,6 +57,7 @@ class Workstation:
         self._placed_entities: list[tuple] = []
         self._delivered_entity_names: set[str] = set()
         self._allocated_bin_index: int | None = None
+        self._bin_templates = {}
         self._completed_by_sku: dict[str, int] = {}
         self._visual_candidates: dict[str, tuple[str, tuple[float, float, float]]] = {}
         self._perception_generation = 0
@@ -155,14 +157,20 @@ class Workstation:
                     raise
                 self._scene_bridge.spawned_entities.remove(stale)
         scene = self.build_scene(path)
-        barrier_names = self.config["planning_scene"]["barrier"]["cube_entities"]
+        bin_names = {name for zone in self.config["zones"].values() for name in zone["slot_entities"]}
+        self._bin_templates = {item.name: item for item in scene.entities if item.name in bin_names}
+        if set(self._bin_templates) != bin_names:
+            raise OrderError("Receiving-bin templates are incomplete")
+        barrier_config = self.config["planning_scene"]["barrier"]
+        barrier_names = barrier_config.get("entities") or barrier_config["cube_entities"]
         barrier_entities = [item for item in scene.entities if item.name in barrier_names]
         if [item.name for item in barrier_entities] != barrier_names or any(
-            item.prefab_name != "yellow_cube" for item in barrier_entities
+            item.prefab_name != barrier_config.get("prefab_name", "yellow_cube") for item in barrier_entities
         ):
             raise OrderError("Physical route marker is incomplete or out of order")
         self._scene_bridge.setup_scene(SceneConfig(
-            entities=[item for item in scene.entities if item.name not in barrier_names]
+            entities=[item for item in scene.entities if item.name not in barrier_names
+                      and (fulfillment_mode(self.config) != "fulfillment" or item.name not in bin_names)]
         ))
         time.sleep(self.config["stock"]["settle_time_s"])
         # These are dynamic rigid bodies. Spawn them one at a time so the stack
@@ -171,34 +179,7 @@ class Workstation:
         for item in barrier_entities:
             self._scene_bridge._spawn_entity(item)
             time.sleep(self.config["planning_scene"]["barrier"]["spawn_settle_time_s"])
-        bin_positions = {}
-        for zone in self.config["zones"].values():
-            for index, slot in enumerate(zone["slots"]):
-                xy = self.slot_bin_position(zone, index, slot)
-                name = zone["slot_entities"][index]
-                entity = next(
-                    item for item in self._scene_bridge.spawned_entities
-                    if item.name == name
-                )
-                pose = self._scene_bridge.get_object_pose(entity).pose.position
-                bin_positions[name] = (xy[0], xy[1], pose.z)
-        barrier_poses = []
-        for name in barrier_names:
-            entity = next(
-                (item for item in self._scene_bridge.spawned_entities if item.name == name),
-                None,
-            )
-            if entity is None or entity.prefab_name != "yellow_cube":
-                raise OrderError(f"Physical route marker cube {name} is missing")
-            barrier_poses.append(self._scene_bridge.get_object_pose(entity).pose)
-        if self._planning_scene is None:
-            self._planning_scene = PlanningSceneSync(
-                self.connector.node,
-                timeout_s=self.config["planning_scene"]["service_timeout_s"],
-            )
-        scene_objects = self._planning_scene.synchronize(
-            self.config, bin_positions, barrier_poses
-        )
+        scene_objects = self.synchronize_scene()
         self._scene_prepared = True
         self._placed_entities = []
         self._delivered_entity_names = set()
@@ -221,7 +202,71 @@ class Workstation:
                 )
         self.event("", "PLANNING_SCENE_READY", objects=scene_objects)
         if order is not None:
-            self.begin_order(order)
+            indices = (0,) if fulfillment_mode(self.config) == "fulfillment" else tuple(
+                zone["sku_bins"][line.sku] for line in order.lines)
+            self.begin_order(order, bin_index=indices[0])
+            self.ensure_order_bins(order, indices)
+
+    def synchronize_scene(self) -> list[str]:
+        """Publish only physically present bins, plus the measured obstacle."""
+        bin_positions = {}
+        present = {item.name for item in self._scene_bridge.spawned_entities}
+        for zone in self.config["zones"].values():
+            for index, slot in enumerate(zone["slots"]):
+                name = zone["slot_entities"][index]
+                if name not in present and fulfillment_mode(self.config) == "fulfillment":
+                    continue
+                xy = self.slot_bin_position(zone, index, slot)
+                entity = next(
+                    item for item in self._scene_bridge.spawned_entities
+                    if item.name == name
+                )
+                pose = self._scene_bridge.get_object_pose(entity).pose.position
+                bin_positions[name] = (xy[0], xy[1], pose.z)
+        barrier_poses = []
+        barrier_config = self.config["planning_scene"]["barrier"]
+        for name in (barrier_config.get("entities") or barrier_config["cube_entities"]):
+            entity = next(
+                (item for item in self._scene_bridge.spawned_entities if item.name == name),
+                None,
+            )
+            if entity is None or entity.prefab_name != barrier_config.get("prefab_name", "yellow_cube"):
+                raise OrderError(f"Physical route marker cube {name} is missing")
+            barrier_poses.append(self._scene_bridge.get_object_pose(entity).pose)
+        if self._planning_scene is None:
+            self._planning_scene = PlanningSceneSync(
+                self.connector.node,
+                timeout_s=self.config["planning_scene"]["service_timeout_s"],
+            )
+        return self._planning_scene.synchronize(
+            self.config, bin_positions, barrier_poses
+        )
+
+    def ensure_order_bins(self, order: Order, indices: tuple[int, ...]) -> None:
+        if fulfillment_mode(self.config) != "fulfillment":
+            return
+        zone = self.config["zones"][order.zone]
+        existing = {e.name for e in self._scene_bridge.spawned_entities}
+        for index in indices:
+            name = zone["slot_entities"][index]
+            if name in existing:
+                raise OrderError(f"Allocated empty bin slot {name} already contains a physical bin")
+            self._scene_bridge._spawn_entity(self._bin_templates[name])
+        time.sleep(self.config["stock"]["settle_time_s"])
+        objects = self.synchronize_scene()
+        self.event(order.order_id, "ORDER_BIN_ARRIVED", bin_ids=[f"{order.zone}{i + 1}" for i in indices], objects=objects)
+
+    def remove_order_bins(self, order: Order, indices: tuple[int, ...]) -> None:
+        """Remove only the assigned boxes, after goods pickup or a no-motion failure."""
+        if fulfillment_mode(self.config) != "fulfillment":
+            return
+        zone = self.config["zones"][order.zone]
+        for index in indices:
+            name = zone["slot_entities"][index]
+            entity = next((e for e in self._scene_bridge.spawned_entities if e.name == name), None)
+            if entity is not None:
+                self._scene_bridge._despawn_entity(entity)
+        self.synchronize_scene()
 
     def begin_order(self, order: Order, *, bin_index: int | None = None) -> None:
         """Lock the current preloaded inventory to one new order."""
@@ -266,6 +311,7 @@ class Workstation:
             remaining.append(entity)
         for entity in remaining:
             self._scene_bridge._despawn_entity(entity)
+        self.remove_order_bins(order, tuple(sorted({entry[2] for entry in placed_entities})))
         self.event(order.order_id, "PICKUP_CONFIRMED", removed_entities=[e.name for e in remaining])
 
     def slot_bin_position(self, zone: dict, index: int, slot: tuple) -> tuple:

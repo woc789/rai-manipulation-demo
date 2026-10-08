@@ -20,6 +20,45 @@ from tf2_geometry_msgs import do_transform_pose
 OBJECT_PREFIX = "produce_workstation/"
 
 
+def _rotation(q):
+    norm = sqrt(q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w)
+    if not isfinite(norm) or abs(norm - 1.0) > 0.02:
+        raise ValueError("Obstacle has an invalid orientation")
+    x, y, z, w = q.x/norm, q.y/norm, q.z/norm, q.w/norm
+    return ((1-2*(y*y+z*z), 2*(x*y-z*w), 2*(x*z+y*w)),
+            (2*(x*y+z*w), 1-2*(x*x+z*z), 2*(y*z-x*w)),
+            (2*(x*z-y*w), 2*(y*z+x*w), 1-2*(x*x+y*y)))
+
+
+def crate_collision_object(config: dict, poses: list[Pose]) -> CollisionObject:
+    """Transform the existing toy_box's five physical collider parts to world AABBs."""
+    barrier = config["planning_scene"]["barrier"]
+    if len(poses) != 1:
+        raise ValueError("Physical return crate is incomplete")
+    pose = poses[0]
+    expected = barrier["expected_pose"]
+    actual = (pose.position.x, pose.position.y, pose.position.z)
+    if any(not isfinite(v) for v in actual) or any(
+        abs(a-b) > barrier["pose_tolerance_m"] for a, b in zip(actual, expected["position"])):
+        raise ValueError(f"Physical return crate moved: {actual}")
+    rotation = _rotation(pose.orientation)
+    q = pose.orientation
+    dot = abs(sum(a*b for a, b in zip((q.x,q.y,q.z,q.w), expected["orientation"])))
+    if 2*acos(min(1.0, dot)) > barrier["orientation_tolerance_rad"]:
+        raise ValueError("Physical return crate tipped")
+    obj = CollisionObject()
+    obj.id = OBJECT_PREFIX + barrier["entity"]
+    obj.header.frame_id = config["camera"]["target_frame"]
+    obj.pose.orientation.w = 1.0
+    obj.operation = CollisionObject.ADD
+    padding = _positive(barrier["proxy_padding_m"], "crate padding")
+    for part in barrier["collider_parts"]:
+        center = tuple(actual[i] + sum(rotation[i][j]*part["center"][j] for j in range(3)) for i in range(3))
+        dimensions = tuple(sum(abs(rotation[i][j])*_positive(part["size"][j], "crate part") for j in range(3)) + 2*padding for i in range(3))
+        _box_at(obj, center, dimensions)
+    return obj
+
+
 def _positive(value: float, label: str) -> float:
     number = float(value)
     if not isfinite(number) or number <= 0:
@@ -92,13 +131,16 @@ def build_collision_objects(
     expected_names = {
         name for zone in config["zones"].values() for name in zone["slot_entities"]
     }
-    if set(bin_positions) != expected_names:
+    dynamic_bins = config.get("operation_mode") == "fulfillment"
+    if not set(bin_positions).issubset(expected_names) or (not dynamic_bins and set(bin_positions) != expected_names):
         raise ValueError("Planning-scene bin poses do not match configured slots")
     for zone in config["zones"].values():
         half_x, half_y = (_positive(value, "bin half extent") for value in zone["bin_half_extents_m"])
         if wall_thickness >= min(half_x, half_y):
             raise ValueError("Bin collision wall is too thick for the configured opening")
         for name in zone["slot_entities"]:
+            if name not in bin_positions:
+                continue
             x, y, entity_z = bin_positions[name]
             if not all(map(isfinite, (x, y, entity_z))):
                 raise ValueError(f"Invalid simulator pose for {name}")
@@ -120,6 +162,9 @@ def build_collision_objects(
                         (2 * half_x, wall_thickness, wall_height))
             objects.append(obj)
     barrier = scene["barrier"]
+    if barrier.get("kind") == "return_crate":
+        objects.append(crate_collision_object(config, barrier_poses))
+        return objects
     cube_names = barrier["cube_entities"]
     expected_centers = barrier["expected_centers_m"]
     if len(barrier_poses) != len(cube_names) or len(expected_centers) != len(cube_names) or not barrier_poses:

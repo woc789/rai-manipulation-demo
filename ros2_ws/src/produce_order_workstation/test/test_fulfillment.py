@@ -231,6 +231,7 @@ def pickup_station():
     bridge.spawned_entities = [own, other, box, table]
     bridge._despawn_entity.side_effect = lambda entity: bridge.spawned_entities.remove(entity)
     station._scene_bridge = bridge
+    station.synchronize_scene = MagicMock()
     station._delivered_entity_names = {own.name, other.name}
     slot = tuple(CONFIG["zones"]["A"]["slots"][0])
     station.slot_bin_position = MagicMock(return_value=slot)
@@ -241,10 +242,10 @@ def pickup_station():
 def test_pickup_deletes_only_order_goods_and_repeat_cleanup_is_safe():
     station, own, placed = pickup_station()
     station.collect_order(order(), placed)
-    station._scene_bridge._despawn_entity.assert_called_once_with(own)
-    assert [e.name for e in station._scene_bridge.spawned_entities] == ["other_corn", "order_bin_A1", "table_tomato"]
+    station._scene_bridge._despawn_entity.assert_any_call(own)
+    assert [e.name for e in station._scene_bridge.spawned_entities] == ["other_corn", "table_tomato"]
     station.collect_order(order(), placed)
-    assert station._scene_bridge._despawn_entity.call_count == 1
+    assert station._scene_bridge._despawn_entity.call_count == 2  # goods + their box
 
 
 def test_pickup_preflight_refuses_goods_outside_bin_before_deleting():

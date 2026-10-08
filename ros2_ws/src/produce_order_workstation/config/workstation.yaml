@@ -61,22 +61,22 @@ planning_scene:
   # Conservative transit proxies; grasped pose comes from the verified O3DE
   # lift audit and is never shown to the Agent as a perception result.
   carried_radius_m: {corn: 0.035, carrot: 0.035, apple: 0.030, tomato: 0.030}
-  # Physical equipment-support approximation: four foot cubes and five mast cubes.
+  # A real existing wooden-crate asset, temporarily returned on its side.
+  # Collider parts below match Project/Prefabs/toy_box.prefab, not an invented solid block.
   barrier:
+    kind: return_crate
     entity: route_barrier
-    cube_entities: [route_base_1, route_base_2, route_base_3, route_base_4, route_mast_1, route_mast_2, route_mast_3, route_mast_4, route_mast_5]
-    expected_centers_m:
-      - [0.355, -0.055, 0.035]
-      - [0.405, -0.055, 0.035]
-      - [0.355, -0.005, 0.035]
-      - [0.405, -0.005, 0.035]
-      - [0.380, -0.030, 0.084]
-      - [0.380, -0.030, 0.133]
-      - [0.380, -0.030, 0.182]
-      - [0.380, -0.030, 0.231]
-      - [0.380, -0.030, 0.280]
-    proxy_groups: [[0, 1, 2, 3], [4, 5, 6, 7, 8]]
-    cube_size_m: 0.05
+    prefab_name: toy_box
+    entities: [packing_return_crate]
+    expected_pose:
+      position: [0.43, 0.0, 0.11]
+      orientation: [0.0, 0.7071067811865476, 0.0, 0.7071067811865476]
+    collider_parts:
+      - {center: [0.0, 0.0, 0.0], size: [0.20, 0.20, 0.02]}
+      - {center: [0.09, 0.0, 0.06], size: [0.02, 0.20, 0.11]}
+      - {center: [-0.09, 0.0, 0.06], size: [0.02, 0.20, 0.11]}
+      - {center: [0.0, 0.09, 0.06], size: [0.20, 0.02, 0.11]}
+      - {center: [0.0, -0.09, 0.06], size: [0.20, 0.02, 0.11]}
     proxy_padding_m: 0.005
     pose_tolerance_m: 0.018
     orientation_tolerance_rad: 0.15

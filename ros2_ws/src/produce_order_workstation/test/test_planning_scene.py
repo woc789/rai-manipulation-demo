@@ -17,6 +17,17 @@ from produce_order_workstation import runtime
 CONFIG = yaml.safe_load(
     (Path(__file__).resolve().parents[1] / "config/workstation.yaml").read_text()
 )
+ACTUAL_CONFIG = deepcopy(CONFIG)
+# Preserve cube-barrier geometry regressions for the supported legacy builder.
+CONFIG["operation_mode"] = "classification"
+CONFIG["planning_scene"]["barrier"] = {
+    "entity": "route_barrier", "cube_entities": [f"cube_{i}" for i in range(9)],
+    "expected_centers_m": [[.355,-.055,.035], [.405,-.055,.035], [.355,-.005,.035], [.405,-.005,.035],
+                           [.38,-.03,.084], [.38,-.03,.133], [.38,-.03,.182], [.38,-.03,.231], [.38,-.03,.280]],
+    "proxy_groups": [[0,1,2,3], [4,5,6,7,8]], "cube_size_m": .05,
+    "proxy_padding_m": .005, "pose_tolerance_m": .018,
+    "orientation_tolerance_rad": .15, "spawn_settle_time_s": 2.0,
+}
 BIN_POSITIONS = {
     name: (slot[0], slot[1], 0.05)
     for zone in CONFIG["zones"].values()
@@ -228,7 +239,8 @@ def test_scene_preparation_requires_moveit_sync(monkeypatch):
     station._scene_bridge = bridge
     station._planning_scene = MagicMock()
     station._planning_scene.synchronize.side_effect = RuntimeError("MoveIt unavailable")
-    monkeypatch.setattr(station, "build_scene", lambda _path: MagicMock(entities=barriers))
+    monkeypatch.setattr(station, "build_scene", lambda _path: MagicMock(entities=bins + barriers))
+    monkeypatch.setattr(runtime, "SceneConfig", lambda *, entities: SimpleNamespace(entities=entities))
     monkeypatch.setattr(runtime.time, "sleep", lambda _seconds: None)
     with pytest.raises(RuntimeError, match="MoveIt unavailable"):
         station.prepare_scene(Path("unused.yaml"))

@@ -2,8 +2,9 @@
 
 This ROS 2/O3DE workcell accepts a structured produce order as a **goal**. On
 server startup the scene is preloaded with 16 mixed products (four each of
-corn, carrot, apple and tomato), four visible receiving bins, and an approximately
-30 cm physical equipment-support obstacle. A Bailian
+corn, carrot, apple and tomato), **no receiving bins**, and a side-laid wooden
+return crate as the physical obstacle. Four locations remain available for
+order boxes, but a box appears only after its order is accepted. A Bailian
 model chooses perception and grasp tools plus visual candidates; ROS tools own the
 physical motion, bin mapping and verification. The products are never generated
 one-by-one in response to order lines.
@@ -28,7 +29,9 @@ one-by-one in response to order lines.
 ```text
 Order goal (SKU quantities)
    ↓
-Server startup: 16 mixed products + A1–A4 receiving bins + equipment support
+Server startup: 16 mixed products + side-laid return crate (no order boxes)
+   ↓
+Accept order: allocate A1–A4 location → spawn this order's box → sync MoveIt
    ↓
 Agent: get_object_positions(SKU) → choose pick_and_place(detection_id)
        → re-perceive after each pick → finish_order
@@ -37,12 +40,15 @@ ROS tool: RGB-D re-localization → safety checks → grasp → allocated bin �
    ↓
 Action feedback + /produce_orders/events + JSON report
    ↓
-WAITING_PICKUP → human confirmation → delete only this order's goods → free bin
+WAITING_PICKUP → human confirmation → remove this order's goods AND box → free location
 ```
 
 ## Fulfillment phase 0–1 (2026-10-08)
 
-Default `operation_mode: fulfillment` assigns **one mixed order to one free bin**.
+Default `operation_mode: fulfillment` assigns **one mixed order to one free location**
+and spawns that order's box on acceptance. Explicit pickup removes both its goods
+and its box; it does not leave four empty boxes on the table. See
+`DYNAMIC_BOX_SCENE.md` for this follow-up correction and the realistic crate geometry.
 `classification` preserves the original corn/A1, carrot/A2, apple/A3, tomato/A4
 placement mode for regressions. Both modes now require explicit pickup and never
 automatically replenish after success. See `FULFILLMENT_PHASE01.md` for the
@@ -122,8 +128,8 @@ conservative sphere to MoveIt's robot state. It removes that sphere after
 release; scene recovery clears stale attachments. This simulated pose is used
 only for collision safety, never as an Agent observation or grasp target.
 
-The original side-lying `toy_box` divided the route but blocked the oblique
-RGB-D camera's view of some products. The current route marker instead stacks
+Historical obstacle experiment: the original side-lying `toy_box` divided the route but blocked the oblique
+RGB-D camera's view of some products. An earlier route marker instead stacked
 four existing 5 cm rigid-body `yellow_cube` prefabs at (0.37, 0). They are
 spawned sequentially to let each settle. Startup reads all four physical
 poses and rejects a missing, displaced or tipped cube before adding one
@@ -243,7 +249,7 @@ after any attempted motion the server requires explicit scene recovery. A
 completed order never replenishes automatically. Select a waiting order and use
 **确认取货并释放箱位** (`/produce_orders/confirm_pickup`, `ConfirmPickup.srv`). This
 simulates human collection and replacement with an empty bin: only that order's
-verified goods are deleted, the physical bin and table stock stay unchanged.
+verified goods and physical order box are deleted; table stock stays unchanged.
 Cleanup failure retains ownership for retry. A separate `<order_id>.pickup.json`
 receipt records successful collection without rewriting the execution report.
 If O3DE or its ROS services have

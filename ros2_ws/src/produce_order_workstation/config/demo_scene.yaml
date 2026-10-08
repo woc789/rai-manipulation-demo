@@ -19,132 +19,92 @@ entities:
     pose:
       translation: {x: 0.50, y: 0.48, z: 0.05}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
-  # Approximation of a tabletop equipment support: wide foot and taller mast.
-  # Existing physical 5 cm cubes are settled base-first, then bottom-to-top.
-  - name: route_base_1
-    prefab_name: yellow_cube
+  # Real wooden crate awaiting return, laid on its side at the table edge.
+  # Receiving-bin entries above are templates; fulfillment startup does not spawn them.
+  - name: packing_return_crate
+    prefab_name: toy_box
     pose:
-      translation: {x: 0.355, y: -0.055, z: 0.025}
-      rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
-  - name: route_base_2
-    prefab_name: yellow_cube
-    pose:
-      translation: {x: 0.405, y: -0.055, z: 0.025}
-      rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
-  - name: route_base_3
-    prefab_name: yellow_cube
-    pose:
-      translation: {x: 0.355, y: -0.005, z: 0.025}
-      rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
-  - name: route_base_4
-    prefab_name: yellow_cube
-    pose:
-      translation: {x: 0.405, y: -0.005, z: 0.025}
-      rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
-  - name: route_mast_1
-    prefab_name: yellow_cube
-    pose:
-      translation: {x: 0.38, y: -0.03, z: 0.075}
-      rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
-  - name: route_mast_2
-    prefab_name: yellow_cube
-    pose:
-      translation: {x: 0.38, y: -0.03, z: 0.125}
-      rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
-  - name: route_mast_3
-    prefab_name: yellow_cube
-    pose:
-      translation: {x: 0.38, y: -0.03, z: 0.175}
-      rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
-  - name: route_mast_4
-    prefab_name: yellow_cube
-    pose:
-      translation: {x: 0.38, y: -0.03, z: 0.225}
-      rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
-  - name: route_mast_5
-    prefab_name: yellow_cube
-    pose:
-      translation: {x: 0.38, y: -0.03, z: 0.275}
-      rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+      translation: {x: 0.43, y: 0.0, z: 0.115}
+      rotation: {x: 0.0, y: 0.7071067811865476, z: 0.0, w: 0.7071067811865476}
   # Sixteen mixed objects exist before the Agent sees the order. Names are stable
   # entity IDs; TF positions are measured again before each pick.
   - name: stock_carrot_1
     prefab_name: carrot
     pose:
-      translation: {x: 0.24, y: -0.275, z: 0.05}
+      translation: {x: 0.34, y: -0.34, z: 0.05}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
   - name: stock_corn_1
     prefab_name: corn
     pose:
-      translation: {x: 0.24, y: -0.055, z: 0.05}
+      translation: {x: 0.22, y: -0.45, z: 0.05}
       rotation: {x: 0.0, y: 0.707, z: 0.0, w: 0.707}
   - name: stock_apple_1
     prefab_name: apple
     pose:
-      translation: {x: 0.24, y: -0.165, z: 0.05}
+      translation: {x: 0.22, y: -0.34, z: 0.05}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
   - name: stock_tomato_1
     prefab_name: tomato
     pose:
-      translation: {x: 0.24, y: -0.385, z: 0.05}
+      translation: {x: 0.34, y: -0.45, z: 0.05}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
   - name: stock_tomato_2
     prefab_name: tomato
     pose:
-      translation: {x: 0.37, y: 0.165, z: 0.05}
+      translation: {x: 0.22, y: -0.12, z: 0.05}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
   - name: stock_apple_2
     prefab_name: apple
     pose:
-      translation: {x: 0.24, y: 0.385, z: 0.05}
+      translation: {x: 0.22, y: 0.52, z: 0.05}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
   - name: stock_corn_2
     prefab_name: corn
     pose:
-      translation: {x: 0.24, y: 0.165, z: 0.05}
+      translation: {x: 0.22, y: 0.25, z: 0.05}
       rotation: {x: 0.0, y: 0.707, z: 0.0, w: 0.707}
   - name: stock_carrot_2
     prefab_name: carrot
     pose:
-      translation: {x: 0.24, y: 0.275, z: 0.05}
+      translation: {x: 0.22, y: 0.34, z: 0.05}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
   - name: stock_apple_3
     prefab_name: apple
     pose:
-      translation: {x: 0.30, y: -0.33, z: 0.05}
+      translation: {x: 0.34, y: -0.23, z: 0.05}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
   - name: stock_carrot_3
     prefab_name: carrot
     pose:
-      translation: {x: 0.30, y: -0.22, z: 0.05}
+      translation: {x: 0.34, y: -0.12, z: 0.05}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
   - name: stock_corn_3
     prefab_name: corn
     pose:
-      translation: {x: 0.30, y: -0.11, z: 0.05}
+      translation: {x: 0.22, y: -0.23, z: 0.05}
       rotation: {x: 0.0, y: 0.707, z: 0.0, w: 0.707}
   - name: stock_tomato_3
     prefab_name: tomato
     pose:
-      translation: {x: 0.37, y: 0.40, z: 0.05}
+      translation: {x: 0.34, y: 0.33, z: 0.05}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
   - name: stock_apple_4
     prefab_name: apple
     pose:
-      translation: {x: 0.30, y: 0.11, z: 0.05}
+      translation: {x: 0.34, y: 0.23, z: 0.05}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
   - name: stock_corn_4
     prefab_name: corn
     pose:
-      translation: {x: 0.30, y: 0.22, z: 0.05}
+      translation: {x: 0.22, y: 0.43, z: 0.05}
       rotation: {x: 0.0, y: 0.707, z: 0.0, w: 0.707}
   - name: stock_carrot_4
     prefab_name: carrot
     pose:
-      translation: {x: 0.30, y: 0.33, z: 0.05}
+      translation: {x: 0.34, y: 0.43, z: 0.05}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
   - name: stock_tomato_4
     prefab_name: tomato
     pose:
-      translation: {x: 0.30, y: 0.44, z: 0.05}
+      translation: {x: 0.34, y: 0.53, z: 0.05}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}

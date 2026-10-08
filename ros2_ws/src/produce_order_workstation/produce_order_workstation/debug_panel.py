@@ -329,7 +329,7 @@ class DebugPanel(QWidget):
         self.bin_preview = QLabel()
         self.bin_preview.setWordWrap(True)
         form.addRow("分箱预览", self.bin_preview)
-        scene_label = QLabel("启动时预置 16 件混合库存；完成订单不自动补货。当前尚无持续库存账本，数量上限不是剩余库存承诺。")
+        scene_label = QLabel("启动时只有 16 件混合库存和待回收周转箱；接单后放入订单箱，确认取货后移走整箱。完成订单不自动补货。")
         scene_label.setWordWrap(True)
         form.addRow("场景", scene_label)
         buttons = QHBoxLayout()
@@ -359,7 +359,7 @@ class DebugPanel(QWidget):
         form.addRow("箱位资源", self.bin_resources_label)
         pickup_buttons = QHBoxLayout()
         self.pickup_orders = QComboBox()
-        self.pickup_button = QPushButton("确认取货并释放箱位")
+        self.pickup_button = QPushButton("确认取走整箱并释放箱位")
         self.pickup_button.setEnabled(False)
         self.pickup_button.clicked.connect(self._pickup)
         pickup_buttons.addWidget(self.pickup_orders, 1)
@@ -527,7 +527,7 @@ class DebugPanel(QWidget):
         if not order_id or self._order_active:
             return
         if QMessageBox.question(self, "确认人工取货",
-                                f"确认取走订单 {order_id}？\n仿真将只移除该订单商品，保留箱子和桌面库存。") != QMessageBox.Yes:
+                                f"确认取走订单 {order_id}？\n仿真将移除该订单商品和订单箱，保留桌面剩余库存与其他订单箱。") != QMessageBox.Yes:
             return
         self.pickup_button.setEnabled(False)
         self.worker.pickup(order_id)
@@ -536,7 +536,7 @@ class DebugPanel(QWidget):
         status = json.loads(payload)
         self._bin_resources = status.get("bins", [])
         self.bin_resources_label.setText("  ·  ".join(
-            f"{b['bin_id']}：{b['state']}" + (f" [{b['order_id']}]" if b.get("order_id") else "")
+            f"{b['bin_id']}：{('空位（无箱）' if b['state'] == 'FREE' and fulfillment_mode(self.config) == 'fulfillment' else b['state'])}" + (f" [{b['order_id']}]" if b.get("order_id") else "")
             for b in self._bin_resources
         ))
         selected = self.pickup_orders.currentData()
