@@ -22,6 +22,8 @@ from std_srvs.srv import Trigger
 
 from produce_order_interfaces.action import ExecuteOrder
 from produce_order_interfaces.srv import ConfirmPickup
+from produce_order_interfaces.msg import InventoryItem, InventorySnapshot
+from geometry_msgs.msg import Point
 
 from .fulfillment import BinManager
 from .order import Order, OrderCancelled, OrderLine, validate_order
@@ -66,6 +68,9 @@ class OrderActionServer(Node):
             String, "/produce_orders/workcell_status",
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
         )
+        self._inventory_publisher = self.create_publisher(
+            InventorySnapshot, "/produce_orders/inventory",
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self._recovery_service = self.create_service(
             Trigger, "/produce_orders/recover", self.recover_callback,
             callback_group=ReentrantCallbackGroup(),
@@ -104,6 +109,27 @@ class OrderActionServer(Node):
                 "bins": self.bin_manager.snapshot(),
             }
         self._status_publisher.publish(String(data=json.dumps(status, ensure_ascii=False)))
+        self.publish_inventory()
+
+    def publish_inventory(self):
+        if not hasattr(self, "workstation"):
+            return
+        snapshot = self.workstation.inventory.snapshot()
+        message = InventorySnapshot()
+        message.header.stamp = self.get_clock().now().to_msg()
+        message.header.frame_id = self.config["camera"]["target_frame"]
+        message.epoch = snapshot["epoch"]
+        message.scene_ready = self.workstation._scene_prepared and self._state not in (
+            "INITIALIZING", "RECOVERING", "REPLENISHING")
+        message.persistence = snapshot["persistence"]
+        for row in snapshot["items"]:
+            item = InventoryItem()
+            for key in ("item_id", "sku", "frame_id", "observed_unix_sec", "age_sec", "stale",
+                        "classification_verified", "state", "order_id", "observation_source"):
+                setattr(item, key, row[key])
+            item.position = Point(x=row["position"][0], y=row["position"][1], z=row["position"][2])
+            message.items.append(item)
+        self._inventory_publisher.publish(message)
 
     def _set_state(self, state: str, reason: str, *, ready: bool = False) -> None:
         with self._lock:
@@ -236,20 +262,16 @@ class OrderActionServer(Node):
         return GoalResponse.ACCEPT
 
     def cancel_callback(self, goal_handle) -> CancelResponse:
-        feedback = ExecuteOrder.Feedback()
-        feedback.stage = "CANCEL_REQUESTED"
-        feedback.detail_json = json.dumps(
-            {"stage": "CANCEL_REQUESTED", "detail": "Waiting for a safe item boundary"}
-        )
-        goal_handle.publish_feedback(feedback)
+        self._publish_feedback(goal_handle, {
+            "stage": "CANCEL_REQUESTED", "detail": "Waiting for a safe item boundary"})
         return CancelResponse.ACCEPT
 
     def _publish_feedback(self, goal_handle, entry: dict) -> None:
         feedback = ExecuteOrder.Feedback()
         feedback.stage = entry["stage"]
         feedback.sku = entry.get("sku", "")
-        feedback.completed = int(entry.get("completed", 0))
-        feedback.total = int(entry.get("total", 0))
+        feedback.completed = int(entry.get("completed", sum(self.workstation._completed_by_sku.values())))
+        feedback.total = int(entry.get("total", sum(line.quantity for line in goal_handle.request.lines)))
         feedback.detail_json = json.dumps(entry, ensure_ascii=False)
         goal_handle.publish_feedback(feedback)
 

@@ -15,6 +15,7 @@
 
 #include "robotic_manipulation/arm_controller.h"
 #include "robotic_manipulation/joint_state_guard.h"
+#include "robotic_manipulation/motion_preferences.h"
 
 #include <numbers>
 #include <rosgraph_msgs/msg/clock.hpp>
@@ -23,6 +24,12 @@
 #include <functional>
 #include <thread>
 #include <future>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <moveit_msgs/srv/get_planning_scene.hpp>
+#include <moveit_msgs/srv/get_state_validity.hpp>
+#include <moveit_msgs/srv/get_position_ik.hpp>
 
 void ArmController::Initialize()
 {
@@ -41,8 +48,8 @@ void ArmController::Initialize()
   m_hand = std::make_shared<moveit::planning_interface::MoveGroupInterface>(m_node, "hand");
   m_gripperClient = rclcpp_action::create_client<GripperCommand>(m_node, ActionName);
 
-  m_pandaArm->setMaxVelocityScalingFactor(1.0);
-  m_pandaArm->setMaxAccelerationScalingFactor(1.0);
+  m_pandaArm->setMaxVelocityScalingFactor(0.35);
+  m_pandaArm->setMaxAccelerationScalingFactor(0.25);
   m_pandaArm->setPlanningTime(5.0);
   m_pandaArm->setNumPlanningAttempts(3);
 }
@@ -88,6 +95,7 @@ bool ArmController::MoveThroughWaypoints(std::vector<geometry_msgs::msg::Pose> c
     m_pandaArm->setStartStateToCurrentState();
     if (!std::isfinite(fraction) || fraction < 0.999) {
       m_lastMotionError = "Cartesian planning incomplete (fraction " + std::to_string(fraction) + ")";
+      DiagnoseCartesianFailure(*start, waypoints, fraction);
       RCLCPP_ERROR(logger, "MoveThroughWaypoints: Incomplete Cartesian path (fraction %.3f)", fraction);
       continue;
     }
@@ -108,6 +116,173 @@ bool ArmController::MoveThroughWaypoints(std::vector<geometry_msgs::msg::Pose> c
 
   RCLCPP_ERROR(
     logger, "MoveThroughWaypoints: Failed to execute trajectory after %d tries", NumTries);
+  return false;
+}
+
+void ArmController::DiagnoseCartesianFailure(const moveit::core::RobotState & start,
+  const std::vector<geometry_msgs::msg::Pose> & waypoints, double fraction)
+{
+  // Unchecked paths are diagnostic only. NEVER pass this trajectory to execute.
+  SetMeasuredStartState(start);
+  moveit_msgs::msg::RobotTrajectory unchecked;
+  const double unchecked_fraction = m_pandaArm->computeCartesianPath(waypoints, 0.01, unchecked, false);
+  m_pandaArm->setStartStateToCurrentState();
+  auto client = m_node->create_client<moveit_msgs::srv::GetPlanningScene>("/get_planning_scene");
+  auto request = std::make_shared<moveit_msgs::srv::GetPlanningScene::Request>();
+  request->components.components = 2 | 4 | 16 | 128;  // State, attached bodies, geometry, ACM.
+  const auto stamp = m_node->get_clock()->now().nanoseconds();
+  std::string saved;
+  if (client->wait_for_service(std::chrono::milliseconds(300))) {
+    auto future = client->async_send_request(request);
+    if (future.wait_for(std::chrono::seconds(1)) == std::future_status::ready) {
+      try {
+        const auto directory = std::filesystem::path("/tmp/produce_motion_diagnostics");
+        std::filesystem::create_directories(directory);
+        saved = (directory / (std::to_string(stamp) + ".yaml")).string();
+        std::ofstream out(saved);
+        out << "checked_fraction: " << fraction << "\nunchecked_fraction: " << unchecked_fraction << "\n";
+        out << moveit_msgs::srv::to_yaml(*future.get(), false);
+        auto indented = [&out](const std::string & yaml, const std::string & prefix) {
+            std::istringstream stream(yaml);
+            std::string line;
+            while (std::getline(stream, line)) out << prefix << line << "\n";
+          };
+        out << "\nunchecked_trajectory:\n";
+        indented(moveit_msgs::msg::to_yaml(unchecked, false), "  ");
+        out << "\nwaypoints:\n";
+        for (const auto & pose : waypoints) {
+          out << "  -\n";
+          indented(geometry_msgs::msg::to_yaml(pose, false), "    ");
+        }
+      } catch (const std::exception & error) {
+        RCLCPP_WARN(m_node->get_logger(), "Could not save Cartesian diagnosis: %s", error.what());
+      }
+    }
+  }
+  RCLCPP_ERROR(m_node->get_logger(),
+    "Cartesian diagnosis: checked=%.4f unchecked=%.4f snapshot=%s (NO unchecked execution)",
+    fraction, unchecked_fraction, saved.c_str());
+}
+
+bool ArmController::PlanTransitWithApproach(const geometry_msgs::msg::Pose & above,
+  const geometry_msgs::msg::Pose & contact, ArmPlan & plan)
+{
+  m_lastMotionError.clear();
+  auto start = WaitForStableState();
+  if (!start) return false;
+  std::vector<double> current_joints;
+  start->copyJointGroupPositions("panda_arm", current_joints);
+  struct Candidate {std::vector<double> joints; double distance;};
+  std::vector<Candidate> candidates;
+  const bool has_approach = std::abs(above.position.z - contact.position.z) > 0.005;
+  auto ik_client = m_node->create_client<moveit_msgs::srv::GetPositionIK>("/compute_ik");
+  if (!ik_client->wait_for_service(std::chrono::seconds(2))) {
+    m_lastMotionError = "Collision-aware grasp IK service unavailable";
+    return false;
+  }
+  for (int attempt = 0; attempt < 8; ++attempt) {
+    auto seed = *start;
+    if (attempt == 1 || attempt == 2) {
+      seed.setVariablePosition("panda_joint3", seed.getVariablePosition("panda_joint3") +
+        (attempt == 1 ? 0.35 : -0.35));
+      seed.enforceBounds(seed.getJointModelGroup("panda_arm"));
+    } else if (attempt > 2) {
+      seed.setToRandomPositions(seed.getJointModelGroup("panda_arm"));
+    }
+    auto request = std::make_shared<moveit_msgs::srv::GetPositionIK::Request>();
+    request->ik_request.group_name = "panda_arm";
+    request->ik_request.ik_link_name = m_pandaArm->getEndEffectorLink();
+    request->ik_request.pose_stamped.header.frame_id = m_pandaArm->getPoseReferenceFrame();
+    request->ik_request.pose_stamped.pose = contact;
+    // Planning-only clearance margin. The actual commanded grasp height is NOT lowered.
+    if (has_approach) request->ik_request.pose_stamped.pose.position.z -= 0.01;
+    request->ik_request.timeout.sec = 1;
+    request->ik_request.avoid_collisions = true;
+    auto & state = request->ik_request.robot_state;
+    state.is_diff = true;
+    state.joint_state.name = seed.getVariableNames();
+    state.joint_state.position.assign(seed.getVariablePositions(),
+      seed.getVariablePositions() + seed.getVariableCount());
+    auto future = ik_client->async_send_request(request);
+    if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) continue;
+    auto response = future.get();
+    if (response->error_code.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS) continue;
+    auto grasp = response->solution;
+    grasp.is_diff = true;
+    auto hover = *start;
+    if (!has_approach) {
+      const auto & joints = grasp.joint_state;
+      if (joints.name.size() != joints.position.size()) continue;
+      for (std::size_t i = 0; i < joints.name.size(); ++i) {
+        hover.setVariablePosition(joints.name[i], joints.position[i]);
+      }
+    } else {
+      m_pandaArm->setStartState(grasp);
+      moveit_msgs::msg::RobotTrajectory reverse;
+      const double fraction = m_pandaArm->computeCartesianPath({above}, 0.01, reverse);
+      m_pandaArm->setStartStateToCurrentState();
+      RCLCPP_INFO(m_node->get_logger(), "Reverse approach candidate %d/8: fraction %.4f", attempt + 1, fraction);
+      if (!std::isfinite(fraction) || fraction < 0.999 || reverse.joint_trajectory.points.empty()) continue;
+      const auto & trajectory = reverse.joint_trajectory;
+      const auto & end = trajectory.points.back().positions;
+      if (end.size() != trajectory.joint_names.size()) continue;
+      for (std::size_t i = 0; i < end.size(); ++i) {
+        hover.setVariablePosition(trajectory.joint_names[i], end[i]);
+      }
+      hover.update();
+      // Verify forward direction too, using the selected joint configuration.
+      SetMeasuredStartState(hover);
+      moveit_msgs::msg::RobotTrajectory forward;
+      const double forward_fraction = m_pandaArm->computeCartesianPath({contact}, 0.01, forward);
+      m_pandaArm->setStartStateToCurrentState();
+      if (!std::isfinite(forward_fraction) || forward_fraction < 0.999) {
+        DiagnoseCartesianFailure(hover, {contact}, forward_fraction);
+        continue;
+      }
+    }
+    std::vector<double> hover_joints;
+    hover.copyJointGroupPositions("panda_arm", hover_joints);
+    const double distance = motion_preferences::Distance(current_joints, hover_joints);
+    if (!std::isfinite(distance)) continue;
+    if (std::any_of(candidates.begin(), candidates.end(), [&](const Candidate & candidate) {
+        return motion_preferences::Distance(candidate.joints, hover_joints) < 0.05;
+      })) continue;
+    candidates.push_back({hover_joints, distance});
+  }
+  std::sort(candidates.begin(), candidates.end(), [](const Candidate & a, const Candidate & b) {
+      return a.distance < b.distance;
+    });
+  double best_cost = std::numeric_limits<double>::infinity();
+  m_pandaArm->setPlanningTime(3.0);
+  for (std::size_t i = 0; i < std::min<std::size_t>(3, candidates.size()); ++i) {
+    SetMeasuredStartState(*start);
+    // A joint target preserves the tested elbow configuration; a pose target would not.
+    m_pandaArm->setJointValueTarget(candidates[i].joints);
+    ArmPlan candidate_plan;
+    const auto result = m_pandaArm->plan(candidate_plan);
+    m_pandaArm->setStartStateToCurrentState();
+    m_pandaArm->clearPoseTargets();
+    if (result == moveit::core::MoveItErrorCode::SUCCESS &&
+      !candidate_plan.trajectory.joint_trajectory.points.empty())
+    {
+      std::vector<std::vector<double>> points;
+      for (const auto & point : candidate_plan.trajectory.joint_trajectory.points) {
+        points.push_back(point.positions);
+      }
+      const double length = motion_preferences::PathLength(points);
+      const double cost = length + 0.5 * candidates[i].distance;
+      RCLCPP_INFO(m_node->get_logger(), "Motion preference candidate %zu: posture=%.3f path=%.3f cost=%.3f",
+        i + 1, candidates[i].distance, length, cost);
+      if (cost < best_cost) {best_cost = cost; plan = candidate_plan;}
+    }
+  }
+  m_pandaArm->setPlanningTime(5.0);
+  if (std::isfinite(best_cost)) {
+    RCLCPP_INFO(m_node->get_logger(), "Selected shortest scored collision-free route: cost=%.3f from %zu IK candidates",
+      best_cost, candidates.size());
+    return true;
+  }
+  m_lastMotionError = "No collision-free grasp/approach/transit combination after 8 IK candidates";
   return false;
 }
 
@@ -177,26 +352,7 @@ void ArmController::SetMeasuredStartState(const moveit::core::RobotState & state
 bool ArmController::PlanFreeSpaceToPose(
   const geometry_msgs::msg::Pose & target, ArmPlan & plan)
 {
-  m_lastMotionError.clear();
-  auto start = WaitForStableState();
-  if (!start) return false;
-  SetMeasuredStartState(*start);
-  if (!m_pandaArm->setPoseTarget(target)) {
-    RCLCPP_ERROR(m_node->get_logger(), "No IK target for free-space motion");
-    m_pandaArm->clearPoseTargets();
-    m_pandaArm->setStartStateToCurrentState();
-    return false;
-  }
-  const auto result = m_pandaArm->plan(plan);
-  m_pandaArm->setStartStateToCurrentState();
-  m_pandaArm->clearPoseTargets();
-  if (result != moveit::core::MoveItErrorCode::SUCCESS ||
-    plan.trajectory.joint_trajectory.points.empty())
-  {
-    RCLCPP_ERROR(m_node->get_logger(), "MoveIt could not find a free-space route");
-    return false;
-  }
-  return true;
+  return PlanTransitWithApproach(target, target, plan);
 }
 
 bool ArmController::ExecutePlan(const ArmPlan & plan)

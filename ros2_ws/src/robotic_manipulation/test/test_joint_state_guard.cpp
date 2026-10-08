@@ -1,5 +1,26 @@
 #include <gtest/gtest.h>
 #include "robotic_manipulation/joint_state_guard.h"
+#include "robotic_manipulation/motion_preferences.h"
+
+TEST(MotionPreferences, PenalizesWristTurnsWithoutWrappingBoundedJoints)
+{
+  std::vector<double> zero(7, 0.0), wrist = zero, nearby = zero;
+  wrist[6] = 5.8;
+  nearby[6] = 0.2;
+  EXPECT_GT(motion_preferences::Distance(zero, wrist), 8.0);
+  EXPECT_LT(motion_preferences::Distance(zero, nearby), 0.3);
+}
+
+TEST(MotionPreferences, PrefersShortPathsAndRejectsMalformedPoints)
+{
+  std::vector<double> zero(7, 0.0), middle = zero, end = zero;
+  middle[0] = -1.0;
+  end[0] = 1.0;
+  EXPECT_GT(motion_preferences::PathLength({zero, middle, end}),
+    motion_preferences::PathLength({zero, end}));
+  EXPECT_TRUE(std::isinf(motion_preferences::PathLength({})));
+  EXPECT_TRUE(std::isinf(motion_preferences::Distance({0.0}, {0.0})));
+}
 
 TEST(JointStateGuard, RequiresStableFreshWindow)
 {

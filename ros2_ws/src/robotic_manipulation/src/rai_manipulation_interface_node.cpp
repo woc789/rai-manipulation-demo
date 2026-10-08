@@ -134,8 +134,10 @@ bool RaiManipulationInterfaceNode::RunMove(
     if (check_cancel()) return false;
     ArmController::ArmPlan plan;
     publish_stage("PLANNING_TRANSIT");
-    if (!arm.PlanFreeSpaceToPose(above_target, plan)) {
-      error = "MoveIt could not plan a collision-free transit route";
+    const bool has_approach = std::abs(above_target.position.z - pose.position.z) > 0.005;
+    if (!(has_approach ? arm.PlanTransitWithApproach(above_target, pose, plan) :
+      arm.PlanFreeSpaceToPose(above_target, plan))) {
+      error = "MoveIt transit/approach planning failed: " + arm.GetLastMotionError();
       return false;
     }
     if (check_cancel()) return false;

@@ -18,6 +18,7 @@ from std_srvs.srv import Trigger
 
 from produce_order_interfaces.action import ExecuteOrder
 from produce_order_interfaces.msg import OrderLine
+from produce_order_interfaces.msg import InventorySnapshot
 from produce_order_interfaces.srv import ConfirmPickup
 from .operator_panel import OperatorPanel
 
@@ -32,6 +33,7 @@ class RosWorker(QThread):
     notice = pyqtSignal(str)
     workcell_status = pyqtSignal(str, str, bool, bool)
     resources = pyqtSignal(str)
+    inventory = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
@@ -66,6 +68,9 @@ class RosWorker(QThread):
             String, "/produce_orders/workcell_status", self._on_workcell_status,
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
         )
+        node.create_subscription(
+            InventorySnapshot, "/produce_orders/inventory", self._on_inventory,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         running = True
         last_check = 0.0
         try:
@@ -192,6 +197,17 @@ class RosWorker(QThread):
             bool(status.get("can_submit")), bool(status.get("can_recover")),
         )
         self.resources.emit(message.data)
+
+    def _on_inventory(self, message):
+        self.inventory.emit(json.dumps({
+            "epoch": message.epoch, "scene_ready": message.scene_ready,
+            "persistence": message.persistence,
+            "items": [{"item_id": item.item_id, "sku": item.sku, "state": item.state,
+                       "order_id": item.order_id, "frame_id": item.frame_id,
+                       "position": [item.position.x, item.position.y, item.position.z],
+                       "age_sec": item.age_sec, "stale": item.stale,
+                       "classification_verified": item.classification_verified}
+                      for item in message.items]}, ensure_ascii=False))
 
     def _pickup(self, client, order_id: str) -> None:
         if not client.service_is_ready():

@@ -33,6 +33,7 @@ from .order import (
 )
 from .agent import ProduceAgent
 from .planning_scene import PlanningSceneSync
+from .inventory import InventoryLedger
 
 
 class Workstation:
@@ -60,6 +61,8 @@ class Workstation:
         self._bin_templates = {}
         self._completed_by_sku: dict[str, int] = {}
         self._visual_candidates: dict[str, tuple[str, tuple[float, float, float]]] = {}
+        self._inventory_candidates: dict[str, str] = {}
+        self.inventory = InventoryLedger()
         self._perception_generation = 0
         self._rejected_visual_positions: dict[str, list[tuple[float, float, float]]] = {}
         self.motion_attempted = False
@@ -181,6 +184,7 @@ class Workstation:
             time.sleep(self.config["planning_scene"]["barrier"]["spawn_settle_time_s"])
         scene_objects = self.synchronize_scene()
         self._scene_prepared = True
+        self.inventory.reset()
         self._placed_entities = []
         self._delivered_entity_names = set()
         self._allocated_bin_index = None
@@ -275,6 +279,7 @@ class Workstation:
         self._placed_entities = []
         self._completed_by_sku = {line.sku: 0 for line in order.lines}
         self._visual_candidates = {}
+        self._inventory_candidates = {}
         self._perception_generation = 0
         self._rejected_visual_positions = {}
         self.motion_attempted = False
@@ -312,6 +317,7 @@ class Workstation:
         for entity in remaining:
             self._scene_bridge._despawn_entity(entity)
         self.remove_order_bins(order, tuple(sorted({entry[2] for entry in placed_entities})))
+        self.inventory.collect(order.order_id)
         self.event(order.order_id, "PICKUP_CONFIRMED", removed_entities=[e.name for e in remaining])
 
     def slot_bin_position(self, zone: dict, index: int, slot: tuple) -> tuple:
@@ -374,6 +380,7 @@ class Workstation:
         # IDs for a different SKU. Never let an old ID silently refer to a
         # different candidate after the table changes.
         self._visual_candidates.clear()
+        self._inventory_candidates.clear()
         self._perception_generation += 1
         raw_points = self.detect(sku)
         points = []
@@ -391,13 +398,16 @@ class Workstation:
                 continue
             points.append(point)
         detections = []
-        for index, point in enumerate(points, start=1):
+        inventory_ids = self.inventory.observe(sku, self.config["camera"]["target_frame"], points)
+        for index, (point, item_id) in enumerate(zip(points, inventory_ids), start=1):
             detection_id = f"visual_{sku}_{self._perception_generation}_{index}"
             self._visual_candidates[detection_id] = (sku, point)
+            self._inventory_candidates[detection_id] = item_id
             detections.append(
                 {
                     "detection_id": detection_id,
                     "position_m": [round(value, 4) for value in point],
+                    "inventory_item_id": item_id,
                 }
             )
         result = {
@@ -552,6 +562,12 @@ class Workstation:
         bin_position = self.slot_bin_position(zone, bin_index, slot)
         if distance_xy(source, target) <= 0.12:
             raise OrderError("Source is too close to destination slot")
+        # Reserve from the fresh visual measurement, not from entity labels/poses.
+        item_id = self._inventory_candidates.get(detection_id)
+        if item_id is None:
+            item_id = self.inventory.observe(sku, self.config["camera"]["target_frame"], [source])[0]
+        self.inventory.reserve(item_id, order.order_id, refreshed_position=source)
+        self.event(order.order_id, "INVENTORY_RESERVED", item_id=item_id, sku=sku)
         self.event(
             order.order_id, "GRASPING", sku=sku, detection_id=detection_id,
             source=grasp_source, visual_source=source,
@@ -578,6 +594,8 @@ class Workstation:
                 f"{sku} was not lifted after closing the gripper; "
                 "stopping before transport"
             )
+        self.inventory.transition(item_id, order.order_id, "CARRYING")
+        self.event(order.order_id, "INVENTORY_CARRYING", item_id=item_id, sku=sku)
         carried_id = f"produce_workstation/carried_{entity.name}"
         self._planning_scene.attach_carried(
             carried_id,
@@ -612,6 +630,8 @@ class Workstation:
         ):
             raise OrderError(f"{sku} was not observed inside bin {slot_id}")
         self._completed_by_sku[sku] = done + 1
+        self.inventory.transition(item_id, order.order_id, "PLACED")
+        self.event(order.order_id, "INVENTORY_PLACED", item_id=item_id, sku=sku, bin_id=slot_id)
         self._placed_entities.append((sku, entity, bin_index, source))
         self._delivered_entity_names.add(entity.name)
         self._visual_candidates.clear()
@@ -665,10 +685,12 @@ class Workstation:
             ProduceAgent(self, order, model=model).run()
         except OrderCancelled as exc:
             failure = str(exc)
+            self.inventory.finish_failed(order.order_id, self.motion_attempted)
             self.event(order.order_id, "ORDER_CANCELLED", reason=failure)
             status = "CANCELLED"
         except Exception as exc:
             failure = str(exc)
+            self.inventory.finish_failed(order.order_id, self.motion_attempted)
             self.event(order.order_id, "ORDER_FAILED", reason=failure)
             status = "FAILED"
         else:

@@ -13,15 +13,43 @@ from action_msgs.msg import GoalStatus
 from produce_order_interfaces.action import ExecuteOrder
 from produce_order_interfaces.msg import OrderLine as OrderLineMsg
 from produce_order_workstation.order import Order, OrderCancelled, OrderError, OrderLine, PerceptionMismatch, plan_placements, readable_error, validate_order
-from produce_order_workstation.order_server import order_from_goal, state_after_order
+from produce_order_workstation.order_server import OrderActionServer, order_from_goal, state_after_order
 from produce_order_workstation import runtime
 from produce_order_workstation.runtime import Workstation
+from produce_order_workstation.inventory import InventoryLedger
 
 
 PACKAGE = Path(__file__).resolve().parents[1]
 CONFIG = yaml.safe_load((PACKAGE / "config/workstation.yaml").read_text())
 # Keep the original classification-mode regressions, alongside fulfillment tests.
 CONFIG["operation_mode"] = "classification"
+
+
+def test_motion_feedback_retains_order_counts_between_item_events():
+    server = SimpleNamespace(workstation=SimpleNamespace(_completed_by_sku={"corn": 1, "carrot": 1}))
+    handle = MagicMock()
+    handle.request.lines = [OrderLineMsg(sku=sku, quantity=1) for sku in ("corn", "carrot", "apple", "tomato")]
+    OrderActionServer._publish_feedback(server, handle, {"stage": "MOTION_STAGE"})
+    feedback = handle.publish_feedback.call_args.args[0]
+    assert (feedback.completed, feedback.total) == (2, 4)
+
+
+def test_inventory_publisher_uses_typed_observations_and_reservation_owner():
+    book = InventoryLedger()
+    item = book.observe("corn", "panda_link0", [(0.3, -0.1, 0.04)])[0]
+    book.reserve(item, "owner")
+    server = SimpleNamespace(workstation=SimpleNamespace(inventory=book, _scene_prepared=True),
+        config=CONFIG, _state="RUNNING", _inventory_publisher=MagicMock(), get_clock=MagicMock())
+    from builtin_interfaces.msg import Time
+    server.get_clock.return_value.now.return_value.to_msg.return_value = Time(sec=123)
+    OrderActionServer.publish_inventory(server)
+    message = server._inventory_publisher.publish.call_args.args[0]
+    assert message.scene_ready and message.persistence == "in_memory"
+    assert message.header.stamp.sec == 123
+    assert len(message.items) == 1
+    row = message.items[0]
+    assert (row.item_id, row.state, row.order_id) == (item, "RESERVED", "owner")
+    assert row.position.x == .3 and not row.classification_verified
 
 
 def test_move_uses_motion_action_and_forwards_stage_feedback(monkeypatch):

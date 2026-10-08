@@ -45,6 +45,8 @@ public:
   bool PlanFreeSpaceToPose(const geometry_msgs::msg::Pose & target, ArmPlan & plan);
   bool ExecutePlan(const ArmPlan & plan);
   std::string GetLastMotionError() const {return m_lastMotionError;}
+  bool PlanTransitWithApproach(const geometry_msgs::msg::Pose & above,
+    const geometry_msgs::msg::Pose & contact, ArmPlan & plan);
 
   bool Open();
   bool Close();
@@ -71,6 +73,8 @@ private:
   void WaitForClockMessage();
   moveit::core::RobotStatePtr WaitForStableState();
   void SetMeasuredStartState(const moveit::core::RobotState & state);
+  void DiagnoseCartesianFailure(const moveit::core::RobotState & start,
+    const std::vector<geometry_msgs::msg::Pose> & waypoints, double fraction);
   bool CheckTrajectoryStart(const moveit_msgs::msg::RobotTrajectory & trajectory);
   std::string m_lastMotionError;
 

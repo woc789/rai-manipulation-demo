@@ -30,6 +30,7 @@ class OperatorPanel(QWidget):
         self.report_dir = report_dir or Path.home() / ".local/share/produce_order_workstation/reports"
         self._online = False
         self._last_status = 0.0
+        self._last_inventory = 0.0
         self._order_active = False
         self._accepted = False
         self._active_order_id = ""
@@ -57,6 +58,7 @@ class OperatorPanel(QWidget):
             (self.worker.notice, self._append),
             (self.worker.workcell_status, self._set_workcell_status),
             (self.worker.resources, self._set_resources),
+            (self.worker.inventory, self._set_inventory),
         ):
             signal.connect(slot)
         self.history_timer = QTimer(self)
@@ -81,7 +83,7 @@ class OperatorPanel(QWidget):
         side.addWidget(label("FRESH / 配货", "brand"))
         side.addSpacing(24)
         self.nav_buttons = []
-        for text, index in (("工作台", 0), ("订单记录", 0), ("运行日志", 2)):
+        for text, index in (("工作台", 0), ("订单记录", 0), ("视觉库存", 3), ("运行日志", 2)):
             button = QPushButton(text)
             button.setObjectName("nav")
             button.setCheckable(True)
@@ -91,7 +93,7 @@ class OperatorPanel(QWidget):
             self.nav_buttons.append(button)
         side.addSpacing(20)
         side.addWidget(label("后续扩展", "sideHint"))
-        for text in ("库存中心 · 规划中", "任务调度 · 规划中"):
+        for text in ("任务调度 · 规划中",):
             button = QPushButton(text)
             button.setObjectName("nav")
             button.setEnabled(False)
@@ -243,6 +245,21 @@ class OperatorPanel(QWidget):
         self.tabs.addTab(self.history, "订单记录")
         self.tabs.addTab(self.events, "事件")
         self.tabs.addTab(self.technical, "技术日志")
+        inventory_page = QWidget()
+        inventory_layout = QVBoxLayout(inventory_page)
+        inventory_layout.setContentsMargins(0, 6, 0, 0)
+        self.inventory_hint = label("等待视觉台账同步 · 候选数量不等于实物库存", "muted")
+        inventory_layout.addWidget(self.inventory_hint)
+        self.inventory_table = QTableWidget(0, 6)
+        self.inventory_table.setHorizontalHeaderLabels(["候选 ID", "类别（未确认）", "状态", "观测位置 / m", "时效", "订单"])
+        self.inventory_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.inventory_table.verticalHeader().hide()
+        self.inventory_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.inventory_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        self.inventory_table.setMinimumHeight(140)
+        self.inventory_table.setMaximumHeight(180)
+        inventory_layout.addWidget(self.inventory_table)
+        self.tabs.addTab(inventory_page, "视觉台账")
         records.box.addWidget(self.tabs)
         page.addWidget(records)
         page.addStretch()
@@ -298,6 +315,8 @@ class OperatorPanel(QWidget):
 
     def _check_status(self):
         synced = self._online and monotonic() - self._last_status < 5
+        if self._last_inventory and (not synced or monotonic() - self._last_inventory >= 5):
+            self.inventory_hint.setText("历史视觉观测 · 台账未同步 · 不可当作当前实物库存")
         self.connection.setText("● 订单服务在线" if synced else "● 状态未同步" if self._online else "● 订单服务离线")
         self.connection.setStyleSheet("color: #377a5c;" if synced else "color: #986d39;")
         self._update_metrics()
@@ -333,6 +352,29 @@ class OperatorPanel(QWidget):
         self._update_metrics()
         self._refresh_draft()
         self._check_status()
+
+    def _set_inventory(self, payload):
+        try:
+            snapshot = json.loads(payload)
+        except (ValueError, TypeError):
+            return
+        self._last_inventory = monotonic()
+        states = {"AVAILABLE": "可选择", "RESERVED": "已预留", "CARRYING": "搬运中",
+                  "PLACED": "已装箱", "COLLECTED": "已取货", "UNKNOWN": "未知"}
+        items = snapshot.get("items", [])
+        self.inventory_hint.setText(f"已观测 {len(items)} 个候选 · 场景批次 {snapshot.get('epoch', 0)} · 非实物库存保证")
+        self.inventory_table.setRowCount(len(items))
+        for row, item in enumerate(items):
+            point = item.get("position", [0, 0, 0])
+            values = [item.get("item_id", ""), NAMES.get(item.get("sku"), item.get("sku", "")),
+                      states.get(item.get("state"), item.get("state", "")),
+                      " / ".join(f"{v:.3f}" for v in point),
+                      "过期" if item.get("stale") else f"{item.get('age_sec', 0):.0f}s",
+                      item.get("order_id", "") or "—"]
+            for col, value in enumerate(values):
+                cell = QTableWidgetItem(str(value))
+                cell.setToolTip(f"{value}\n坐标系：{item.get('frame_id', '')}")
+                self.inventory_table.setItem(row, col, cell)
 
     def _render_bins(self):
         by_id = {b.get("bin_id"): b for b in self._bins}

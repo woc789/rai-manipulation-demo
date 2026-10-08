@@ -24,6 +24,7 @@ class FakeWorker(QObject):
     notice = pyqtSignal(str)
     workcell_status = pyqtSignal(str, str, bool, bool)
     resources = pyqtSignal(str)
+    inventory = pyqtSignal(str)
 
     def cancel(self):
         pass
@@ -123,6 +124,16 @@ class OperatorPanelTests(unittest.TestCase):
         self.panel.show()
         self.app.processEvents()
         self.assertEqual(self.panel.scroll.horizontalScrollBar().maximum(), 0)
+
+    def test_inventory_is_labeled_as_observations_not_real_stock(self):
+        self.panel._set_inventory(json.dumps({"epoch": 2, "items": [{"item_id": "obs-2-1", "sku": "corn",
+            "state": "RESERVED", "position": [0.3, 0, 0.04], "frame_id": "base", "age_sec": 3, "order_id": "one"}]}))
+        self.assertEqual(self.panel.inventory_table.rowCount(), 1)
+        self.assertEqual(self.panel.inventory_table.item(0, 2).text(), "已预留")
+        self.assertIn("非实物库存保证", self.panel.inventory_hint.text())
+        self.panel._last_inventory -= 6
+        self.panel._check_status()
+        self.assertIn("台账未同步", self.panel.inventory_hint.text())
 
 
 if __name__ == "__main__":

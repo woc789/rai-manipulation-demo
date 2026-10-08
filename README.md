@@ -4,6 +4,10 @@
 
 原生 Qt 订单界面已重构为下单、任务进度、箱位与记录四个区域。设计与模块说明见 [界面重构记录](docs/ORDER_UI_REDESIGN.md)。未实现的扩展页面明确标为规划中。
 
+新增 [接近运动碰撞修复与实测记录](docs/CARTESIAN_APPROACH_FIX.md) 和 [视觉候选库存台账模块说明](docs/VISUAL_INVENTORY_LEDGER.md)。侧栏“视觉库存”显示观测、单件预留与搬运状态，不代表已经清点确认的实际库存。
+
+机械臂姿态与路线优选、降速设置见 [轨迹优化说明](docs/MOTION_PREFERENCES.md)。
+
 ![配货工作台](docs/images/order-workbench.png)
 
 This project demonstrates the use of [RAI](https://github.com/RobotecAI/rai) framework interfacing with a robotic arm in a simulation. In particular, it shows the communication between Generative AI models and the [Panda Franka](https://www.franka.de/) manipulator, which is a popular choice in AI and manipulation research in the robotic community. 
