@@ -14,6 +14,7 @@
  */
 
 #include "robotic_manipulation/arm_controller.h"
+#include "robotic_manipulation/joint_state_guard.h"
 
 #include <numbers>
 #include <rosgraph_msgs/msg/clock.hpp>
@@ -75,18 +76,32 @@ bool ArmController::MoveThroughWaypoints(std::vector<geometry_msgs::msg::Pose> c
 {
   auto logger = m_node->get_logger();
 
-  int constexpr NumTries = 10;
+  m_lastMotionError.clear();
+  int constexpr NumTries = 3;
   for (int i = 0; i < NumTries; i++) {
+    auto start = WaitForStableState();
+    if (!start) return false;
+    // Do not rely on move_group's asynchronously updated empty-diff start state.
+    SetMeasuredStartState(*start);
     moveit_msgs::msg::RobotTrajectory trajectory;
     const double fraction = m_pandaArm->computeCartesianPath(waypoints, 0.01, trajectory);
-    if (fraction < 0.999) {
+    m_pandaArm->setStartStateToCurrentState();
+    if (!std::isfinite(fraction) || fraction < 0.999) {
+      m_lastMotionError = "Cartesian planning incomplete (fraction " + std::to_string(fraction) + ")";
       RCLCPP_ERROR(logger, "MoveThroughWaypoints: Incomplete Cartesian path (fraction %.3f)", fraction);
       continue;
     }
 
-    if (m_pandaArm->execute(trajectory) == moveit::core::MoveItErrorCode::SUCCESS) {
-      return true;
+    if (!CheckTrajectoryStart(trajectory)) {
+      RCLCPP_WARN(logger, "Cartesian start changed before execution; re-planning (%d/%d)", i + 1, NumTries);
+      continue;
     }
+    const auto result = m_pandaArm->execute(trajectory);
+    if (result == moveit::core::MoveItErrorCode::SUCCESS) {
+      return static_cast<bool>(WaitForStableState());
+    }
+    m_lastMotionError = "Cartesian execution rejected/failed (MoveIt code " +
+      std::to_string(result.val) + "); no automatic execution retry";
     RCLCPP_ERROR(logger, "MoveThroughWaypoints: Trajectory execution failed; state is uncertain");
     return false;
   }
@@ -96,16 +111,84 @@ bool ArmController::MoveThroughWaypoints(std::vector<geometry_msgs::msg::Pose> c
   return false;
 }
 
+moveit::core::RobotStatePtr ArmController::WaitForStableState()
+{
+  motion_guard::StabilityWindow window;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  while (rclcpp::ok() && std::chrono::steady_clock::now() < deadline) {
+    // getCurrentState waits for feedback at least as new as this request's ROS time.
+    const double stamp = m_node->get_clock()->now().seconds();
+    auto state = m_pandaArm->getCurrentState(0.4);
+    if (state) {
+      std::vector<double> positions;
+      state->copyJointGroupPositions("panda_arm", positions);
+      const double wall = std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+      if (window.Observe(positions, stamp, wall)) return state;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  m_lastMotionError = "Fresh, stable arm joint feedback unavailable within 3 seconds";
+  RCLCPP_ERROR(m_node->get_logger(), "%s", m_lastMotionError.c_str());
+  return nullptr;
+}
+
+bool ArmController::CheckTrajectoryStart(const moveit_msgs::msg::RobotTrajectory & trajectory)
+{
+  const auto & joints = trajectory.joint_trajectory;
+  auto current = m_pandaArm->getCurrentState(0.4);
+  if (!current || joints.points.empty() || joints.joint_names.empty()) {
+    m_lastMotionError = "Trajectory start or fresh measured joint state unavailable";
+    return false;
+  }
+  std::vector<double> measured;
+  const auto & variables = current->getRobotModel()->getVariableNames();
+  for (const auto & name : joints.joint_names) {
+    if (std::find(variables.begin(), variables.end(), name) == variables.end()) {
+      m_lastMotionError = "Unknown trajectory joint: " + name;
+      return false;
+    }
+    measured.push_back(current->getVariablePosition(name));
+  }
+  const double error = motion_guard::MaxError(joints.points.front().positions, measured);
+  RCLCPP_INFO(m_node->get_logger(), "Trajectory start max measured joint error: %.6f rad", error);
+  // Stricter than MoveIt's unchanged 0.01-rad safety check, not a relaxed tolerance.
+  if (error > 0.005) {
+    m_lastMotionError = "Trajectory start changed before execution (max error " +
+      std::to_string(error) + " rad)";
+    return false;
+  }
+  return true;
+}
+
+void ArmController::SetMeasuredStartState(const moveit::core::RobotState & state)
+{
+  moveit_msgs::msg::RobotState measured;
+  // Explicit arm joint values, but a diff: retain carried collision objects from
+  // the planning scene rather than replacing them with the monitor's empty list.
+  measured.is_diff = true;
+  measured.joint_state.name = state.getJointModelGroup("panda_arm")->getVariableNames();
+  for (const auto & name : measured.joint_state.name) {
+    measured.joint_state.position.push_back(state.getVariablePosition(name));
+  }
+  m_pandaArm->setStartState(measured);
+}
+
 bool ArmController::PlanFreeSpaceToPose(
   const geometry_msgs::msg::Pose & target, ArmPlan & plan)
 {
-  m_pandaArm->setStartStateToCurrentState();
+  m_lastMotionError.clear();
+  auto start = WaitForStableState();
+  if (!start) return false;
+  SetMeasuredStartState(*start);
   if (!m_pandaArm->setPoseTarget(target)) {
     RCLCPP_ERROR(m_node->get_logger(), "No IK target for free-space motion");
     m_pandaArm->clearPoseTargets();
+    m_pandaArm->setStartStateToCurrentState();
     return false;
   }
   const auto result = m_pandaArm->plan(plan);
+  m_pandaArm->setStartStateToCurrentState();
   m_pandaArm->clearPoseTargets();
   if (result != moveit::core::MoveItErrorCode::SUCCESS ||
     plan.trajectory.joint_trajectory.points.empty())
@@ -118,11 +201,12 @@ bool ArmController::PlanFreeSpaceToPose(
 
 bool ArmController::ExecutePlan(const ArmPlan & plan)
 {
+  if (!CheckTrajectoryStart(plan.trajectory)) return false;
   if (m_pandaArm->execute(plan) != moveit::core::MoveItErrorCode::SUCCESS) {
     RCLCPP_ERROR(m_node->get_logger(), "Free-space route execution failed");
     return false;
   }
-  return true;
+  return static_cast<bool>(WaitForStableState());
 }
 
 bool ArmController::Open()

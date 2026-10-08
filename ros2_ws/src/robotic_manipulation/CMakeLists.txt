@@ -39,6 +39,9 @@ install(TARGETS robotic_manipulation
   DESTINATION lib/${PROJECT_NAME})
 
 if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_joint_state_guard test/test_joint_state_guard.cpp)
+  target_include_directories(test_joint_state_guard PRIVATE include)
   find_package(ament_lint_auto REQUIRED)
   # the following line skips the linter which checks for copyrights
   # comment the line when a copyright and license is added to all source files

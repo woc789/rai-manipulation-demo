@@ -148,7 +148,7 @@ bool RaiManipulationInterfaceNode::RunMove(
     if (std::abs(above_target.position.z - pose.position.z) > 0.005) {
       publish_stage("FINAL_APPROACH");
       if (!arm.MoveThroughWaypoints({pose})) {
-        error = "Local Cartesian approach failed";
+        error = "Local Cartesian approach failed: " + arm.GetLastMotionError();
         return false;
       }
     }

@@ -44,6 +44,7 @@ public:
   bool MoveThroughWaypoints(std::vector<geometry_msgs::msg::Pose> const & waypoints);
   bool PlanFreeSpaceToPose(const geometry_msgs::msg::Pose & target, ArmPlan & plan);
   bool ExecutePlan(const ArmPlan & plan);
+  std::string GetLastMotionError() const {return m_lastMotionError;}
 
   bool Open();
   bool Close();
@@ -68,6 +69,10 @@ private:
   static double constexpr EndEffectorBaseYaw = 45.0 * std::numbers::pi / 180.0;
 
   void WaitForClockMessage();
+  moveit::core::RobotStatePtr WaitForStableState();
+  void SetMeasuredStartState(const moveit::core::RobotState & state);
+  bool CheckTrajectoryStart(const moveit_msgs::msg::RobotTrajectory & trajectory);
+  std::string m_lastMotionError;
 
   std::shared_ptr<moveit::planning_interface::MoveGroupInterface> m_pandaArm;
   std::shared_ptr<moveit::planning_interface::MoveGroupInterface> m_hand;
