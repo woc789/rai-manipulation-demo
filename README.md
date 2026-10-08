@@ -8,6 +8,8 @@
 
 机械臂姿态与路线优选、降速设置见 [轨迹优化说明](docs/MOTION_PREFERENCES.md)。
 
+后续针对实测关节大幅摆动的优化、失败迭代与复测记录见 [关节摆幅排查（尚未解决）](docs/JOINT_EXCURSION_FIX.md)。
+
 ![配货工作台](docs/images/order-workbench.png)
 
 This project demonstrates the use of [RAI](https://github.com/RobotecAI/rai) framework interfacing with a robotic arm in a simulation. In particular, it shows the communication between Generative AI models and the [Panda Franka](https://www.franka.de/) manipulator, which is a popular choice in AI and manipulation research in the robotic community. 

@@ -165,37 +165,72 @@ void ArmController::DiagnoseCartesianFailure(const moveit::core::RobotState & st
 }
 
 bool ArmController::PlanTransitWithApproach(const geometry_msgs::msg::Pose & above,
-  const geometry_msgs::msg::Pose & contact, ArmPlan & plan)
+  geometry_msgs::msg::Pose & contact, ArmPlan & plan, bool allow_axial_rotation)
 {
   m_lastMotionError.clear();
   auto start = WaitForStableState();
   if (!start) return false;
   std::vector<double> current_joints;
   start->copyJointGroupPositions("panda_arm", current_joints);
-  struct Candidate {std::vector<double> joints; double distance;};
+  struct Candidate {std::vector<double> joints; double distance; geometry_msgs::msg::Quaternion orientation;};
   std::vector<Candidate> candidates;
+  auto safe_positions = [&start](const auto & names, const auto & positions) {
+      if (names.size() != positions.size()) return false;
+      for (std::size_t i = 0; i < names.size(); ++i) {
+        const auto & bound = start->getRobotModel()->getVariableBounds(names[i]);
+        if (bound.position_bounded_ && !motion_preferences::ClearOfLimits(
+            positions[i], bound.min_position_, bound.max_position_)) return false;
+      }
+      return true;
+    };
   const bool has_approach = std::abs(above.position.z - contact.position.z) > 0.005;
   auto ik_client = m_node->create_client<moveit_msgs::srv::GetPositionIK>("/compute_ik");
   if (!ik_client->wait_for_service(std::chrono::seconds(2))) {
     m_lastMotionError = "Collision-aware grasp IK service unavailable";
     return false;
   }
-  for (int attempt = 0; attempt < 8; ++attempt) {
+  const int attempts = allow_axial_rotation ? 32 : 8;
+  const auto search_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(12);
+  bool saved_descent_diagnosis = false;
+  for (int attempt = 0; attempt < attempts; ++attempt) {
+    if (std::chrono::steady_clock::now() >= search_deadline) break;
+    const bool forward_seed = has_approach && allow_axial_rotation && attempt < 16;
+    auto selected_contact = contact;
+    auto selected_above = above;
+    if (allow_axial_rotation) {
+      const auto requested = contact.orientation;
+      const auto actual = GetEffectorOrientation();
+      constexpr double offsets[] = {0., 0.25, -0.25, 0.5, -0.5, 0.75, -0.75, 1.};
+      const double offset = offsets[attempt % 8] * std::numbers::pi;
+      const auto q = motion_preferences::AlignAxialYaw(
+        {requested.x, requested.y, requested.z, requested.w},
+        {actual.x, actual.y, actual.z, actual.w}, offset);
+      selected_contact.orientation.x = q[0]; selected_contact.orientation.y = q[1];
+      selected_contact.orientation.z = q[2]; selected_contact.orientation.w = q[3];
+      selected_above.orientation = selected_contact.orientation;
+    }
     auto seed = *start;
-    if (attempt == 1 || attempt == 2) {
+    if (allow_axial_rotation && attempt >= 8 && attempt < 16) {
+      // A small elbow perturbation kept converging to the same near-limit
+      // hover branch, whose descent collides link1 with link5. Diversify all
+      // arm joints before IK; every result still passes collision/limit checks.
+      seed.setToRandomPositions(seed.getJointModelGroup("panda_arm"));
+    } else if (allow_axial_rotation && attempt >= 24) {
+      seed.setToRandomPositions(seed.getJointModelGroup("panda_arm"));
+    } else if (!allow_axial_rotation && (attempt == 1 || attempt == 2)) {
       seed.setVariablePosition("panda_joint3", seed.getVariablePosition("panda_joint3") +
         (attempt == 1 ? 0.35 : -0.35));
       seed.enforceBounds(seed.getJointModelGroup("panda_arm"));
-    } else if (attempt > 2) {
+    } else if (!allow_axial_rotation && attempt > 2) {
       seed.setToRandomPositions(seed.getJointModelGroup("panda_arm"));
     }
     auto request = std::make_shared<moveit_msgs::srv::GetPositionIK::Request>();
     request->ik_request.group_name = "panda_arm";
     request->ik_request.ik_link_name = m_pandaArm->getEndEffectorLink();
     request->ik_request.pose_stamped.header.frame_id = m_pandaArm->getPoseReferenceFrame();
-    request->ik_request.pose_stamped.pose = contact;
+    request->ik_request.pose_stamped.pose = forward_seed ? selected_above : selected_contact;
     // Planning-only clearance margin. The actual commanded grasp height is NOT lowered.
-    if (has_approach) request->ik_request.pose_stamped.pose.position.z -= 0.01;
+    if (has_approach && !forward_seed) request->ik_request.pose_stamped.pose.position.z -= 0.01;
     request->ik_request.timeout.sec = 1;
     request->ik_request.avoid_collisions = true;
     auto & state = request->ik_request.robot_state;
@@ -210,7 +245,7 @@ bool ArmController::PlanTransitWithApproach(const geometry_msgs::msg::Pose & abo
     auto grasp = response->solution;
     grasp.is_diff = true;
     auto hover = *start;
-    if (!has_approach) {
+    if (!has_approach || forward_seed) {
       const auto & joints = grasp.joint_state;
       if (joints.name.size() != joints.position.size()) continue;
       for (std::size_t i = 0; i < joints.name.size(); ++i) {
@@ -219,9 +254,9 @@ bool ArmController::PlanTransitWithApproach(const geometry_msgs::msg::Pose & abo
     } else {
       m_pandaArm->setStartState(grasp);
       moveit_msgs::msg::RobotTrajectory reverse;
-      const double fraction = m_pandaArm->computeCartesianPath({above}, 0.01, reverse);
+      const double fraction = m_pandaArm->computeCartesianPath({selected_above}, 0.01, reverse);
       m_pandaArm->setStartStateToCurrentState();
-      RCLCPP_INFO(m_node->get_logger(), "Reverse approach candidate %d/8: fraction %.4f", attempt + 1, fraction);
+      RCLCPP_INFO(m_node->get_logger(), "Reverse approach candidate %d/%d: fraction %.4f", attempt + 1, attempts, fraction);
       if (!std::isfinite(fraction) || fraction < 0.999 || reverse.joint_trajectory.points.empty()) continue;
       const auto & trajectory = reverse.joint_trajectory;
       const auto & end = trajectory.points.back().positions;
@@ -230,27 +265,41 @@ bool ArmController::PlanTransitWithApproach(const geometry_msgs::msg::Pose & abo
         hover.setVariablePosition(trajectory.joint_names[i], end[i]);
       }
       hover.update();
-      // Verify forward direction too, using the selected joint configuration.
+    }
+    if (has_approach) {
+      hover.update();
+      // Prefer a near-current hover IK, verified through the entire descent.
       SetMeasuredStartState(hover);
       moveit_msgs::msg::RobotTrajectory forward;
-      const double forward_fraction = m_pandaArm->computeCartesianPath({contact}, 0.01, forward);
+      auto checked_contact = selected_contact;
+      if (forward_seed) checked_contact.position.z -= 0.01;
+      const double forward_fraction = m_pandaArm->computeCartesianPath({checked_contact}, 0.01, forward);
       m_pandaArm->setStartStateToCurrentState();
+      RCLCPP_INFO(m_node->get_logger(), "Forward approach candidate %d/%d: fraction %.4f", attempt + 1, attempts, forward_fraction);
       if (!std::isfinite(forward_fraction) || forward_fraction < 0.999) {
-        DiagnoseCartesianFailure(hover, {contact}, forward_fraction);
+        if (!saved_descent_diagnosis) {
+          DiagnoseCartesianFailure(hover, {checked_contact}, forward_fraction);
+          saved_descent_diagnosis = true;
+        }
         continue;
       }
+      if (!std::all_of(forward.joint_trajectory.points.begin(), forward.joint_trajectory.points.end(),
+          [&](const auto & point) {return safe_positions(forward.joint_trajectory.joint_names, point.positions);})) continue;
     }
     std::vector<double> hover_joints;
     hover.copyJointGroupPositions("panda_arm", hover_joints);
+    if (!safe_positions(hover.getJointModelGroup("panda_arm")->getVariableNames(), hover_joints)) continue;
     const double distance = motion_preferences::Distance(current_joints, hover_joints);
     if (!std::isfinite(distance)) continue;
     if (std::any_of(candidates.begin(), candidates.end(), [&](const Candidate & candidate) {
         return motion_preferences::Distance(candidate.joints, hover_joints) < 0.05;
       })) continue;
-    candidates.push_back({hover_joints, distance});
+    candidates.push_back({hover_joints, distance, selected_contact.orientation});
   }
-  std::sort(candidates.begin(), candidates.end(), [](const Candidate & a, const Candidate & b) {
-      return a.distance < b.distance;
+  std::sort(candidates.begin(), candidates.end(), [&current_joints](const Candidate & a, const Candidate & b) {
+      const double cost_a = 0.5 * a.distance + 2.0 * motion_guard::MaxError(current_joints, a.joints);
+      const double cost_b = 0.5 * b.distance + 2.0 * motion_guard::MaxError(current_joints, b.joints);
+      return cost_a < cost_b;
     });
   double best_cost = std::numeric_limits<double>::infinity();
   m_pandaArm->setPlanningTime(3.0);
@@ -267,13 +316,19 @@ bool ArmController::PlanTransitWithApproach(const geometry_msgs::msg::Pose & abo
     {
       std::vector<std::vector<double>> points;
       for (const auto & point : candidate_plan.trajectory.joint_trajectory.points) {
-        points.push_back(point.positions);
+        points.push_back(motion_preferences::OrderedJoints(
+          candidate_plan.trajectory.joint_trajectory.joint_names, point.positions));
       }
       const double length = motion_preferences::PathLength(points);
-      const double cost = length + 0.5 * candidates[i].distance;
-      RCLCPP_INFO(m_node->get_logger(), "Motion preference candidate %zu: posture=%.3f path=%.3f cost=%.3f",
-        i + 1, candidates[i].distance, length, cost);
-      if (cost < best_cost) {best_cost = cost; plan = candidate_plan;}
+      const double excursion = motion_preferences::MaxExcursion(points);
+      const double cost = length + 0.5 * candidates[i].distance + 2.0 * excursion;
+      RCLCPP_INFO(m_node->get_logger(), "Motion preference candidate %zu: posture=%.3f path=%.3f max_joint_deg=%.1f cost=%.3f",
+        i + 1, candidates[i].distance, length, excursion * 180.0 / std::numbers::pi, cost);
+      if (cost < best_cost) {
+        best_cost = cost;
+        plan = candidate_plan;
+        contact.orientation = candidates[i].orientation;
+      }
     }
   }
   m_pandaArm->setPlanningTime(5.0);
@@ -282,7 +337,7 @@ bool ArmController::PlanTransitWithApproach(const geometry_msgs::msg::Pose & abo
       best_cost, candidates.size());
     return true;
   }
-  m_lastMotionError = "No collision-free grasp/approach/transit combination after 8 IK candidates";
+  m_lastMotionError = "No collision-free grasp/approach/transit combination within bounded IK search";
   return false;
 }
 
@@ -350,9 +405,10 @@ void ArmController::SetMeasuredStartState(const moveit::core::RobotState & state
 }
 
 bool ArmController::PlanFreeSpaceToPose(
-  const geometry_msgs::msg::Pose & target, ArmPlan & plan)
+  const geometry_msgs::msg::Pose & target, ArmPlan & plan, bool allow_axial_rotation)
 {
-  return PlanTransitWithApproach(target, target, plan);
+  auto contact = target;
+  return PlanTransitWithApproach(target, contact, plan, allow_axial_rotation);
 }
 
 bool ArmController::ExecutePlan(const ArmPlan & plan)
@@ -368,8 +424,13 @@ bool ArmController::ExecutePlan(const ArmPlan & plan)
 bool ArmController::Open()
 {
   m_hand->setJointValueTarget("panda_finger_joint1", OpenGripperJointValue);
-  bool moved = false;
-  for (int attempt = 0; attempt < 3; ++attempt) {
+  auto measured = m_hand->getCurrentState(0.4);
+  bool moved = measured &&
+    std::abs(measured->getVariablePosition("panda_finger_joint1") - OpenGripperJointValue) < 0.003 &&
+    std::abs(measured->getVariablePosition("panda_finger_joint2") - OpenGripperJointValue) < 0.003;
+  // Repeated phase commands must not generate a zero-duration hand trajectory.
+  // Vacuum command acknowledgement is still required below.
+  for (int attempt = 0; !moved && attempt < 3; ++attempt) {
     if (m_hand->move() == moveit::core::MoveItErrorCode::SUCCESS) {
       moved = true;
       break;
@@ -389,8 +450,11 @@ bool ArmController::Open()
 bool ArmController::Close()
 {
   m_hand->setJointValueTarget("panda_finger_joint1", 0.02);
-  bool moved = false;
-  for (int attempt = 0; attempt < 3; ++attempt) {
+  auto measured = m_hand->getCurrentState(0.4);
+  bool moved = measured &&
+    std::abs(measured->getVariablePosition("panda_finger_joint1") - 0.02) < 0.003 &&
+    std::abs(measured->getVariablePosition("panda_finger_joint2") - 0.02) < 0.003;
+  for (int attempt = 0; !moved && attempt < 3; ++attempt) {
     if (m_hand->move() == moveit::core::MoveItErrorCode::SUCCESS) {
       moved = true;
       break;
@@ -445,6 +509,11 @@ bool ArmController::SendGripperCommand(double position)
 
   auto result = result_future.get();
   return result.code == rclcpp_action::ResultCode::SUCCEEDED;
+}
+
+geometry_msgs::msg::Quaternion ArmController::GetEffectorOrientation()
+{
+  return m_pandaArm->getCurrentPose().pose.orientation;
 }
 
 std::vector<double> ArmController::GetEffectorPose()

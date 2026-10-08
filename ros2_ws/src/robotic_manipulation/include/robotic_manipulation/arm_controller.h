@@ -42,16 +42,18 @@ public:
   geometry_msgs::msg::Pose CalculatePose(double x, double y, double z, double r = 0.0);
 
   bool MoveThroughWaypoints(std::vector<geometry_msgs::msg::Pose> const & waypoints);
-  bool PlanFreeSpaceToPose(const geometry_msgs::msg::Pose & target, ArmPlan & plan);
+  bool PlanFreeSpaceToPose(const geometry_msgs::msg::Pose & target, ArmPlan & plan,
+    bool allow_axial_rotation = false);
   bool ExecutePlan(const ArmPlan & plan);
   std::string GetLastMotionError() const {return m_lastMotionError;}
   bool PlanTransitWithApproach(const geometry_msgs::msg::Pose & above,
-    const geometry_msgs::msg::Pose & contact, ArmPlan & plan);
+    geometry_msgs::msg::Pose & contact, ArmPlan & plan, bool allow_axial_rotation = false);
 
   bool Open();
   bool Close();
 
   std::vector<double> GetEffectorPose();
+  geometry_msgs::msg::Quaternion GetEffectorOrientation();
   bool GetGripper();
 
   std::vector<double> CaptureJointValues();

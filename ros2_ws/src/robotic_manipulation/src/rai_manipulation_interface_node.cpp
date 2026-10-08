@@ -14,6 +14,7 @@
  */
 
 #include "robotic_manipulation/rai_manipulation_interface_node.h"
+#include "robotic_manipulation/motion_preferences.h"
 
 #include <algorithm>
 #include <cmath>
@@ -47,7 +48,7 @@ bool RaiManipulationInterfaceNode::RunMove(
   const std::function<void(const std::string &)> & publish_stage,
   const std::function<bool()> & cancel_requested, std::string & error)
 {
-  const auto & pose = target_pose.pose;
+  auto pose = target_pose.pose;
   if (step != "legacy" && step != "grab" && step != "lift" &&
     step != "place" && step != "retreat" && step != "smoke")
   {
@@ -72,6 +73,12 @@ bool RaiManipulationInterfaceNode::RunMove(
 
   arm.SetReferenceFrame(target_pose.header.frame_id);
   const auto current = arm.GetEffectorPose();
+  const auto current_orientation = arm.GetEffectorOrientation();
+  // Order vacuum phases do not require a fixed yaw. Never twist during a lift,
+  // release or retreat just to restore the caller's legacy display orientation.
+  if (step == "lift" || step == "place" || step == "retreat") {
+    pose.orientation = current_orientation;
+  }
   if (current.size() < 3) {
     error = "Current end-effector pose is unavailable";
     return false;
@@ -98,7 +105,8 @@ bool RaiManipulationInterfaceNode::RunMove(
     };
   above_current[2] = safe_z(above_current[2]);
   auto above_target = pose;
-  above_target.position.z = safe_z(pose.position.z);
+  above_target.position.z = step == "grab" ?
+    motion_preferences::PregraspHeight(pose.position.z) : safe_z(pose.position.z);
 
   // Keep the legacy service unchanged. For order Actions, only the transfer
   // between clearance poses is planned freely; contact motions stay Cartesian.
@@ -122,6 +130,7 @@ bool RaiManipulationInterfaceNode::RunMove(
     if (above_current[2] > current[2] + 0.005) {
       publish_stage("CLEARING_WORKSPACE");
       auto rise_pose = pose;
+      rise_pose.orientation = current_orientation;
       rise_pose.position.x = current[0];
       rise_pose.position.y = current[1];
       rise_pose.position.z = above_current[2];
@@ -135,8 +144,9 @@ bool RaiManipulationInterfaceNode::RunMove(
     ArmController::ArmPlan plan;
     publish_stage("PLANNING_TRANSIT");
     const bool has_approach = std::abs(above_target.position.z - pose.position.z) > 0.005;
-    if (!(has_approach ? arm.PlanTransitWithApproach(above_target, pose, plan) :
-      arm.PlanFreeSpaceToPose(above_target, plan))) {
+    const bool axial_freedom = step == "grab" || step == "place";
+    if (!(has_approach ? arm.PlanTransitWithApproach(above_target, pose, plan, axial_freedom) :
+      arm.PlanFreeSpaceToPose(above_target, plan, axial_freedom))) {
       error = "MoveIt transit/approach planning failed: " + arm.GetLastMotionError();
       return false;
     }
