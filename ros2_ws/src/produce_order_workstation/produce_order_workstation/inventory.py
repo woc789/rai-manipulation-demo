@@ -25,7 +25,7 @@ class InventoryItem:
 
 
 class InventoryLedger:
-    """One-item reservations, conservative failure handling, no durable recovery."""
+    """Visual identities and atomic order reservations, without durable recovery."""
 
     def __init__(self, association_radius=0.035, ttl=60.0, *, clock=time.monotonic, wall_clock=time.time):
         if association_radius <= 0 or ttl <= 0:
@@ -54,7 +54,7 @@ class InventoryLedger:
             for point in points:
                 matches = [item for item in self._items.values()
                            if item.sku == sku and item.frame_id == frame_id and item.item_id not in used
-                           and item.state in ("AVAILABLE", "UNKNOWN") and not item.order_id
+                           and item.state in ("AVAILABLE", "UNKNOWN", "RESERVED")
                            and dist(item.position, point) <= self.radius]
                 item = min(matches, key=lambda item: dist(item.position, point)) if matches else None
                 if item is None:
@@ -64,7 +64,7 @@ class InventoryLedger:
                     self._items[item.item_id] = item
                 item.position = point
                 item.observed_unix_sec, item.seen_monotonic = self.wall_clock(), self.clock()
-                item.state = "AVAILABLE"
+                item.state = "RESERVED" if item.order_id else "AVAILABLE"
                 used.add(item.item_id)
                 identities.append(item.item_id)
             # Missing detections are NOT deletions, zero stock, or confirmations.
@@ -74,7 +74,7 @@ class InventoryLedger:
         with self._lock:
             self._expire()
             item = self._items[item_id]
-            if refreshed_position is not None and item.state in ("AVAILABLE", "UNKNOWN") and not item.order_id:
+            if refreshed_position is not None and item.state in ("AVAILABLE", "UNKNOWN", "RESERVED") and item.order_id in ("", order_id):
                 position = tuple(float(v) for v in refreshed_position)
                 if len(position) != 3 or not all(isfinite(v) for v in position):
                     raise ValueError("Invalid refreshed visual position")
@@ -82,10 +82,87 @@ class InventoryLedger:
                     raise ValueError("Refreshed candidate moved beyond association gate")
                 item.position = position
                 item.observed_unix_sec, item.seen_monotonic = self.wall_clock(), self.clock()
-                item.state = "AVAILABLE"
+                item.state = "RESERVED" if item.order_id else "AVAILABLE"
+            if item.state == "RESERVED" and item.order_id == order_id:
+                return
             if not order_id or item.state != "AVAILABLE" or item.order_id:
                 raise ValueError("Visual item is unavailable or already reserved")
             item.state, item.order_id = "RESERVED", order_id
+
+    def selectable(self, item_id, order_id):
+        with self._lock:
+            self._expire()
+            item = self._items[item_id]
+            return item.state == "AVAILABLE" or (item.state == "RESERVED" and item.order_id == order_id)
+
+    def reject_candidate(self, item_id, order_id):
+        """A pre-motion safety rejection invalidates a candidate, not consumed stock."""
+        with self._lock:
+            item = self._items[item_id]
+            if item.state not in ("AVAILABLE", "RESERVED") or item.order_id not in ("", order_id):
+                raise ValueError("Cannot invalidate another order's or a carried item")
+            item.state, item.order_id = "UNKNOWN", ""
+
+    def reserve_order(self, order):
+        """All-or-nothing reservation. Missing observations are not proven shortages."""
+        with self._lock:
+            self._expire()
+            selected, missing = [], {}
+            blocked = [item.position for item in self._items.values()
+                       if item.order_id and item.state in ("RESERVED", "CARRYING", "UNKNOWN")]
+            for line in order.lines:
+                owned = [item for item in self._items.values()
+                         if item.order_id == order.order_id and item.sku == line.sku
+                         and item.state in ("RESERVED", "CARRYING", "PLACED")]
+                needed = max(0, line.quantity - len(owned))
+                candidates = [item for item in self._items.values()
+                              if item.sku == line.sku and item.state == "AVAILABLE" and not item.order_id]
+                chosen = []
+                for item in candidates:
+                    # Cross-SKU false labels must not promise the same spatial candidate twice.
+                    if any(dist(item.position, point) < self.radius for point in blocked):
+                        continue
+                    if len(chosen) >= needed:
+                        break
+                    chosen.append(item)
+                    blocked.append(item.position)
+                if len(chosen) < needed:
+                    missing[line.sku] = needed - len(chosen)
+                selected.extend(chosen)
+            if missing:
+                return [], missing
+            for item in selected:
+                item.state, item.order_id = "RESERVED", order.order_id
+            return [item.item_id for item in self._items.values()
+                    if item.order_id == order.order_id and item.state == "RESERVED"], {}
+
+    def release_order(self, order_id):
+        """Release only untouched reservations; carried/unknown objects remain locked."""
+        with self._lock:
+            self._expire()
+            for item in self._items.values():
+                if item.order_id == order_id and item.state == "RESERVED":
+                    item.state, item.order_id = "AVAILABLE", ""
+                elif item.order_id == order_id and item.state == "UNKNOWN":
+                    # Caller guarantees the queued dispatch never started. Do not
+                    # promote a stale observation to available on cancellation.
+                    item.order_id = ""
+
+    def summary(self):
+        with self._lock:
+            self._expire()
+            result = {}
+            for item in self._items.values():
+                counts = result.setdefault(item.sku, {})
+                counts[item.state] = counts.get(item.state, 0) + 1
+            return result
+
+    def invalidate_source(self):
+        """Explicit source replacement: retain delivered records, discard old observations."""
+        with self._lock:
+            self._items = {key: item for key, item in self._items.items()
+                           if item.state in ("PLACED", "COLLECTED")}
+            self.epoch += 1
 
     def transition(self, item_id, order_id, state):
         with self._lock:
@@ -113,7 +190,7 @@ class InventoryLedger:
 
     def _expire(self):
         for item in self._items.values():
-            if item.state == "AVAILABLE" and self.clock() - item.seen_monotonic > self.ttl:
+            if item.state in ("AVAILABLE", "RESERVED") and self.clock() - item.seen_monotonic > self.ttl:
                 item.state = "UNKNOWN"
 
     def snapshot(self):

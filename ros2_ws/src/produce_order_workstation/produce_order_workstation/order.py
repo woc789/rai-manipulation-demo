@@ -21,6 +21,10 @@ class OrderCancelled(OrderError):
     """Cancellation was accepted at a safe item boundary."""
 
 
+class OrderPaused(OrderError):
+    """A verified item has been placed and the arm has retreated; yield to an urgent job."""
+
+
 class PerceptionMismatch(OrderError):
     """A visual candidate failed the simulator safety interlock before motion."""
 

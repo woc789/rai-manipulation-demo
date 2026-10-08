@@ -67,6 +67,8 @@ class BinManager:
         allocation.entities = list(entities)
         if status == "COMPLETED":
             state = "WAITING_PICKUP"
+        elif status == "PAUSED":
+            state = "PAUSED"
         elif motion_attempted:
             state = "RECOVERY_REQUIRED"
         else:
@@ -88,6 +90,13 @@ class BinManager:
         self._release(allocation)
         allocation.state = "COLLECTED"
 
+    def discard_paused(self, order_id):
+        allocation = self.orders.get(order_id)
+        if allocation is None or allocation.state != "PAUSED":
+            raise ValueError("Only a safely paused order can be discarded")
+        self._release(allocation)
+        allocation.state = "CANCELED"
+
     def _release(self, allocation: OrderAllocation) -> None:
         for index in allocation.bin_indices:
             resource = self.bins[f"{allocation.order.zone}{index + 1}"]
@@ -96,7 +105,7 @@ class BinManager:
             resource.state, resource.order_id = "FREE", None
 
     def can_reset(self) -> bool:
-        return not any(b.state in ("WAITING_PICKUP", "ALLOCATED") for b in self.bins.values())
+        return not any(b.state in ("WAITING_PICKUP", "ALLOCATED", "PAUSED") for b in self.bins.values())
 
     def reset(self) -> None:
         if not self.can_reset():

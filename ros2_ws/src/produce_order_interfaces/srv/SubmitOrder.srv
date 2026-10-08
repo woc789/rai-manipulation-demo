@@ -1,0 +1,9 @@
+# Registration, not execution or delivery confirmation. Larger priority goes first.
+string order_id
+string zone
+OrderLine[] lines
+uint8 priority
+---
+bool success
+string state
+string message

@@ -130,7 +130,8 @@ class ProduceAgent:
             {
                 "role": "user",
                 "content": json.dumps(
-                    {"goal": "Collect the requested produce from mixed table stock into workstation-assigned bins", "mode": self.workstation.config.get("operation_mode", "classification"), "zone": self.order.zone, "requested": goal},
+                    {"goal": "Collect the requested produce from mixed table stock into workstation-assigned bins", "mode": self.workstation.config.get("operation_mode", "classification"), "zone": self.order.zone, "requested": goal,
+                     "completed": dict(self.workstation._completed_by_sku), "remaining": self._remaining()},
                     ensure_ascii=False,
                 ),
             },

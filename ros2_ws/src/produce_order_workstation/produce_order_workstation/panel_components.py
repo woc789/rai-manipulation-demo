@@ -13,6 +13,8 @@ STATE_NAMES = {
     "WAITING_PICKUP": "待取货", "COLLECTED": "已取货", "FREE": "空闲",
     "ALLOCATED": "已分配", "SUBMITTING": "提交中", "REJECTED": "未接收",
     "UNKNOWN": "状态未知", "OFFLINE": "离线",
+    "PAUSED": "暂停 · 保留箱位", "SCANNING": "视觉复查中",
+    "CANCELED": "已取消",
 }
 
 

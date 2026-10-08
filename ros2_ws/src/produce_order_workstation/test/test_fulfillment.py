@@ -14,6 +14,8 @@ from produce_order_interfaces.srv import ConfirmPickup
 from produce_order_workstation.fulfillment import BinManager
 from produce_order_workstation.order import Order, OrderError, OrderLine, plan_placements, validate_order
 from produce_order_workstation.order_server import OrderActionServer
+from produce_order_workstation.scheduling import OrderQueue
+from produce_order_workstation.inventory import InventoryLedger
 from produce_order_workstation.runtime import Workstation
 
 
@@ -27,11 +29,16 @@ def order(name="mixed"):
 
 
 def server_stub(manager):
+    station = MagicMock()
+    station.inventory = InventoryLedger()
+    for sku, x in (("corn", .3), ("carrot", .4), ("apple", .5), ("tomato", .6)):
+        station.inventory.observe(sku, "base", [(x, -.1, .04), (x, .1, .04)])
     return SimpleNamespace(
         _lock=Lock(), _busy=False, _scene_ready=True, _state="READY",
         _state_reason="", config=CONFIG, bin_manager=manager,
+        queue=OrderQueue(), _dispatch_order_id=None, _order_contexts={},
         publish_status=MagicMock(), get_logger=MagicMock(),
-        workstation=MagicMock(), report_path=lambda _: Path("/nonexistent-report"),
+        workstation=station, report_path=lambda _: Path("/nonexistent-report"),
     )
 
 

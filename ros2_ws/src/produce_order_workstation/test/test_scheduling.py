@@ -1,0 +1,376 @@
+"""Synthetic unit inputs only: no real orders, robot motion, or LLM calls."""
+
+from pathlib import Path
+from threading import Lock
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import pytest
+import yaml
+
+from produce_order_workstation.fulfillment import BinManager
+from produce_order_workstation.inventory import InventoryLedger
+from produce_order_workstation.order import Order, OrderLine
+from produce_order_workstation.scheduling import OrderQueue
+from produce_order_workstation.order_server import OrderActionServer
+from produce_order_interfaces.srv import SubmitOrder, CancelQueuedOrder
+from produce_order_interfaces.msg import OrderLine as LineMessage
+from produce_order_interfaces.action import ExecuteOrder
+from rclpy.action import GoalResponse
+
+
+CONFIG = yaml.safe_load((Path(__file__).parents[1] / "config/workstation.yaml").read_text())
+
+
+def order(name, corn=1, apple=0):
+    return Order(name, "A", tuple(OrderLine(sku, count) for sku, count in
+                                 (("corn", corn), ("apple", apple)) if count))
+
+
+def stocked():
+    book = InventoryLedger()
+    book.observe("corn", "base", [(0.3, -.1, .04), (.3, .1, .04)])
+    book.observe("apple", "base", [(.4, .1, .04)])
+    return book
+
+
+def test_order_reservation_is_atomic_and_reports_unobserved_quantities():
+    book = stocked()
+    assert book.reserve_order(order("a", 2, 2))[1] == {"apple": 1}
+    assert all(not item["order_id"] for item in book.snapshot()["items"])
+    ids, missing = book.reserve_order(order("a", 2, 1))
+    assert len(ids) == 3 and not missing
+    assert book.reserve_order(order("b"))[1] == {"corn": 1}
+    assert book.reserve_order(order("a", 2, 1))[0] == ids
+
+
+def test_reobservation_preserves_reserved_identity_and_owner():
+    book = stocked()
+    ids, _ = book.reserve_order(order("a"))
+    observed = book.observe("corn", "base", [(0.301, -.1, .04)])
+    assert observed == ids
+    assert book.selectable(ids[0], "a")
+    assert not book.selectable(ids[0], "b")
+    book.reserve(ids[0], "a", refreshed_position=(.302, -.1, .04))
+    assert book.snapshot()["items"][0]["state"] == "RESERVED"
+
+
+def test_cross_sku_spatial_candidate_cannot_be_promised_twice():
+    book = InventoryLedger()
+    book.observe("corn", "base", [(.3, .1, .04)])
+    book.observe("apple", "base", [(.301, .1, .04)])
+    assert book.reserve_order(order("a", 1, 1))[1] == {"apple": 1}
+    assert all(not item["order_id"] for item in book.snapshot()["items"])
+    book.reserve_order(order("a"))
+    assert book.reserve_order(order("b", 0, 1))[1] == {"apple": 1}
+
+
+def test_rejected_candidate_can_be_replaced_without_stealing_another_order():
+    book = stocked()
+    ids, _ = book.reserve_order(order("first"))
+    book.reject_candidate(ids[0], "first")
+    replacement, missing = book.reserve_order(order("first"))
+    assert not missing and replacement != ids
+    assert book.reserve_order(order("other"))[1] == {"corn": 1}
+    with pytest.raises(ValueError):
+        book.reject_candidate(replacement[0], "other")
+
+
+def test_expired_reservation_is_not_free_stock_or_new_identity():
+    tick = [0]
+    book = InventoryLedger(clock=lambda: tick[0])
+    original = book.observe("corn", "base", [(.3, .1, .04)])[0]
+    book.reserve_order(order("a"))
+    tick[0] = 61
+    assert book.snapshot()["items"][0]["state"] == "UNKNOWN"
+    assert book.reserve_order(order("b"))[1] == {"corn": 1}
+    assert book.observe("corn", "base", [(.3, .1, .04)]) == [original]
+    assert book.snapshot()["items"][0]["order_id"] == "a"
+
+
+def test_priority_and_fifo_only_select_admissible_jobs():
+    queue, book, bins = OrderQueue(), stocked(), BinManager(CONFIG)
+    queue.submit(order("normal"), 0)
+    queue.submit(order("urgent"), 10)
+    assert queue.select(bins, book).order.order_id == "urgent"
+    # The selected job cannot be selected again or canceled as queued.
+    with pytest.raises(ValueError):
+        queue.cancel("urgent", book)
+    queue.jobs["urgent"].state = "RUNNING"
+    queue.submit(order("new-urgent"), 10)
+    assert queue.jobs["urgent"].state == "RUNNING"
+    assert queue.select(bins, book).order.order_id == "new-urgent"
+
+
+def test_unknown_stock_waits_without_holding_partial_inventory():
+    queue, book, bins = OrderQueue(), stocked(), BinManager(CONFIG)
+    queue.submit(order("unobserved", 2, 2), 10)
+    queue.submit(order("possible"), 0)
+    assert queue.select(bins, book).order.order_id == "possible"
+    waiting = queue.jobs["unobserved"]
+    assert waiting.state == "WAITING_STOCK" and waiting.missing == {"apple": 1}
+    assert "不等同于确认缺货" in waiting.reason
+
+
+def test_waiting_pickup_bins_cannot_be_reused_until_confirmed():
+    queue, book, bins = OrderQueue(), stocked(), BinManager(CONFIG)
+    for index in range(4):
+        current = order(f"done-{index}")
+        bins.allocate(current)
+        bins.finish(current.order_id, "COMPLETED", True, [])
+    queue.submit(order("next"))
+    assert queue.select(bins, book) is None
+    assert queue.jobs["next"].state == "WAITING_BIN"
+    assert all(not item["order_id"] for item in book.snapshot()["items"])
+    bins.confirm_pickup("done-0")
+    assert queue.select(bins, book).order.order_id == "next"
+
+
+def test_cancel_waiting_order_and_duplicate_limits():
+    queue, book = OrderQueue(max_pending=1), stocked()
+    queue.submit(order("a"))
+    with pytest.raises(ValueError):
+        queue.submit(order("a"))
+    with pytest.raises(ValueError):
+        queue.submit(order("b"))
+    queue.cancel("a", book)
+    assert not queue.pending()
+    assert queue.submit(order("b")).state == "QUEUED"
+
+
+def server_stub():
+    return SimpleNamespace(_lock=Lock(), _busy=True, _scene_ready=True,
+        _dispatch_order_id=None, _scan_requested=False, queue=OrderQueue(),
+        bin_manager=BinManager(CONFIG), config=CONFIG, workstation=SimpleNamespace(inventory=stocked()),
+        report_path=lambda _: Path("/nonexistent-unit-report"), publish_status=MagicMock())
+
+
+def test_ros_registration_accepts_while_busy_without_allocating_a_box():
+    server = server_stub()
+    request = SubmitOrder.Request(order_id="unit", zone="A", priority=3,
+                                  lines=[LineMessage(sku="corn", quantity=1)])
+    result = OrderActionServer.submit_callback(server, request, SubmitOrder.Response())
+    assert result.success and result.state == "QUEUED"
+    assert server.bin_manager.orders == {}
+    assert server._scan_requested
+    result = OrderActionServer.submit_callback(server, request, SubmitOrder.Response())
+    assert not result.success
+    result = OrderActionServer.cancel_queued_callback(server,
+        CancelQueuedOrder.Request(order_id="unit"), CancelQueuedOrder.Response())
+    assert result.success and server.queue.jobs["unit"].state == "CANCELED"
+
+
+def test_late_feedback_cannot_update_a_different_order():
+    server = server_stub()
+    server.queue.submit(order("normal"))
+    server.queue.submit(order("urgent"), 10)
+    server._dispatch_order_id = "urgent"
+    message = SimpleNamespace(feedback=SimpleNamespace(completed=1))
+    OrderActionServer._queue_feedback(server, "normal", message)
+    assert server.queue.jobs["urgent"].completed == 0
+    OrderActionServer._queue_feedback(server, "urgent", message)
+    OrderActionServer._queue_feedback(server, "urgent", SimpleNamespace(feedback=SimpleNamespace(completed=0)))
+    assert server.queue.jobs["urgent"].completed == 1
+
+
+def test_execution_goal_cannot_change_registered_demand():
+    server = server_stub()
+    server._busy = False
+    server.queue.submit(order("registered"))
+    server._dispatch_order_id = "registered"
+    server.get_logger = MagicMock()
+    goal = ExecuteOrder.Goal(order_id="registered", zone="A", prepare_scene=True,
+                             lines=[LineMessage(sku="corn", quantity=2)])
+    assert OrderActionServer.goal_callback(server, goal) == GoalResponse.REJECT
+    assert not server.bin_manager.orders
+
+
+def test_direct_fulfillment_action_cannot_bypass_full_reservation():
+    server = server_stub()
+    server._busy = False
+    server.get_logger = MagicMock()
+    server.workstation.inventory = InventoryLedger()
+    goal = ExecuteOrder.Goal(order_id="direct", zone="A", prepare_scene=True,
+                             lines=[LineMessage(sku="corn", quantity=1)])
+    assert OrderActionServer.goal_callback(server, goal) == GoalResponse.REJECT
+    assert not server.bin_manager.orders
+
+
+@pytest.mark.parametrize("busy,ready,dispatch", [(True, True, None), (False, False, None),
+                                               (False, True, "current")])
+def test_dispatch_never_bypasses_busy_recovery_or_active_goal(busy, ready, dispatch):
+    server = server_stub()
+    server._busy, server._scene_ready, server._dispatch_order_id = busy, ready, dispatch
+    server.queue.submit(order("pending"))
+    OrderActionServer.dispatch_pending(server)
+    assert server.queue.jobs["pending"].state == "QUEUED"
+    assert not server.bin_manager.orders
+
+
+def test_source_replacement_keeps_delivered_records_not_old_candidates():
+    book = stocked()
+    ids, _ = book.reserve_order(order("a"))
+    book.transition(ids[0], "a", "CARRYING")
+    book.transition(ids[0], "a", "PLACED")
+    book.invalidate_source()
+    assert book.epoch == 1
+    assert [item["state"] for item in book.snapshot()["items"]] == ["PLACED"]
+
+
+def test_pause_preserves_bin_and_resumes_even_when_all_slots_are_occupied():
+    book, bins, queue = stocked(), BinManager(CONFIG), OrderQueue()
+    first = order("paused", 2)
+    queue.submit(first)
+    bins.allocate(first)
+    ids, _ = book.reserve_order(first)
+    book.transition(ids[0], first.order_id, "CARRYING")
+    book.transition(ids[0], first.order_id, "PLACED")
+    bins.finish(first.order_id, "PAUSED", True, ["verified"])
+    queue.finish(first.order_id, "PAUSED", 1, "urgent")
+    for index in range(3):
+        current = order(f"other-{index}")
+        bins.allocate(current)
+        bins.finish(current.order_id, "COMPLETED", True, [])
+    assert not bins.can_reset()
+    assert queue.select(bins, book).order.order_id == "paused"
+    assert bins.orders["paused"].bin_indices == (0,)
+    assert book.reserve_order(first)[1] == {}
+
+
+def test_urgent_yield_requires_higher_priority_and_complete_resources():
+    server = server_stub()
+    current = server.queue.submit(order("current"), 1)
+    current.state = "RUNNING"
+    server.bin_manager.allocate(current.order)
+    server.workstation.inventory.reserve_order(current.order)
+    server.queue.submit(order("same-priority"), 1)
+    assert not OrderActionServer._should_yield(server, "current")
+    server.queue.submit(order("urgent-unobserved", 2), 10)
+    assert not OrderActionServer._should_yield(server, "current")
+    server.queue.submit(order("urgent-available", 0, 1), 9)
+    assert OrderActionServer._should_yield(server, "current")
+    assert any(item["order_id"] == "urgent-available" for item in server.workstation.inventory.snapshot()["items"])
+
+
+def test_resume_does_not_spawn_a_second_box_or_count_placed_items_again(tmp_path):
+    server = server_stub()
+    server._busy = False
+    first = order("resume", 2)
+    server.queue.submit(first)
+    server.bin_manager.allocate(first)
+    server.bin_manager.finish("resume", "PAUSED", True, ["already-placed"])
+    server._dispatch_order_id = "resume"
+    report = tmp_path / "resume.json"
+    report.write_text('{"status": "PAUSED"}')
+    server.report_path = lambda _: report
+    server._order_contexts = {"resume": dict(placed_entities=["already-placed"],
+        completed_by_sku={"corn": 1}, motion_attempted=True, events=[])}
+    station = MagicMock()
+    station.inventory = server.workstation.inventory
+    station.events = []
+    station.run.return_value = dict(status="COMPLETED", completed=2, requested=2, error=None)
+    server.workstation = station
+    server._publish_feedback = MagicMock()
+    server._should_yield = lambda _: False
+    goal = ExecuteOrder.Goal(order_id="resume", zone="A", prepare_scene=True,
+                             lines=[LineMessage(sku="corn", quantity=2)])
+    assert OrderActionServer.goal_callback(server, goal) == GoalResponse.ACCEPT
+    handle = MagicMock()
+    handle.request = goal
+    result = OrderActionServer.execute_callback(server, handle)
+    assert result.status == "COMPLETED"
+    station.ensure_order_bins.assert_not_called()
+    station.synchronize_scene.assert_called_once()
+    assert station._completed_by_sku == {"corn": 1}
+    assert station._placed_entities == ["already-placed"]
+    assert server.bin_manager.bins["A1"].state == "WAITING_PICKUP"
+
+
+def test_replenishment_preserves_delivered_entities_and_order_box(monkeypatch):
+    from produce_order_workstation import runtime
+    from produce_order_workstation.runtime import Workstation
+    station = Workstation(MagicMock(), CONFIG)
+    station._scene_prepared = True
+    station._scene_bridge = MagicMock()
+    old = SimpleNamespace(name="old_source", prefab_name="corn")
+    delivered = SimpleNamespace(name="delivered", prefab_name="apple")
+    box = SimpleNamespace(name="order_bin_A1", prefab_name="toy_box")
+    station._scene_bridge.spawned_entities = [old, delivered, box]
+    station._delivered_entity_names.add("delivered")
+    station.synchronize_scene = MagicMock()
+    monkeypatch.setattr(runtime.time, "sleep", lambda _: None)
+    station.replenish_source(Path(__file__).parents[1] / "config/demo_scene.yaml")
+    station._scene_bridge._despawn_entity.assert_called_once_with(old)
+    spawned = [call.args[0] for call in station._scene_bridge._spawn_entity.call_args_list]
+    assert len(spawned) == 16
+    assert all(entity.prefab_name in CONFIG["aliases"] and "_refill_1" in entity.name for entity in spawned)
+    station.synchronize_scene.assert_called_once()
+
+
+def test_cancel_stale_untouched_reservation_does_not_leak_owner():
+    tick = [0]
+    book = InventoryLedger(clock=lambda: tick[0])
+    identity = book.observe("corn", "base", [(.3, .1, .04)])[0]
+    book.reserve_order(order("a"))
+    tick[0] = 61
+    book.release_order("a")
+    assert book.snapshot()["items"][0]["state"] == "UNKNOWN"
+    assert not book.snapshot()["items"][0]["order_id"]
+    assert book.observe("corn", "base", [(.3, .1, .04)]) == [identity]
+    assert not book.reserve_order(order("b"))[1]
+
+
+def test_discard_paused_requires_explicit_confirmation_and_cleanup_success(tmp_path):
+    server = server_stub()
+    server._busy = False
+    server._order_contexts = {"partial": {"completed": 1}}
+    job = server.queue.submit(order("partial", 2))
+    server.queue.finish("partial", "PAUSED", 1, "urgent")
+    server.bin_manager.allocate(job.order)
+    server.bin_manager.finish("partial", "PAUSED", True, ["verified-goods"])
+    server.workstation.collect_order = MagicMock(side_effect=RuntimeError("delete failed"))
+    server.report_path = lambda _: tmp_path / "partial.json"
+    response = CancelQueuedOrder.Response()
+    result = OrderActionServer.cancel_queued_callback(server,
+        CancelQueuedOrder.Request(order_id="partial"), response)
+    assert not result.success
+    result = OrderActionServer._discard_partial(server, "partial", CancelQueuedOrder.Response())
+    assert not result.success and server.bin_manager.bins["A1"].state == "PAUSED"
+    server.workstation.collect_order.side_effect = None
+    result = OrderActionServer._discard_partial(server, "partial", CancelQueuedOrder.Response())
+    assert result.success and server.bin_manager.bins["A1"].state == "FREE"
+    assert server.queue.jobs["partial"].state == "CANCELED"
+    assert not server._order_contexts
+    assert (tmp_path / "partial.discard.json").exists()
+
+
+@pytest.mark.parametrize("verified", [True, False])
+def test_actual_tool_yields_only_after_retreat_and_verified_inventory_commit(monkeypatch, verified):
+    from produce_order_workstation.runtime import Workstation
+    from produce_order_workstation.order import OrderPaused, OrderError
+    monkeypatch.setattr("produce_order_workstation.runtime.time.sleep", lambda _: None)
+    station = Workstation(MagicMock(), CONFIG)
+    station._scene_prepared = True
+    station._allocated_bin_index = 0
+    source = (.29, -.12, .04)
+    slot = tuple(CONFIG["zones"]["A"]["slots"][0])
+    entity = SimpleNamespace(name="unit-corn", prefab_name="corn")
+    station._visual_candidates = {"visual": ("corn", source)}
+    station.detect = MagicMock(return_value=[source])
+    station._source_entities = MagicMock(return_value={entity.name: (entity, source)})
+    station._planning_scene = MagicMock()
+    station.slot_bin_position = MagicMock(return_value=slot)
+    station.entity_position = MagicMock(return_value=(source[0], source[1], source[2] + .1))
+    station.observe_after_place = MagicMock(return_value=[(*slot, .05)] if verified else [(2., 2., .05)])
+    station.move = MagicMock()
+    station.yield_requested = MagicMock(return_value=True)
+    with pytest.raises(OrderPaused if verified else OrderError):
+        station.pick_and_place(order("normal", 2), "visual")
+    assert [call.kwargs["step"] for call in station.move.call_args_list] == ["grab", "lift", "place", "retreat"]
+    if verified:
+        station.yield_requested.assert_called_once()
+        assert station._completed_by_sku == {"corn": 1}
+        assert station.inventory.snapshot()["items"][0]["state"] == "PLACED"
+    else:
+        station.yield_requested.assert_not_called()
+        assert not station._completed_by_sku

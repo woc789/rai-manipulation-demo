@@ -21,6 +21,7 @@ from produce_order_interfaces.action import ExecuteMotion
 from .order import (
     Order,
     OrderCancelled,
+    OrderPaused,
     OrderError,
     PerceptionMismatch,
     calibrated_grasp_point,
@@ -69,6 +70,8 @@ class Workstation:
         self.motion_attempted = False
         self._motion_client = None
         self._active_order_id: str | None = None
+        self.require_order_reservation = False
+        self.yield_requested = lambda: False
         self.event_sink = event_sink
         self.cancel_requested = cancel_requested or (lambda: False)
 
@@ -353,6 +356,40 @@ class Workstation:
                 return points
         return []
 
+    def scan_inventory(self, skus, zone_name="A"):
+        """Idle-only caller: populate ledger from RGB-D, never simulator truth."""
+        zone = self.config["zones"][zone_name]
+        for sku in skus:
+            points = []
+            for point in self.detect(sku):
+                try:
+                    choose_source([point], self.config, zone)
+                except OrderError:
+                    continue
+                if not any(distance_xy(point, existing) < .035 for existing in points):
+                    points.append(point)
+            self.inventory.observe(sku, self.config["camera"]["target_frame"], points)
+        return self.inventory.summary()
+
+    def replenish_source(self, scene_path):
+        """Explicit idle maintenance: replace only source stock, preserve order boxes."""
+        if self._scene_bridge is None or not self._scene_prepared:
+            raise OrderError("场景未准备，不能补货")
+        scene_config = self.build_scene(Path(scene_path))
+        validate_stock_layout(scene_config, self.config)
+        for entity in list(self._scene_bridge.spawned_entities):
+            if entity.prefab_name in self.config["aliases"] and entity.name not in self._delivered_entity_names:
+                self._scene_bridge._despawn_entity(entity)
+        # Delivered entities keep their names; new stock gets unique names.
+        generation = self.inventory.epoch + 1
+        for entity in scene_config.entities:
+            if entity.prefab_name in self.config["aliases"]:
+                entity.name = f"{entity.name}_refill_{generation}"
+                self._scene_bridge._spawn_entity(entity)
+        self.inventory.invalidate_source()
+        time.sleep(self.config["motion"]["settle_time_s"])
+        self.synchronize_scene()
+
     def _source_entities(self, zone: dict) -> dict[str, tuple]:
         if not self._scene_prepared or self._scene_bridge is None:
             raise OrderError("Agent requires a prepared named-entity scene")
@@ -402,7 +439,18 @@ class Workstation:
             points.append(point)
         detections = []
         inventory_ids = self.inventory.observe(sku, self.config["camera"]["target_frame"], points)
+        if self.require_order_reservation:
+            # A rejected pre-motion candidate can be replaced only with free
+            # visual stock; never steal a different order's reservation.
+            self.inventory.reserve_order(order)
         for index, (point, item_id) in enumerate(zip(points, inventory_ids), start=1):
+            if not self.inventory.selectable(item_id, order.order_id):
+                continue
+            if self.require_order_reservation and not any(
+                item["item_id"] == item_id and item["order_id"] == order.order_id
+                for item in self.inventory.snapshot()["items"]
+            ):
+                continue
             detection_id = f"visual_{sku}_{self._perception_generation}_{index}"
             self._visual_candidates[detection_id] = (sku, point)
             self._inventory_candidates[detection_id] = item_id
@@ -550,6 +598,9 @@ class Workstation:
             or entity.prefab_name != sku
         ):
             self._rejected_visual_positions.setdefault(sku, []).append(source)
+            item_id = self._inventory_candidates.get(detection_id)
+            if item_id is not None:
+                self.inventory.reject_candidate(item_id, order.order_id)
             self._visual_candidates.pop(detection_id, None)
             raise PerceptionMismatch("Visual class/position failed safety check; choose another detection")
         grasp_source = calibrated_grasp_point(source, sku, self.config)
@@ -568,6 +619,8 @@ class Workstation:
         # Reserve from the fresh visual measurement, not from entity labels/poses.
         item_id = self._inventory_candidates.get(detection_id)
         if item_id is None:
+            if self.require_order_reservation:
+                raise PerceptionMismatch("Target is not part of this order reservation")
             item_id = self.inventory.observe(sku, self.config["camera"]["target_frame"], [source])[0]
         self.inventory.reserve(item_id, order.order_id, refreshed_position=source)
         self.event(order.order_id, "INVENTORY_RESERVED", item_id=item_id, sku=sku)
@@ -648,6 +701,12 @@ class Workstation:
                 for line in order.lines
             },
         )
+        if completed < order.total_items:
+            self.check_cancel()
+        if completed < order.total_items and self.yield_requested():
+            self.event(order.order_id, "ORDER_YIELDING", completed=completed,
+                       total=order.total_items, reason="当前物品已装箱并退出，切换高优先级订单")
+            raise OrderPaused("已在单件完成的安全边界让出执行权")
         return {
             "placed": detection_id, "sku": sku, "bin": slot_id,
             "completed": completed,
@@ -686,6 +745,10 @@ class Workstation:
             if not self._scene_prepared:
                 raise OrderError("Agent execution requires prepare_scene=true")
             ProduceAgent(self, order, model=model).run()
+        except OrderPaused as exc:
+            failure = str(exc)
+            self.event(order.order_id, "ORDER_PAUSED", reason=failure)
+            status = "PAUSED"
         except OrderCancelled as exc:
             failure = str(exc)
             self.inventory.finish_failed(order.order_id, self.motion_attempted)

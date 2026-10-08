@@ -1,0 +1,6 @@
+string order_id
+# Explicit operator confirmation to discard a safely paused partial order.
+bool discard_partial
+---
+bool success
+string message

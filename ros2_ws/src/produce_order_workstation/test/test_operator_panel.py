@@ -32,6 +32,9 @@ class FakeWorker(QObject):
     def submit(self, *args):
         self.submission = args
 
+    def cancel_queued(self, order_id):
+        self.canceled_order = order_id
+
 
 class OperatorPanelTests(unittest.TestCase):
     @classmethod
@@ -134,6 +137,54 @@ class OperatorPanelTests(unittest.TestCase):
         self.panel._last_inventory -= 6
         self.panel._check_status()
         self.assertIn("台账未同步", self.panel.inventory_hint.text())
+
+    def test_queue_mode_allows_new_draft_while_robot_is_busy(self):
+        self.ready()
+        self.panel._set_workcell_status("RUNNING", "", False, False)
+        self.panel._set_resources(json.dumps({"bins": self.bins, "queue_enabled": True,
+            "can_register": True, "orders": [dict(order_id="running", priority=1, state="RUNNING",
+             reason="", missing={}, completed=1, total=4)]}))
+        self.assertTrue(self.panel.submit_button.isEnabled())
+        self.assertTrue(self.panel.quantity_spins["corn"].isEnabled())
+        self.panel.priority.setValue(10)
+        self.panel._submit()
+        self.assertEqual(self.panel.worker.submission[-1], 10)
+        self.assertEqual(self.panel.task_id.text(), "running")
+        self.assertFalse(self.panel.submit_button.isEnabled())
+        self.panel._on_registered(True, "queued", "已登记")
+        self.assertTrue(self.panel.submit_button.isEnabled())
+        self.assertEqual(self.panel.task_count.text(), "1 / 4")
+
+    def test_queue_displays_wait_reason_and_cancel_targets_selected_id(self):
+        self.ready()
+        self.panel._set_resources(json.dumps({"bins": self.bins, "queue_enabled": True,
+            "can_register": True, "orders": [dict(order_id="waiting", priority=2,
+            state="WAITING_STOCK", reason="视觉观测不足", missing={"tomato": 2}, completed=0, total=2)]}))
+        self.assertIn("番茄", self.panel.queue_table.item(0, 4).text())
+        self.panel.queue_table.selectRow(0)
+        self.panel._cancel_queued()
+        self.assertEqual(self.panel.worker.canceled_order, "waiting")
+
+    def test_latest_result_uses_completion_order_not_submission_order(self):
+        self.ready()
+        jobs = [dict(order_id="normal", priority=0, state="WAITING_PICKUP", reason="",
+                     missing={}, completed=3, total=3, finished_sequence=2),
+                dict(order_id="urgent", priority=10, state="WAITING_PICKUP", reason="",
+                     missing={}, completed=1, total=1, finished_sequence=1)]
+        self.panel._set_resources(json.dumps({"bins": self.bins, "queue_enabled": True,
+                                           "can_register": True, "orders": jobs}))
+        self.assertEqual(self.panel.task_id.text(), "normal")
+
+    def test_discard_receipt_is_not_an_extra_order_or_a_still_paused_task(self):
+        path = Path(self.temp.name) / "partial.json"
+        path.write_text(json.dumps(dict(order_id="partial", status="PAUSED", completed=1, requested=2)))
+        path.with_suffix(".discard.json").write_text('{"delivery_state": "DISCARDED"}')
+        self.panel._refresh_history()
+        self.assertEqual(self.panel.history.rowCount(), 1)
+        self.assertEqual(self.panel.history.item(0, 2).text(), "已取消")
+        self.assertEqual(self.panel.history.item(0, 4).text(), "已丢弃")
+        self.panel._restore_last_task()
+        self.assertEqual(self.panel.task_status.text(), "已取消")
 
 
 if __name__ == "__main__":

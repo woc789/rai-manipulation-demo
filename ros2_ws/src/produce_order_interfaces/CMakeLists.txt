@@ -11,6 +11,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/InventoryItem.msg"
   "msg/InventorySnapshot.msg"
   "srv/ConfirmPickup.srv"
+  "srv/SubmitOrder.srv"
+  "srv/CancelQueuedOrder.srv"
   "action/ExecuteOrder.action"
   "action/ExecuteMotion.action"
   DEPENDENCIES geometry_msgs std_msgs

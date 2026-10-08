@@ -19,7 +19,7 @@ from std_srvs.srv import Trigger
 from produce_order_interfaces.action import ExecuteOrder
 from produce_order_interfaces.msg import OrderLine
 from produce_order_interfaces.msg import InventorySnapshot
-from produce_order_interfaces.srv import ConfirmPickup
+from produce_order_interfaces.srv import ConfirmPickup, SubmitOrder, CancelQueuedOrder
 from .operator_panel import OperatorPanel
 
 
@@ -34,6 +34,7 @@ class RosWorker(QThread):
     workcell_status = pyqtSignal(str, str, bool, bool)
     resources = pyqtSignal(str)
     inventory = pyqtSignal(str)
+    registered = pyqtSignal(bool, str, str)
 
     def __init__(self):
         super().__init__()
@@ -41,9 +42,20 @@ class RosWorker(QThread):
         self._active_goal = None
         self._pending_order_id = None
         self._online = None
+        self._queue_enabled = False
+        self._event_counts = {}
 
-    def submit(self, order_id: str, quantities: dict[str, int], prepare: bool) -> None:
-        self._commands.put(("submit", order_id, quantities, prepare))
+    def submit(self, order_id: str, quantities: dict[str, int], prepare: bool, priority=0) -> None:
+        self._commands.put(("submit", order_id, quantities, prepare, priority))
+
+    def cancel_queued(self, order_id, discard_partial=False):
+        self._commands.put(("cancel_queued", order_id, discard_partial))
+
+    def refresh_inventory(self):
+        self._commands.put(("refresh_inventory",))
+
+    def replenish(self):
+        self._commands.put(("replenish",))
 
     def cancel(self) -> None:
         self._commands.put(("cancel",))
@@ -64,6 +76,12 @@ class RosWorker(QThread):
         client = ActionClient(node, ExecuteOrder, "/produce_orders/execute")
         recovery = node.create_client(Trigger, "/produce_orders/recover")
         pickup = node.create_client(ConfirmPickup, "/produce_orders/confirm_pickup")
+        registration = node.create_client(SubmitOrder, "/produce_orders/submit")
+        queue_cancel = node.create_client(CancelQueuedOrder, "/produce_orders/cancel_queued")
+        active_cancel = node.create_client(Trigger, "/produce_orders/cancel_active")
+        refresh = node.create_client(Trigger, "/produce_orders/refresh_inventory")
+        replenish = node.create_client(Trigger, "/produce_orders/replenish")
+        node.create_subscription(String, "/produce_orders/events", self._on_event, 10)
         node.create_subscription(
             String, "/produce_orders/workcell_status", self._on_workcell_status,
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
@@ -82,13 +100,25 @@ class RosWorker(QThread):
                             running = False
                             break
                         if command[0] == "submit":
-                            self._send(client, command)
+                            if self._queue_enabled:
+                                self._register(registration, command)
+                            else:
+                                self._send(client, command[:4])
                         elif command[0] == "cancel":
-                            self._cancel()
+                            if self._queue_enabled:
+                                self._trigger(active_cancel)
+                            else:
+                                self._cancel()
                         elif command[0] == "recover":
                             self._recover(recovery)
                         elif command[0] == "pickup":
                             self._pickup(pickup, command[1])
+                        elif command[0] == "cancel_queued":
+                            self._cancel_queued(queue_cancel, command[1], command[2])
+                        elif command[0] == "refresh_inventory":
+                            self._trigger(refresh)
+                        elif command[0] == "replenish":
+                            self._trigger(replenish)
                 except Empty:
                     pass
                 if not running:
@@ -105,9 +135,55 @@ class RosWorker(QThread):
             client.destroy()
             node.destroy_client(recovery)
             node.destroy_client(pickup)
+            for service in (registration, queue_cancel, active_cancel, refresh, replenish):
+                node.destroy_client(service)
             node.destroy_node()
             if rclpy.ok():
                 rclpy.shutdown()
+
+    def _register(self, client, command):
+        _, order_id, quantities, _, priority = command
+        if not client.service_is_ready():
+            self.registered.emit(False, order_id, "订单登记服务离线")
+            return
+        request = SubmitOrder.Request(order_id=order_id, zone="A", priority=priority,
+            lines=[OrderLine(sku=sku, quantity=count) for sku, count in quantities.items() if count])
+        def done(future):
+            try:
+                response = future.result()
+                self.registered.emit(response.success, order_id, response.message)
+            except Exception as exc:
+                self.registered.emit(False, order_id, str(exc))
+        client.call_async(request).add_done_callback(done)
+
+    def _trigger(self, client):
+        if not client.service_is_ready():
+            self.notice.emit("业务服务离线")
+            return
+        client.call_async(Trigger.Request()).add_done_callback(
+            lambda future: self.notice.emit(future.result().message if future.exception() is None
+                                           else str(future.exception())))
+
+    def _cancel_queued(self, client, order_id, discard_partial=False):
+        if not client.service_is_ready():
+            self.notice.emit("队列服务离线")
+            return
+        client.call_async(CancelQueuedOrder.Request(order_id=order_id, discard_partial=discard_partial)).add_done_callback(
+            lambda future: self.notice.emit(future.result().message if future.exception() is None
+                                           else str(future.exception())))
+
+    def _on_event(self, message):
+        if not self._queue_enabled:
+            return
+        try:
+            entry = json.loads(message.data)
+            if entry.get("order_id"):
+                previous = self._event_counts.get(entry["order_id"], (0, 0))
+                counts = (entry.get("completed", previous[0]), entry.get("total", previous[1]))
+                self._event_counts[entry["order_id"]] = counts
+                self.feedback.emit(entry["stage"], *counts, message.data)
+        except (ValueError, KeyError):
+            pass
 
     def _send(self, client: ActionClient, command: tuple) -> None:
         _, order_id, quantities, prepare = command
@@ -192,6 +268,7 @@ class RosWorker(QThread):
             status = json.loads(message.data)
         except (TypeError, ValueError):
             return
+        self._queue_enabled = bool(status.get("queue_enabled"))
         self.workcell_status.emit(
             status.get("state", "UNKNOWN"), status.get("reason", ""),
             bool(status.get("can_submit")), bool(status.get("can_recover")),
