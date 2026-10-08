@@ -83,13 +83,20 @@ class CapacityUsage:
     items_per_bin: int
 
 
+def fulfillment_mode(config: dict) -> str:
+    mode = config.get("operation_mode", "classification")
+    if mode not in ("fulfillment", "classification"):
+        raise ValueError("operation_mode must be fulfillment or classification")
+    return mode
+
+
 def capacity_usage(order: Order, config: dict) -> CapacityUsage:
-    """Each nonempty SKU uses its dedicated receiving bin."""
+    """Preview one order bin or the legacy dedicated SKU bins."""
     zone = config["zones"][order.zone]
     capacity = zone["bin_capacity_items"]
     bins = len(zone["slots"])
     return CapacityUsage(
-        bins_needed=len(order.lines),
+        bins_needed=1 if order.lines and fulfillment_mode(config) == "fulfillment" else len(order.lines),
         bins_available=bins,
         items_needed=order.total_items,
         items_per_bin=capacity,
@@ -144,6 +151,8 @@ def validate_order(order: Order, config: dict) -> None:
         range(len(zone["slots"]))
     ):
         raise ValueError("Each SKU must map to exactly one distinct receiving bin")
+    if fulfillment_mode(config) == "fulfillment" and order.total_items > capacity:
+        raise ValueError(f"One order bin holds at most {capacity} items; selected {order.total_items}")
     for line in order.lines:
         if line.quantity > capacity:
             raise ValueError(
@@ -158,8 +167,8 @@ def validate_order(order: Order, config: dict) -> None:
             )
 
 
-def plan_placements(order: Order, config: dict) -> tuple[Placement, ...]:
-    """Put every SKU in its dedicated bin, using up to four drop points."""
+def plan_placements(order: Order, config: dict, *, bin_index: int | None = None) -> tuple[Placement, ...]:
+    """Use globally distinct offsets for one order, or per-SKU legacy offsets."""
     validate_order(order, config)
     sku_bins = config["zones"][order.zone]["sku_bins"]
     offsets = {
@@ -168,6 +177,14 @@ def plan_placements(order: Order, config: dict) -> tuple[Placement, ...]:
         3: [(-0.03, -0.04), (-0.03, 0.04), (0.03, 0.0)],
         4: [(-0.03, -0.04), (-0.03, 0.04), (0.03, -0.04), (0.03, 0.04)],
     }
+    if fulfillment_mode(config) == "fulfillment":
+        # None is a planning preview / standalone CLI default, not server allocation.
+        selected = 0 if bin_index is None else bin_index
+        if type(selected) is not int or selected not in range(len(config["zones"][order.zone]["slots"])):
+            raise ValueError("Invalid allocated bin index")
+        skus = [line.sku for line in order.lines for _ in range(line.quantity)]
+        return tuple(Placement(sku, selected, x, y)
+                     for sku, (x, y) in zip(skus, offsets[order.total_items]))
     return tuple(
         Placement(line.sku, sku_bins[line.sku], offset_x, offset_y)
         for line in order.lines

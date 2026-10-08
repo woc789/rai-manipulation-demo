@@ -29,7 +29,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "pick_and_place",
-            "description": "Pick one visual detection by detection_id, re-localize it with RGB-D, and put it in its fixed SKU bin. The tool owns motion and verification.",
+            "description": "Pick one visual detection by detection_id, re-localize it with RGB-D, and put it in the receiving bin assigned by the workstation. The tool owns bin selection, motion and verification.",
             "parameters": {
                 "type": "object",
                 "properties": {"detection_id": {"type": "string"}},
@@ -114,7 +114,7 @@ class ProduceAgent:
             {
                 "role": "system",
                 "content": (
-                    "You are a produce-sorting robot agent. For a requested SKU, "
+                    "You are a produce order fulfillment robot agent. For a requested SKU, "
                     "first call get_object_positions to recognize visible items and "
                     "calculate their 3D positions from the RGB-D camera. Then choose "
                     "one returned detection_id for pick_and_place. Re-perceive after "
@@ -130,7 +130,7 @@ class ProduceAgent:
             {
                 "role": "user",
                 "content": json.dumps(
-                    {"goal": "Sort the requested produce from mixed table stock into its dedicated bins", "zone": self.order.zone, "requested": goal},
+                    {"goal": "Collect the requested produce from mixed table stock into workstation-assigned bins", "mode": self.workstation.config.get("operation_mode", "classification"), "zone": self.order.zone, "requested": goal},
                     ensure_ascii=False,
                 ),
             },

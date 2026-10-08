@@ -13,7 +13,8 @@ one-by-one in response to order lines.
 | File | Responsibility |
 | --- | --- |
 | `config/demo_scene.yaml` | Reproducible mixed inventory, four bins and a physical route barrier; independent of the order. |
-| `config/workstation.yaml` | Stock counts, Agent endpoint/model, fixed SKU-bin mapping, workspace and motion limits. |
+| `config/workstation.yaml` | Operation mode, initial stock, Agent endpoint/model, legacy SKU-bin mapping and motion limits. |
+| `fulfillment.py` | In-memory bin ownership, allocation, waiting-for-pickup and collection lifecycle. |
 | `order.py` | Validate order and bin capacity, parse 3D perception results, determine drop offsets and verify placement. |
 | `agent.py` | Bounded OpenAI-compatible tool-calling loop; goal prompt and three tool schemas. |
 | `runtime.py` | RGB-D perception adapter, visual-candidate registry, validated pick/place tool, ROS motion Action client and final audit. |
@@ -32,10 +33,26 @@ Server startup: 16 mixed products + A1–A4 receiving bins + equipment support
 Agent: get_object_positions(SKU) → choose pick_and_place(detection_id)
        → re-perceive after each pick → finish_order
                            ↓
-ROS tool: fresh RGB-D localization → safety checks → grasp → fixed bin → verify
+ROS tool: RGB-D re-localization → safety checks → grasp → allocated bin → verify
    ↓
 Action feedback + /produce_orders/events + JSON report
+   ↓
+WAITING_PICKUP → human confirmation → delete only this order's goods → free bin
 ```
+
+## Fulfillment phase 0–1 (2026-10-08)
+
+Default `operation_mode: fulfillment` assigns **one mixed order to one free bin**.
+`classification` preserves the original corn/A1, carrot/A2, apple/A3, tomato/A4
+placement mode for regressions. Both modes now require explicit pickup and never
+automatically replenish after success. See `FULFILLMENT_PHASE01.md` for the
+baseline, state/interface design, implementation details and acceptance checklist.
+
+The current small-bin configuration permits **four items total per mixed order**,
+not four per SKU in fulfillment mode. This is a bounded simulation configuration,
+not a measured packing-capacity claim. Distinct release offsets do not constitute
+collision-aware 3D packing. Larger orders need larger bins and a validated placement
+strategy, not just a larger UI limit.
 
 The model may choose *which item* and *when to invoke a tool*. It cannot send
 joint values, arbitrary coordinates or a destination bin. Those remain checked
@@ -203,26 +220,33 @@ ros2 run produce_order_workstation debug_panel
 ```
 
 The launch starts both vision services by default; model initialization can
-take around a minute. Only enter quantities; zero means the SKU is not needed. Each SKU has four
-pieces of prepared stock and a dedicated bin: corn → A1, carrot → A2,
-apple → A3, tomato → A4. Each bin is configured for at most four placements.
-The UI therefore permits 0–4 per SKU. The Action goal must have
+take around a minute. Only enter quantities; zero means the SKU is not needed.
+Each SKU initially has four pieces. In fulfillment mode the whole order uses
+one server-allocated empty bin, with at most four items total. The UI permits
+0–4 per SKU but rejects a combined total over four. The Action goal must have
 `prepare_scene=true` (retained as a compatibility flag; it now means the
-preloaded workcell is required). After a verified order the server
-replenishes the table asynchronously before accepting another order. A failed
+preloaded workcell is required). After a verified order the server retains the
+goods and bin ownership as `WAITING_PICKUP`; the table is not replenished. A failed
 order with attempted arm motion requires explicit scene recovery before retry.
 The report is written under
 `~/.local/share/produce_order_workstation/reports/<order_id>.json`.
 
 The panel now displays the server's workcell state (`INITIALIZING`, `READY`,
-`RUNNING`, `REPLENISHING`, `RECOVERING`, `RECOVERY_REQUIRED`). Submit is enabled
-only when `READY`. **重新提交本单** keeps the quantities but generates a fresh order
-ID. **恢复工作台（重置场景）** calls `/produce_orders/recover`, which clears and
+`RUNNING`, `RECOVERING`, `RECOVERY_REQUIRED`) and each bin's ownership. Submit is enabled
+only when `READY` and a bin is available. **重新提交本单** keeps the quantities but generates a fresh order
+ID. **补货 / 恢复（重建场景）** calls `/produce_orders/recover`, which clears and
 recreates the simulator stock/bins; it does not restart the O3DE executable.
-It is disabled while an order or stock preparation is running. A failed or
+It requires confirmation and is disabled while an order/preparation is running
+or a completed order still awaits pickup. A failed or
 cancelled order with no attempted arm motion returns to `READY` automatically;
 after any attempted motion the server requires explicit scene recovery. A
-completed order replenishes automatically. If O3DE or its ROS services have
+completed order never replenishes automatically. Select a waiting order and use
+**确认取货并释放箱位** (`/produce_orders/confirm_pickup`, `ConfirmPickup.srv`). This
+simulates human collection and replacement with an empty bin: only that order's
+verified goods are deleted, the physical bin and table stock stay unchanged.
+Cleanup failure retains ownership for retry. A separate `<order_id>.pickup.json`
+receipt records successful collection without rewriting the execution report.
+If O3DE or its ROS services have
 crashed, restart the full launch from the terminal; scene recovery cannot
 restart a dead simulator process.
 
@@ -252,7 +276,7 @@ PYTHONPATH=ros2_ws/src/produce_order_workstation:$PYTHONPATH \
   pixels itself; detection and depth projection are performed by RAI tools.
 - `pick_and_place` rejects unknown/stale visual IDs, unrequested items,
   unstable coordinates and candidates failing the hidden simulation check.
-  The configured SKU→bin mapping cannot be changed by model output.
+  Server allocation (or the legacy SKU→bin mapping) cannot be changed by model output.
 - An Action timeout or failed placement stops the order, because the physical
   state may be unknown. Cancellation is forwarded to the motion Action and
   honored at the next motion-stage boundary, not in the middle of a MoveIt
@@ -260,9 +284,11 @@ PYTHONPATH=ros2_ws/src/produce_order_workstation:$PYTHONPATH \
 - Scene preparation requires an empty/known simulator world. Restarting only
   the order-server process while keeping O3DE alive can leave orphan entities;
   restart the full launch if old stock remains visible. The server rejects
-  orders while initial stock or replenishment is in progress.
+  orders while initial stock or explicit scene reset is in progress. Bin ownership
+  is currently in memory; restarting the launch is not a durable business recovery.
 - The 16-object layout and per-bin capacity are demo configuration values, not
-  an industrial payload claim. Full 16-item order endurance is not yet proven.
+  an industrial payload claim. Continuous inventory, reservations, a queue,
+  behavior trees and restart reconciliation are subsequent phases, not implemented here.
 
 Vision-enabled live runs completed corn (`1/1`, report
 `visual-agent-20261001-corn-01.json`) and apple (`1/1`, report

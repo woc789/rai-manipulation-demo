@@ -20,6 +20,8 @@ from produce_order_workstation.runtime import Workstation
 
 PACKAGE = Path(__file__).resolve().parents[1]
 CONFIG = yaml.safe_load((PACKAGE / "config/workstation.yaml").read_text())
+# Keep the original classification-mode regressions, alongside fulfillment tests.
+CONFIG["operation_mode"] = "classification"
 
 
 def test_move_uses_motion_action_and_forwards_stage_feedback(monkeypatch):
@@ -177,7 +179,7 @@ def test_failed_order_without_motion_is_retryable_but_motion_requires_recovery()
     assert state_after_order("FAILED", False)[::2] == ("READY", True)
     assert state_after_order("CANCELLED", False)[::2] == ("READY", True)
     assert state_after_order("FAILED", True)[::2] == ("RECOVERY_REQUIRED", False)
-    assert state_after_order("COMPLETED", True)[::2] == ("REPLENISHING", False)
+    assert state_after_order("COMPLETED", True)[::2] == ("READY", True)
 
 
 def test_arrearage_is_presented_as_actionable_error():

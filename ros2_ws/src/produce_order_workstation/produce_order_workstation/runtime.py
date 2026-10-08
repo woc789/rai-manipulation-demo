@@ -54,6 +54,8 @@ class Workstation:
         self._planning_scene = None
         self._scene_prepared = False
         self._placed_entities: list[tuple] = []
+        self._delivered_entity_names: set[str] = set()
+        self._allocated_bin_index: int | None = None
         self._completed_by_sku: dict[str, int] = {}
         self._visual_candidates: dict[str, tuple[str, tuple[float, float, float]]] = {}
         self._perception_generation = 0
@@ -199,6 +201,8 @@ class Workstation:
         )
         self._scene_prepared = True
         self._placed_entities = []
+        self._delivered_entity_names = set()
+        self._allocated_bin_index = None
         self._completed_by_sku = {}
         self._visual_candidates = {}
         self._perception_generation = 0
@@ -219,7 +223,7 @@ class Workstation:
         if order is not None:
             self.begin_order(order)
 
-    def begin_order(self, order: Order) -> None:
+    def begin_order(self, order: Order, *, bin_index: int | None = None) -> None:
         """Lock the current preloaded inventory to one new order."""
         if not self._scene_prepared:
             raise OrderError("Preloaded scene is not ready")
@@ -230,6 +234,39 @@ class Workstation:
         self._rejected_visual_positions = {}
         self.motion_attempted = False
         self._active_order_id = order.order_id
+        self._allocated_bin_index = bin_index
+        self.event(order.order_id, "ORDER_BIN_ASSIGNED", bin_id=(
+            f"{order.zone}{bin_index + 1}" if bin_index is not None else "classification/default"
+        ))
+
+    def collect_order(self, order: Order, placed_entities: list[tuple]) -> None:
+        """Simulate human pickup, deleting only this order's verified goods.
+
+        Preflight all remaining goods before deleting any. Successfully deleted
+        entities disappear from bridge tracking, making partial cleanup retryable.
+        Bin geometry and source-table stock are never deleted here.
+        """
+        if self._scene_bridge is None or not self._scene_prepared:
+            raise OrderError("Prepared scene is required for pickup")
+        tracked = {entity.name: entity for entity in self._scene_bridge.spawned_entities}
+        remaining = []
+        for sku, entity, bin_index, source in placed_entities:
+            if entity.name not in tracked:
+                continue  # A previous pickup attempt already deleted this entity.
+            # Entity identity is bookkeeping only, never a grasp coordinate source.
+            zone = self.config["zones"][order.zone]
+            if entity.name not in self._delivered_entity_names:
+                raise OrderError(f"Pickup item {entity.name} is not a verified delivered item")
+            slot = tuple(zone["slots"][bin_index])
+            center = self.slot_bin_position(zone, bin_index, slot)
+            if not verify_bin_placement(self.observe_after_place(sku, entity), source,
+                                        center, tuple(zone["bin_half_extents_m"]),
+                                        self.config["workspace"]["source_exclusion_radius_m"]):
+                raise OrderError(f"Pickup item {entity.name} moved outside its bin; inspect the scene")
+            remaining.append(entity)
+        for entity in remaining:
+            self._scene_bridge._despawn_entity(entity)
+        self.event(order.order_id, "PICKUP_CONFIRMED", removed_entities=[e.name for e in remaining])
 
     def slot_bin_position(self, zone: dict, index: int, slot: tuple) -> tuple:
         """Confirm that a visible receiving bin actually occupies this slot."""
@@ -265,7 +302,7 @@ class Workstation:
         if not self._scene_prepared or self._scene_bridge is None:
             raise OrderError("Agent requires a prepared named-entity scene")
         result = {}
-        already_placed = {entity.name for _, entity, _, _ in self._placed_entities}
+        already_placed = self._delivered_entity_names | {entity.name for _, entity, _, _ in self._placed_entities}
         for entity in self._scene_bridge.spawned_entities:
             if entity.prefab_name not in self.config["aliases"]:
                 continue
@@ -459,7 +496,7 @@ class Workstation:
         grasp_source = calibrated_grasp_point(source, sku, self.config)
         choose_source([grasp_source], self.config, zone)
         placements = [
-            item for item in plan_placements(order, self.config) if item.sku == sku
+            item for item in plan_placements(order, self.config, bin_index=self._allocated_bin_index) if item.sku == sku
         ]
         placement = placements[done]
         bin_index = placement.bin_index
@@ -530,6 +567,7 @@ class Workstation:
             raise OrderError(f"{sku} was not observed inside bin {slot_id}")
         self._completed_by_sku[sku] = done + 1
         self._placed_entities.append((sku, entity, bin_index, source))
+        self._delivered_entity_names.add(entity.name)
         self._visual_candidates.clear()
         completed = sum(self._completed_by_sku.values())
         self.event(

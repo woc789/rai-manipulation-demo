@@ -10,12 +10,14 @@ from ament_index_python.packages import get_package_share_directory
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication,
+    QComboBox,
     QFormLayout,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
@@ -32,12 +34,14 @@ from std_srvs.srv import Trigger
 
 from produce_order_interfaces.action import ExecuteOrder
 from produce_order_interfaces.msg import OrderLine
+from produce_order_interfaces.srv import ConfirmPickup
 import yaml
 
 from .order import (
     Order,
     OrderLine as BusinessOrderLine,
     capacity_usage,
+    fulfillment_mode,
     plan_placements,
     readable_error,
     validate_order,
@@ -53,6 +57,7 @@ class RosWorker(QThread):
     finished = pyqtSignal(str, int, int, str, str)
     notice = pyqtSignal(str)
     workcell_status = pyqtSignal(str, str, bool, bool)
+    resources = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
@@ -70,6 +75,9 @@ class RosWorker(QThread):
     def recover(self) -> None:
         self._commands.put(("recover",))
 
+    def pickup(self, order_id: str) -> None:
+        self._commands.put(("pickup", order_id))
+
     def stop(self) -> None:
         self._commands.put(("stop",))
 
@@ -78,6 +86,7 @@ class RosWorker(QThread):
         node = Node("produce_order_debug_panel")
         client = ActionClient(node, ExecuteOrder, "/produce_orders/execute")
         recovery = node.create_client(Trigger, "/produce_orders/recover")
+        pickup = node.create_client(ConfirmPickup, "/produce_orders/confirm_pickup")
         node.create_subscription(
             String, "/produce_orders/workcell_status", self._on_workcell_status,
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
@@ -98,6 +107,8 @@ class RosWorker(QThread):
                             self._cancel()
                         elif command[0] == "recover":
                             self._recover(recovery)
+                        elif command[0] == "pickup":
+                            self._pickup(pickup, command[1])
                 except Empty:
                     pass
                 if not running:
@@ -113,6 +124,7 @@ class RosWorker(QThread):
         finally:
             client.destroy()
             node.destroy_client(recovery)
+            node.destroy_client(pickup)
             node.destroy_node()
             rclpy.shutdown()
 
@@ -203,6 +215,20 @@ class RosWorker(QThread):
             status.get("state", "UNKNOWN"), status.get("reason", ""),
             bool(status.get("can_submit")), bool(status.get("can_recover")),
         )
+        self.resources.emit(message.data)
+
+    def _pickup(self, client, order_id: str) -> None:
+        if not client.service_is_ready():
+            self.notice.emit("取货服务尚未上线。")
+            return
+        request = ConfirmPickup.Request()
+        request.order_id = order_id
+        client.call_async(request).add_done_callback(
+            lambda future: self.notice.emit(
+                future.result().message if future.exception() is None
+                else f"取货确认失败：{future.exception()}"
+            )
+        )
 
     def _recover(self, client) -> None:
         if not client.service_is_ready():
@@ -233,6 +259,7 @@ class DebugPanel(QWidget):
         self._workcell_can_submit = False
         self._workcell_can_recover = False
         self._has_previous_attempt = False
+        self._bin_resources = []
         self.worker = RosWorker()
         self._build_ui()
         self.order_id.textChanged.connect(self._refresh_order_preview)
@@ -245,6 +272,7 @@ class DebugPanel(QWidget):
         self.worker.finished.connect(self._on_result)
         self.worker.notice.connect(self._append)
         self.worker.workcell_status.connect(self._set_workcell_status)
+        self.worker.resources.connect(self._set_resources)
         self.worker.start()
 
     def _build_ui(self) -> None:
@@ -289,7 +317,8 @@ class DebugPanel(QWidget):
             )
             row, column = divmod(index, 2)
             bin_id = self.config["zones"]["A"]["sku_bins"][sku] + 1
-            quantities.addWidget(QLabel(f"{label} → A{bin_id}"), row, column * 2)
+            quantities.addWidget(QLabel(label if fulfillment_mode(self.config) == "fulfillment"
+                                       else f"{label} → A{bin_id}"), row, column * 2)
             quantities.addWidget(spin, row, column * 2 + 1)
             self.quantity_spins[sku] = spin
         form.addRow("商品数量", quantities)
@@ -300,7 +329,9 @@ class DebugPanel(QWidget):
         self.bin_preview = QLabel()
         self.bin_preview.setWordWrap(True)
         form.addRow("分箱预览", self.bin_preview)
-        form.addRow("场景", QLabel("服务启动时预置 16 件混合库存；Agent 调用视觉定位后选择抓取目标"))
+        scene_label = QLabel("启动时预置 16 件混合库存；完成订单不自动补货。当前尚无持续库存账本，数量上限不是剩余库存承诺。")
+        scene_label.setWordWrap(True)
+        form.addRow("场景", scene_label)
         buttons = QHBoxLayout()
         self.submit_button = QPushButton("提交订单")
         self.submit_button.setObjectName("primary")
@@ -316,13 +347,24 @@ class DebugPanel(QWidget):
         self.retry_button.setToolTip("保持当前商品数量，使用新的订单号重新提交")
         self.retry_button.clicked.connect(self._retry)
         self.retry_button.setEnabled(False)
-        self.recover_button = QPushButton("恢复工作台（重置场景）")
+        self.recover_button = QPushButton("补货 / 恢复（重建场景）")
         self.recover_button.setToolTip("清理并重建仿真物品和收货箱；不会重启 O3DE 进程")
         self.recover_button.clicked.connect(self._recover)
         self.recover_button.setEnabled(False)
         recovery_buttons.addWidget(self.retry_button)
         recovery_buttons.addWidget(self.recover_button)
         form.addRow("故障处理", recovery_buttons)
+        self.bin_resources_label = QLabel("箱位状态：等待服务消息")
+        self.bin_resources_label.setWordWrap(True)
+        form.addRow("箱位资源", self.bin_resources_label)
+        pickup_buttons = QHBoxLayout()
+        self.pickup_orders = QComboBox()
+        self.pickup_button = QPushButton("确认取货并释放箱位")
+        self.pickup_button.setEnabled(False)
+        self.pickup_button.clicked.connect(self._pickup)
+        pickup_buttons.addWidget(self.pickup_orders, 1)
+        pickup_buttons.addWidget(self.pickup_button)
+        form.addRow("人工取货", pickup_buttons)
         root.addWidget(order_box)
 
         progress_box = QGroupBox("② 执行状态")
@@ -418,21 +460,25 @@ class DebugPanel(QWidget):
             return
         self.capacity_status.setText(
             f"可提交 · 已选 {usage.items_needed} 件，桌面预置混合库存；"
-            f"使用 {usage.bins_needed}/{usage.bins_available} 个分类箱；"
-            f"每类现有 {self.config['stock']['initial_counts']['corn']} 件库存。"
+            f"使用 {usage.bins_needed}/{usage.bins_available} 个收货箱；"
+            f"每箱上限 {usage.items_per_bin} 件，实际可抓商品由视觉定位确认。"
         )
         self.capacity_status.setStyleSheet("color: #86efac;")
         bins = [0 for _ in range(usage.bins_available)]
         labels = {"corn": "玉米", "carrot": "胡萝卜", "apple": "苹果", "tomato": "番茄"}
-        for placement in plan_placements(order, self.config):
+        free_index = next((index for index, resource in enumerate(self._bin_resources)
+                           if resource["state"] == "FREE"), 0)
+        for placement in plan_placements(order, self.config, bin_index=free_index):
             bins[placement.bin_index] += 1
         sku_bins = self.config["zones"]["A"]["sku_bins"]
-        self.bin_preview.setText(
-            "  ·  ".join(
+        if fulfillment_mode(self.config) == "fulfillment":
+            contents = " + ".join(f"{labels[line.sku]} ×{line.quantity}" for line in order.lines)
+            self.bin_preview.setText(f"预计 A{free_index + 1}：{contents}（接单时正式分配；无空箱时不可提交）")
+        else:
+            self.bin_preview.setText("  ·  ".join(
                 f"A{index + 1} {labels[sku]} ×{bins[index]}"
                 for sku, index in sorted(sku_bins.items(), key=lambda item: item[1])
-            )
-        )
+            ))
         self.submit_button.setEnabled(
             self._online and self._workcell_can_submit and not self._order_active
         )
@@ -469,8 +515,44 @@ class DebugPanel(QWidget):
     def _recover(self) -> None:
         if self._order_active or not self._workcell_can_recover:
             return
+        if QMessageBox.question(self, "确认重建场景",
+                                "这会清理桌面和失败订单中的商品，重新生成初始库存。\n"
+                                "已完成但未取货的订单会由服务端阻止重置。是否继续？") != QMessageBox.Yes:
+            return
         self.recover_button.setEnabled(False)
         self.worker.recover()
+
+    def _pickup(self) -> None:
+        order_id = self.pickup_orders.currentData()
+        if not order_id or self._order_active:
+            return
+        if QMessageBox.question(self, "确认人工取货",
+                                f"确认取走订单 {order_id}？\n仿真将只移除该订单商品，保留箱子和桌面库存。") != QMessageBox.Yes:
+            return
+        self.pickup_button.setEnabled(False)
+        self.worker.pickup(order_id)
+
+    def _set_resources(self, payload: str) -> None:
+        status = json.loads(payload)
+        self._bin_resources = status.get("bins", [])
+        self.bin_resources_label.setText("  ·  ".join(
+            f"{b['bin_id']}：{b['state']}" + (f" [{b['order_id']}]" if b.get("order_id") else "")
+            for b in self._bin_resources
+        ))
+        selected = self.pickup_orders.currentData()
+        self.pickup_orders.clear()
+        orders = {}
+        for b in self._bin_resources:
+            if b["state"] == "WAITING_PICKUP":
+                orders.setdefault(b["order_id"], []).append(b["bin_id"])
+        for order_id, bin_ids in orders.items():
+            self.pickup_orders.addItem(f"{'/'.join(bin_ids)} · {order_id}", order_id)
+        index = self.pickup_orders.findData(selected)
+        if index >= 0:
+            self.pickup_orders.setCurrentIndex(index)
+        self.pickup_button.setEnabled(bool(orders) and bool(status.get("can_pickup"))
+                                      and self._online and not self._order_active)
+        self._refresh_order_preview()
 
     def _set_connected(self, online: bool) -> None:
         self._online = online

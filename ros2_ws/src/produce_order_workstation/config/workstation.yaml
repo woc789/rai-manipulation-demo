@@ -1,3 +1,5 @@
+# fulfillment: one mixed order per bin; classification: legacy SKU bins.
+operation_mode: fulfillment
 camera:
   color: /color_image5
   depth: /depth_image5

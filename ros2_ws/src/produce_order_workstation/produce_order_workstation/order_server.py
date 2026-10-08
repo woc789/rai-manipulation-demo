@@ -1,6 +1,7 @@
 """Persistent ROS 2 Action server for one produce-order workcell."""
 
 import argparse
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 from threading import Lock, Thread
@@ -20,7 +21,9 @@ from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
 from produce_order_interfaces.action import ExecuteOrder
+from produce_order_interfaces.srv import ConfirmPickup
 
+from .fulfillment import BinManager
 from .order import Order, OrderCancelled, OrderLine, validate_order
 from .runtime import Workstation
 
@@ -36,7 +39,7 @@ def order_from_goal(goal: ExecuteOrder.Goal) -> Order:
 def state_after_order(status: str, motion_attempted: bool) -> tuple[str, str, bool]:
     """Only an untouched scene can immediately accept a new order."""
     if status == "COMPLETED":
-        return "REPLENISHING", "上一单已完成，正在补齐桌面库存", False
+        return "READY", "上一单已配货完成，箱位保留待取货；桌面库存未自动补满", True
     if motion_attempted:
         return (
             "RECOVERY_REQUIRED",
@@ -53,6 +56,7 @@ class OrderActionServer(Node):
         super().__init__("produce_order_server")
         self.config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         self.scene_path = scene_path
+        self.bin_manager = BinManager(self.config)
         self._lock = Lock()
         self._busy = False
         self._scene_ready = False
@@ -64,6 +68,10 @@ class OrderActionServer(Node):
         )
         self._recovery_service = self.create_service(
             Trigger, "/produce_orders/recover", self.recover_callback,
+            callback_group=ReentrantCallbackGroup(),
+        )
+        self._pickup_service = self.create_service(
+            ConfirmPickup, "/produce_orders/confirm_pickup", self.pickup_callback,
             callback_group=ReentrantCallbackGroup(),
         )
         self._status_timer = self.create_timer(1.0, self.publish_status)
@@ -87,10 +95,13 @@ class OrderActionServer(Node):
             status = {
                 "state": self._state,
                 "reason": self._state_reason,
-                "can_submit": self._scene_ready and not self._busy,
+                "can_submit": self._scene_ready and not self._busy and self.bin_manager.can_allocate("A"),
                 "can_recover": not self._busy and self._state not in (
                     "INITIALIZING", "REPLENISHING", "RECOVERING"
-                ),
+                ) and self.bin_manager.can_reset(),
+                "can_pickup": not self._busy,
+                "operation_mode": self.config.get("operation_mode", "classification"),
+                "bins": self.bin_manager.snapshot(),
             }
         self._status_publisher.publish(String(data=json.dumps(status, ensure_ascii=False)))
 
@@ -113,22 +124,51 @@ class OrderActionServer(Node):
         self._set_state("READY", "混合库存已就绪，可以提交订单", ready=True)
         self.get_logger().info("Mixed table inventory is ready: four of each SKU")
 
-    def _replenish_after_order(self) -> None:
-        """Restore a full batch only after a verified completed order."""
+    def pickup_callback(self, request, response):
+        with self._lock:
+            if self._busy or self._state in ("INITIALIZING", "RECOVERING"):
+                response.success, response.message = False, "工作台忙，请等待当前操作结束"
+                return response
+            try:
+                allocation = self.bin_manager.pickup(request.order_id)
+            except ValueError as exc:
+                response.success, response.message = False, str(exc)
+                return response
+            self._busy = True
+        self.publish_status()
         try:
-            self.workstation.prepare_scene(self.scene_path)
+            self.workstation.collect_order(allocation.order, allocation.entities)
+            # Keep execution reports immutable; record delivery separately.
+            receipt_path = self.report_path(request.order_id).with_suffix(".pickup.json")
+            receipt_path.parent.mkdir(parents=True, exist_ok=True)
+            receipt_path.write_text(json.dumps({
+                "order_id": request.order_id, "delivery_state": "COLLECTED",
+                "bin_ids": [f"{allocation.order.zone}{i + 1}" for i in allocation.bin_indices],
+                "confirmed_at": datetime.now(timezone.utc).isoformat(),
+            }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            with self._lock:
+                self.bin_manager.confirm_pickup(request.order_id)
+            response.success = True
+            response.message = f"订单 {request.order_id} 已取货，箱位释放；桌面库存保持不变"
         except Exception as exc:
-            self.get_logger().error(f"Could not replenish inventory: {exc}")
-            self._set_state("RECOVERY_REQUIRED", f"自动补货失败：{exc}")
-            return
-        self._set_state("READY", "库存已补齐，可以提交下一单", ready=True)
-        self.get_logger().info("Inventory replenished for the next order")
+            # Never free ownership on a partial or failed simulator cleanup.
+            response.success, response.message = False, f"取货清理失败，箱位仍保留，可检查后重试：{exc}"
+            self.get_logger().error(response.message)
+        finally:
+            with self._lock:
+                self._busy = False
+            self.publish_status()
+        return response
 
     def recover_callback(self, _request, response):
         with self._lock:
             if self._busy or self._state in ("INITIALIZING", "REPLENISHING", "RECOVERING"):
                 response.success = False
                 response.message = "工作台正在执行或准备中，暂不能重置场景"
+                return response
+            if not self.bin_manager.can_reset():
+                response.success = False
+                response.message = "请先确认取走所有已完成订单；重置不能清空待取货订单"
                 return response
             self._busy = True
             self._scene_ready = False
@@ -148,6 +188,8 @@ class OrderActionServer(Node):
             self.get_logger().error(f"Workcell recovery failed: {exc}")
             self._set_state("RECOVERY_REQUIRED", f"场景恢复失败：{exc}")
         else:
+            with self._lock:
+                self.bin_manager.reset()
             self._set_state("READY", "场景已重置，库存已就绪", ready=True)
         finally:
             with self._lock:
@@ -180,10 +222,16 @@ class OrderActionServer(Node):
             if self.report_path(goal.order_id).exists():
                 self.get_logger().warning("Rejected order: order ID already has a report")
                 return GoalResponse.REJECT
+            try:
+                allocation = self.bin_manager.allocate(order_from_goal(goal))
+            except ValueError as exc:
+                self.get_logger().warning(f"Rejected order: {exc}")
+                return GoalResponse.REJECT
             self._busy = True
             self._scene_ready = False
             self._state = "RUNNING"
-            self._state_reason = f"正在执行订单 {goal.order_id}"
+            bin_ids = "/".join(f"{goal.zone}{i + 1}" for i in allocation.bin_indices)
+            self._state_reason = f"正在执行订单 {goal.order_id}，箱位 {bin_ids}"
         self.publish_status()
         return GoalResponse.ACCEPT
 
@@ -214,10 +262,11 @@ class OrderActionServer(Node):
         )
         self.workstation.cancel_requested = lambda: goal_handle.is_cancel_requested
         try:
+            allocation = self.bin_manager.orders[order.order_id]
+            self.workstation.begin_order(order, bin_index=allocation.bin_indices[0])
             self.workstation.event(order.order_id, "STARTING")
             self.workstation.check_cancel()
             self.workstation.event(order.order_id, "USING_PRELOADED_SCENE")
-            self.workstation.begin_order(order)
             self.workstation.check_cancel()
             result = self.workstation.run(order)
         except OrderCancelled as exc:
@@ -232,6 +281,10 @@ class OrderActionServer(Node):
             self.workstation.cancel_requested = lambda: False
 
         try:
+            allocation = self.bin_manager.orders[order.order_id]
+            result["operation_mode"] = self.config.get("operation_mode", "classification")
+            result["bin_ids"] = [f"{order.zone}{i + 1}" for i in allocation.bin_indices]
+            result["delivery_state"] = "WAITING_PICKUP" if result["status"] == "COMPLETED" else result["status"]
             report_path.parent.mkdir(parents=True, exist_ok=True)
             report_path.write_text(
                 json.dumps(result, ensure_ascii=False, indent=2) + "\n",
@@ -251,14 +304,16 @@ class OrderActionServer(Node):
                 goal_handle.abort()
             return response
         finally:
-            with self._lock:
-                self._busy = False
             state, reason, ready = state_after_order(
                 result["status"], self.workstation.motion_attempted
             )
-            self._set_state(state, reason, ready=ready)
-            if result["status"] == "COMPLETED":
-                Thread(target=self._replenish_after_order, daemon=True).start()
+            with self._lock:
+                self.bin_manager.finish(order.order_id, result["status"],
+                                        self.workstation.motion_attempted,
+                                        self.workstation._placed_entities)
+                self._state, self._state_reason, self._scene_ready = state, reason, ready
+                self._busy = False
+            self.publish_status()
 
     def _failure_result(self, order: Order, status: str, error: str) -> dict:
         return {

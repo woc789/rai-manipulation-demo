@@ -1,0 +1,5 @@
+# Explicit human confirmation of pickup. Only this completed order is cleared.
+string order_id
+---
+bool success
+string message

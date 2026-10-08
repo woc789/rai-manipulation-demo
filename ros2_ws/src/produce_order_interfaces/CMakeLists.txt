@@ -7,6 +7,7 @@ find_package(geometry_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/OrderLine.msg"
+  "srv/ConfirmPickup.srv"
   "action/ExecuteOrder.action"
   "action/ExecuteMotion.action"
   DEPENDENCIES geometry_msgs
