@@ -1,5 +1,11 @@
 # Robotic Arm Manipulation Demo
 
+## 本地配货工作台
+
+原生 Qt 订单界面已重构为下单、任务进度、箱位与记录四个区域。设计与模块说明见 [界面重构记录](docs/ORDER_UI_REDESIGN.md)。未实现的扩展页面明确标为规划中。
+
+![配货工作台](docs/images/order-workbench.png)
+
 This project demonstrates the use of [RAI](https://github.com/RobotecAI/rai) framework interfacing with a robotic arm in a simulation. In particular, it shows the communication between Generative AI models and the [Panda Franka](https://www.franka.de/) manipulator, which is a popular choice in AI and manipulation research in the robotic community. 
 
 The simulation uses [O3DE](https://www.o3de.org/) game engine paired with [ROS 2 Gem](https://docs.o3de.org/docs/user-guide/interactivity/robotics/).

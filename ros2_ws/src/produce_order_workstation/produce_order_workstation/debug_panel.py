@@ -1,51 +1,25 @@
 """Small Qt desktop panel for watching and exercising the order Action."""
 
-from datetime import datetime
 import json
 from pathlib import Path
 from queue import Empty, Queue
 import sys
+import signal
 
-from ament_index_python.packages import get_package_share_directory
 from PyQt5.QtCore import QThread, pyqtSignal
-from PyQt5.QtWidgets import (
-    QApplication,
-    QComboBox,
-    QFormLayout,
-    QGridLayout,
-    QGroupBox,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QMessageBox,
-    QPlainTextEdit,
-    QProgressBar,
-    QPushButton,
-    QSpinBox,
-    QVBoxLayout,
-    QWidget,
-)
+from PyQt5.QtWidgets import QApplication
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
+from rclpy.signals import SignalHandlerOptions
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
 from produce_order_interfaces.action import ExecuteOrder
 from produce_order_interfaces.msg import OrderLine
 from produce_order_interfaces.srv import ConfirmPickup
-import yaml
-
-from .order import (
-    Order,
-    OrderLine as BusinessOrderLine,
-    capacity_usage,
-    fulfillment_mode,
-    plan_placements,
-    readable_error,
-    validate_order,
-)
+from .operator_panel import OperatorPanel
 
 
 class RosWorker(QThread):
@@ -82,7 +56,8 @@ class RosWorker(QThread):
         self._commands.put(("stop",))
 
     def run(self) -> None:
-        rclpy.init(args=None)
+        # The Qt main thread owns process signals; stop ROS via the command queue.
+        rclpy.init(args=None, signal_handler_options=SignalHandlerOptions.NO)
         node = Node("produce_order_debug_panel")
         client = ActionClient(node, ExecuteOrder, "/produce_orders/execute")
         recovery = node.create_client(Trigger, "/produce_orders/recover")
@@ -94,7 +69,7 @@ class RosWorker(QThread):
         running = True
         last_check = 0.0
         try:
-            while running:
+            while running and rclpy.ok():
                 try:
                     while True:
                         command = self._commands.get_nowait()
@@ -126,7 +101,8 @@ class RosWorker(QThread):
             node.destroy_client(recovery)
             node.destroy_client(pickup)
             node.destroy_node()
-            rclpy.shutdown()
+            if rclpy.ok():
+                rclpy.shutdown()
 
     def _send(self, client: ActionClient, command: tuple) -> None:
         _, order_id, quantities, prepare = command
@@ -243,409 +219,16 @@ class RosWorker(QThread):
         )
 
 
-class DebugPanel(QWidget):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("生鲜拣选工作站 · 调试面板")
-        self.resize(850, 620)
-        config_path = (
-            Path(get_package_share_directory("produce_order_workstation"))
-            / "config/workstation.yaml"
-        )
-        self.config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-        self._order_active = False
-        self._active_order_id = ""
-        self._online = False
-        self._workcell_can_submit = False
-        self._workcell_can_recover = False
-        self._has_previous_attempt = False
-        self._bin_resources = []
-        self.worker = RosWorker()
-        self._build_ui()
-        self.order_id.textChanged.connect(self._refresh_order_preview)
-        for spin in self.quantity_spins.values():
-            spin.valueChanged.connect(self._refresh_order_preview)
-        self._refresh_order_preview()
-        self.worker.connected.connect(self._set_connected)
-        self.worker.accepted.connect(self._set_accepted)
-        self.worker.feedback.connect(self._on_feedback)
-        self.worker.finished.connect(self._on_result)
-        self.worker.notice.connect(self._append)
-        self.worker.workcell_status.connect(self._set_workcell_status)
-        self.worker.resources.connect(self._set_resources)
-        self.worker.start()
-
-    def _build_ui(self) -> None:
-        root = QVBoxLayout(self)
-        root.setSpacing(16)
-        header = QLabel("生鲜订单拣选工作站")
-        header.setObjectName("title")
-        root.addWidget(header)
-        root.addWidget(QLabel("调试面板 · RGB-D 识别/三维定位 → Agent 选工具 → ROS 2 抓放"))
-
-        top = QHBoxLayout()
-        self.connection = QLabel("● 正在连接订单服务")
-        self.connection.setObjectName("connection")
-        self.status = QLabel("待提交")
-        self.status.setObjectName("status")
-        top.addWidget(self.connection)
-        top.addStretch()
-        top.addWidget(self.status)
-        root.addLayout(top)
-        self.workcell_state = QLabel("工作台状态：等待服务消息")
-        self.workcell_state.setWordWrap(True)
-        root.addWidget(self.workcell_state)
-
-        order_box = QGroupBox("① 输入订单")
-        form = QFormLayout(order_box)
-        self.order_id = QLineEdit()
-        self.order_id.setReadOnly(True)
-        self._new_id()
-        form.addRow("订单号", self.order_id)
-        quantities = QGridLayout()
-        self.quantity_spins = {}
-        for index, (sku, label) in enumerate(
-            (("corn", "玉米"), ("carrot", "胡萝卜"), ("apple", "苹果"), ("tomato", "番茄"))
-        ):
-            spin = QSpinBox()
-            spin.setRange(
-                0,
-                min(
-                    self.config["zones"]["A"]["bin_capacity_items"],
-                    self.config["stock"]["initial_counts"][sku],
-                ),
-            )
-            row, column = divmod(index, 2)
-            bin_id = self.config["zones"]["A"]["sku_bins"][sku] + 1
-            quantities.addWidget(QLabel(label if fulfillment_mode(self.config) == "fulfillment"
-                                       else f"{label} → A{bin_id}"), row, column * 2)
-            quantities.addWidget(spin, row, column * 2 + 1)
-            self.quantity_spins[sku] = spin
-        form.addRow("商品数量", quantities)
-        form.addRow("订单方式", QLabel("自动生成订单号；只填写四类商品的数量（0 表示不需要）"))
-        self.capacity_status = QLabel()
-        self.capacity_status.setWordWrap(True)
-        form.addRow("容量校验", self.capacity_status)
-        self.bin_preview = QLabel()
-        self.bin_preview.setWordWrap(True)
-        form.addRow("分箱预览", self.bin_preview)
-        scene_label = QLabel("启动时只有 16 件混合库存和待回收周转箱；接单后放入订单箱，确认取货后移走整箱。完成订单不自动补货。")
-        scene_label.setWordWrap(True)
-        form.addRow("场景", scene_label)
-        buttons = QHBoxLayout()
-        self.submit_button = QPushButton("提交订单")
-        self.submit_button.setObjectName("primary")
-        self.submit_button.clicked.connect(self._submit)
-        self.cancel_button = QPushButton("请求取消")
-        self.cancel_button.setEnabled(False)
-        self.cancel_button.clicked.connect(self.worker.cancel)
-        buttons.addWidget(self.submit_button)
-        buttons.addWidget(self.cancel_button)
-        form.addRow(buttons)
-        recovery_buttons = QHBoxLayout()
-        self.retry_button = QPushButton("重新提交本单")
-        self.retry_button.setToolTip("保持当前商品数量，使用新的订单号重新提交")
-        self.retry_button.clicked.connect(self._retry)
-        self.retry_button.setEnabled(False)
-        self.recover_button = QPushButton("补货 / 恢复（重建场景）")
-        self.recover_button.setToolTip("清理并重建仿真物品和收货箱；不会重启 O3DE 进程")
-        self.recover_button.clicked.connect(self._recover)
-        self.recover_button.setEnabled(False)
-        recovery_buttons.addWidget(self.retry_button)
-        recovery_buttons.addWidget(self.recover_button)
-        form.addRow("故障处理", recovery_buttons)
-        self.bin_resources_label = QLabel("箱位状态：等待服务消息")
-        self.bin_resources_label.setWordWrap(True)
-        form.addRow("箱位资源", self.bin_resources_label)
-        pickup_buttons = QHBoxLayout()
-        self.pickup_orders = QComboBox()
-        self.pickup_button = QPushButton("确认取走整箱并释放箱位")
-        self.pickup_button.setEnabled(False)
-        self.pickup_button.clicked.connect(self._pickup)
-        pickup_buttons.addWidget(self.pickup_orders, 1)
-        pickup_buttons.addWidget(self.pickup_button)
-        form.addRow("人工取货", pickup_buttons)
-        root.addWidget(order_box)
-
-        progress_box = QGroupBox("② 执行状态")
-        progress_layout = QVBoxLayout(progress_box)
-        self.stage = QLabel("等待提交")
-        self.progress = QProgressBar()
-        self.progress.setValue(0)
-        progress_layout.addWidget(self.stage)
-        progress_layout.addWidget(self.progress)
-        self.last_result = QLabel("上一单：暂无")
-        self.last_result.setWordWrap(True)
-        progress_layout.addWidget(self.last_result)
-        self.failure_reason = QLabel("")
-        self.failure_reason.setWordWrap(True)
-        self.failure_reason.setStyleSheet("color: #fca5a5;")
-        progress_layout.addWidget(self.failure_reason)
-        root.addWidget(progress_box)
-
-        log_box = QGroupBox("③ 实时事件与输出")
-        log_layout = QVBoxLayout(log_box)
-        self.log = QPlainTextEdit()
-        self.log.document().setMaximumBlockCount(1000)
-        self.log.setReadOnly(True)
-        log_layout.addWidget(self.log)
-        root.addWidget(log_box, 1)
-        self.setStyleSheet(
-            """
-            QWidget { background: #111827; color: #e5e7eb; font-size: 14px; }
-            QGroupBox { border: 1px solid #374151; border-radius: 10px;
-                        margin-top: 12px; padding: 14px; font-weight: 600; }
-            QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; }
-            QLineEdit, QSpinBox, QPlainTextEdit { background: #1f2937;
-                border: 1px solid #4b5563; border-radius: 6px; padding: 7px; }
-            QPushButton { background: #374151; border: none; border-radius: 7px;
-                          padding: 10px 18px; }
-            QPushButton#primary { background: #0e7490; color: white; font-weight: 700; }
-            QPushButton:disabled { background: #27303f; color: #6b7280; }
-            QPushButton:hover:enabled { background: #0891b2; }
-            QLabel#title { font-size: 25px; font-weight: 750; color: #67e8f9; }
-            QLabel#connection { color: #fbbf24; }
-            QLabel#status { color: #a7f3d0; font-weight: 700; }
-            QProgressBar { border: 1px solid #4b5563; border-radius: 6px;
-                           background: #1f2937; text-align: center; height: 20px; }
-            QProgressBar::chunk { background: #10b981; border-radius: 5px; }
-            """
-        )
-
-    def _new_id(self) -> None:
-        self.order_id.setText(datetime.now().strftime("debug-%Y%m%d-%H%M%S-%f"))
-
-    def _current_order(self) -> Order:
-        return Order(
-            self.order_id.text().strip(),
-            "A",
-            tuple(
-                BusinessOrderLine(sku, spin.value())
-                for sku, spin in self.quantity_spins.items()
-                if spin.value()
-            ),
-        )
-
-    def _set_form_enabled(self, enabled: bool) -> None:
-        self.order_id.setEnabled(enabled)
-        for spin in self.quantity_spins.values():
-            spin.setEnabled(enabled)
-
-    def _refresh_order_preview(self, _=None) -> None:
-        if self._order_active:
-            return
-        order = self._current_order()
-        usage = capacity_usage(order, self.config)
-        self.stage.setText("尚未提交")
-        self.progress.setMaximum(100)
-        self.progress.setValue(0)
-        if not order.lines:
-            detail = "至少选择一件商品。"
-        else:
-            try:
-                validate_order(order, self.config)
-            except ValueError as exc:
-                detail = str(exc)
-            else:
-                detail = ""
-        if detail:
-            self.capacity_status.setText(
-                f"不可提交 · 已选 {usage.items_needed} 件。{detail}"
-            )
-            self.capacity_status.setStyleSheet("color: #fca5a5;")
-            self.bin_preview.setText("请调整数量后查看分箱方案。")
-            self.submit_button.setEnabled(False)
-            self.retry_button.setEnabled(False)
-            self.status.setText("订单配置无效")
-            return
-        self.capacity_status.setText(
-            f"可提交 · 已选 {usage.items_needed} 件，桌面预置混合库存；"
-            f"使用 {usage.bins_needed}/{usage.bins_available} 个收货箱；"
-            f"每箱上限 {usage.items_per_bin} 件，实际可抓商品由视觉定位确认。"
-        )
-        self.capacity_status.setStyleSheet("color: #86efac;")
-        bins = [0 for _ in range(usage.bins_available)]
-        labels = {"corn": "玉米", "carrot": "胡萝卜", "apple": "苹果", "tomato": "番茄"}
-        free_index = next((index for index, resource in enumerate(self._bin_resources)
-                           if resource["state"] == "FREE"), 0)
-        for placement in plan_placements(order, self.config, bin_index=free_index):
-            bins[placement.bin_index] += 1
-        sku_bins = self.config["zones"]["A"]["sku_bins"]
-        if fulfillment_mode(self.config) == "fulfillment":
-            contents = " + ".join(f"{labels[line.sku]} ×{line.quantity}" for line in order.lines)
-            self.bin_preview.setText(f"预计 A{free_index + 1}：{contents}（接单时正式分配；无空箱时不可提交）")
-        else:
-            self.bin_preview.setText("  ·  ".join(
-                f"A{index + 1} {labels[sku]} ×{bins[index]}"
-                for sku, index in sorted(sku_bins.items(), key=lambda item: item[1])
-            ))
-        self.submit_button.setEnabled(
-            self._online and self._workcell_can_submit and not self._order_active
-        )
-        self.retry_button.setEnabled(
-            self._has_previous_attempt and self._online
-            and self._workcell_can_submit and not self._order_active
-        )
-        self.status.setText("待提交")
-
-    def _submit(self) -> None:
-        order = self._current_order()
-        try:
-            validate_order(order, self.config)
-        except ValueError as exc:
-            self._append(f"订单不可提交：{exc}")
-            self._refresh_order_preview()
-            return
-        quantities = {line.sku: line.quantity for line in order.lines}
-        self._order_active = True
-        self._active_order_id = order.order_id
-        self._set_form_enabled(False)
-        self.progress.setValue(0)
-        self.failure_reason.setText("")
-        self.status.setText("提交中")
-        self.stage.setText("等待订单服务确认")
-        self.submit_button.setEnabled(False)
-        self.retry_button.setEnabled(False)
-        self.worker.submit(order.order_id, quantities, True)
-
-    def _retry(self) -> None:
-        self._new_id()
-        self._submit()
-
-    def _recover(self) -> None:
-        if self._order_active or not self._workcell_can_recover:
-            return
-        if QMessageBox.question(self, "确认重建场景",
-                                "这会清理桌面和失败订单中的商品，重新生成初始库存。\n"
-                                "已完成但未取货的订单会由服务端阻止重置。是否继续？") != QMessageBox.Yes:
-            return
-        self.recover_button.setEnabled(False)
-        self.worker.recover()
-
-    def _pickup(self) -> None:
-        order_id = self.pickup_orders.currentData()
-        if not order_id or self._order_active:
-            return
-        if QMessageBox.question(self, "确认人工取货",
-                                f"确认取走订单 {order_id}？\n仿真将移除该订单商品和订单箱，保留桌面剩余库存与其他订单箱。") != QMessageBox.Yes:
-            return
-        self.pickup_button.setEnabled(False)
-        self.worker.pickup(order_id)
-
-    def _set_resources(self, payload: str) -> None:
-        status = json.loads(payload)
-        self._bin_resources = status.get("bins", [])
-        self.bin_resources_label.setText("  ·  ".join(
-            f"{b['bin_id']}：{('空位（无箱）' if b['state'] == 'FREE' and fulfillment_mode(self.config) == 'fulfillment' else b['state'])}" + (f" [{b['order_id']}]" if b.get("order_id") else "")
-            for b in self._bin_resources
-        ))
-        selected = self.pickup_orders.currentData()
-        self.pickup_orders.clear()
-        orders = {}
-        for b in self._bin_resources:
-            if b["state"] == "WAITING_PICKUP":
-                orders.setdefault(b["order_id"], []).append(b["bin_id"])
-        for order_id, bin_ids in orders.items():
-            self.pickup_orders.addItem(f"{'/'.join(bin_ids)} · {order_id}", order_id)
-        index = self.pickup_orders.findData(selected)
-        if index >= 0:
-            self.pickup_orders.setCurrentIndex(index)
-        self.pickup_button.setEnabled(bool(orders) and bool(status.get("can_pickup"))
-                                      and self._online and not self._order_active)
-        self._refresh_order_preview()
-
-    def _set_connected(self, online: bool) -> None:
-        self._online = online
-        self.connection.setText("● 订单服务在线" if online else "● 订单服务离线")
-        self.connection.setStyleSheet(
-            "color: #34d399;" if online else "color: #fbbf24;"
-        )
-        self._refresh_order_preview()
-
-    def _set_workcell_status(self, state: str, reason: str, can_submit: bool, can_recover: bool) -> None:
-        self._workcell_can_submit = can_submit
-        self._workcell_can_recover = can_recover
-        self.workcell_state.setText(f"工作台状态：{state} · {reason}")
-        self.recover_button.setEnabled(can_recover and not self._order_active)
-        self._refresh_order_preview()
-
-    def _set_accepted(self, accepted: bool) -> None:
-        self.cancel_button.setEnabled(accepted)
-        if accepted:
-            self.status.setText("执行中")
-        else:
-            self._order_active = False
-            self._has_previous_attempt = True
-            self._set_form_enabled(True)
-            self._refresh_order_preview()
-            self.status.setText("未被接收")
-            self.stage.setText("订单未被接收；请查看下方提示")
-
-    def _on_feedback(self, stage: str, completed: int, total: int, detail: str) -> None:
-        self.stage.setText(f"当前阶段：{stage}")
-        self.status.setText(stage)
-        if total:
-            self.progress.setMaximum(total)
-            self.progress.setValue(completed)
-        try:
-            event = json.loads(detail)
-            if stage == "AGENT_TOOL_CALL":
-                argument = event.get("arguments", {})
-                target = argument.get("detection_id", argument.get("sku", ""))
-                self._append(f"Agent 选择工具：{event['tool']} {target}".strip())
-            elif stage == "AGENT_TOOL_RESULT" and event.get("tool") == "get_object_positions":
-                result = event.get("result", {})
-                self._append(
-                    f"视觉定位 {result.get('sku')}：{len(result.get('detections', []))} 个候选，"
-                    f"坐标系 {result.get('frame')}"
-                )
-            elif stage == "ITEM_COMPLETED":
-                self._append(
-                    f"{event['sku']} 已装 {event['sku_completed']}/{event['sku_requested']}；"
-                    f"整单 {event['completed']}/{event['total']}，"
-                    f"剩余 {event['remaining_by_sku']}"
-                )
-            elif stage == "PERCEPTION_EMPTY":
-                self._append(
-                    f"未找到 {event['sku']}：第 {event['attempts']}/{event['limit']} 次空检测"
-                )
-            elif stage == "PERCEPTION_EXHAUSTED":
-                self._append(f"连续空检测达到上限，订单停止：剩余 {event['remaining']}")
-            self._append(json.dumps(event, ensure_ascii=False))
-        except json.JSONDecodeError:
-            self._append(detail)
-
-    def _on_result(
-        self, status: str, completed: int, requested: int, error: str, report: str
-    ) -> None:
-        self.last_result.setText(
-            f"上一单 {self._active_order_id}：{status}，完成 {completed}/{requested}"
-        )
-        self.failure_reason.setText(readable_error(error) if error else "")
-        self._append(f"最终结果：{status} · {completed}/{requested}")
-        if error:
-            self._append(f"原因：{readable_error(error)}")
-        self._append(f"报告：{report}")
-        self._order_active = False
-        self._has_previous_attempt = True
-        self._set_form_enabled(True)
-        self.cancel_button.setEnabled(False)
-        self._new_id()
-        self._refresh_order_preview()
-        self.recover_button.setEnabled(self._workcell_can_recover)
-
-    def _append(self, message: str) -> None:
-        self.log.appendPlainText(message)
-
-    def closeEvent(self, event) -> None:
-        self.worker.stop()
-        self.worker.wait(3000)
-        super().closeEvent(event)
+class DebugPanel(OperatorPanel):
+    def __init__(self, **kwargs):
+        super().__init__(RosWorker, **kwargs)
 
 
 def main() -> None:
     app = QApplication(sys.argv)
     panel = DebugPanel()
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(signum, lambda *_: panel.close())
     panel.show()
     sys.exit(app.exec_())
 
