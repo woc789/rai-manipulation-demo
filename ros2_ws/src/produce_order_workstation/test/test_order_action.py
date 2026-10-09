@@ -221,7 +221,7 @@ def test_move_forwards_order_cancel_to_motion_action(monkeypatch):
 
 
 def test_scene_has_four_bins_and_mixed_order_independent_stock():
-    assert CONFIG["agent"]["model"] == "qwen3.8-flash"
+    assert CONFIG["agent"]["model"] == "qwen3.7-flash-2026-07-15"
     scene = yaml.safe_load((PACKAGE / "config/demo_scene.yaml").read_text())
     entities = {item["name"]: item for item in scene["entities"]}
     zone = CONFIG["zones"]["A"]

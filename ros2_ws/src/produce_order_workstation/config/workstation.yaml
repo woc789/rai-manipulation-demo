@@ -47,7 +47,7 @@ stock:
     min_bin_distance_m: 0.14
 agent:
   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
-  model: qwen3.8-flash
+  model: qwen3.7-flash-2026-07-15
   timeout_s: 40
   max_tool_calls_per_item: 6
   max_consecutive_empty_perceptions: 5
