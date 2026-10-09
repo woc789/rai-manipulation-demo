@@ -53,6 +53,18 @@ def test_corn_orientations_are_normalized_and_long_axis_stays_horizontal():
         assert 1 - 2*(q.x*q.x + q.y*q.y) == pytest.approx(0.0, abs=1e-8)
 
 
+def test_corn_templates_leave_room_for_observed_settling_displacement():
+    _, scene = fixtures()
+    for item in scene.entities:
+        if item.prefab_name != "corn":
+            continue
+        p = item.pose.pose.position
+        # Observed roll/settling can shift X by about 12 mm. Guard both
+        # workspace edges; actual settled positions still need a live audit.
+        assert .215 <= p.x <= .560
+        assert abs(p.y) <= .540
+
+
 @pytest.mark.parametrize("position, reason", [
     ((.22, -.12), "arm base"),
     ((.57, -.23), "order-bin area"),

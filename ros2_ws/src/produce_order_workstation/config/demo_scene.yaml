@@ -30,9 +30,9 @@ entities:
   # entity IDs; TF positions are measured again before each pick.
   # Two staggered mixed banks, spaced for the fixed RGBDCamera5 view.
   # >= 10 cm centre spacing, >= 17 cm from future bin centres, >= 40 cm
-  # from panda_link0. Keep the obstacle corridor empty; do not change box slots.
-  # Corn uses outer/back positions; horizontal headings/roll were checked
-  # in the live camera. Visibility does not guarantee a detection.
+  # from panda_link0. Leave the crate footprint clear; do not change box slots.
+  # Two corn cobs occupy the foreground gap between A2/A3, away from the
+  # x_min edge; two remain in the side banks. Visibility alone is not a detection.
   # Template positions are NOT perception results.
   - name: stock_carrot_1
     prefab_name: carrot
@@ -42,8 +42,8 @@ entities:
   - name: stock_corn_1
     prefab_name: corn
     pose:
-      translation: {x: 0.201, y: -0.545, z: 0.05}
-      rotation: {x: 0.0, y: 0.7071067811865476, z: 0.7071067811865476, w: 0.0}
+      translation: {x: 0.560, y: -0.0525, z: 0.05}
+      rotation: {x: 0.7071067811865476, y: 0.0, z: 0.0, w: 0.7071067811865476}
   - name: stock_apple_1
     prefab_name: apple
     pose:
@@ -102,7 +102,7 @@ entities:
   - name: stock_corn_4
     prefab_name: corn
     pose:
-      translation: {x: 0.201, y: 0.545, z: 0.05}
+      translation: {x: 0.560, y: 0.0525, z: 0.05}
       rotation: {x: 0.7071067811865476, y: 0.0, z: 0.0, w: 0.7071067811865476}
   - name: stock_carrot_4
     prefab_name: carrot

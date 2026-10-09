@@ -1,7 +1,7 @@
 """Start an empty O3DE benchmark workcell and the RAI manipulation stack."""
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, SetEnvironmentVariable
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
@@ -12,6 +12,7 @@ from launch_ros.substitutions import FindPackageShare
 def generate_launch_description():
     return LaunchDescription(
         [
+            SetEnvironmentVariable("RAI_GDINO_TILE_CLASSES", "corn cob,ear of corn,corn"),
             DeclareLaunchArgument(
                 "enable_perception",
                 default_value="true",
