@@ -25,6 +25,23 @@ CONFIG = yaml.safe_load((PACKAGE / "config/workstation.yaml").read_text())
 CONFIG["operation_mode"] = "classification"
 
 
+def test_perception_timeout_stops_without_retrying_aliases():
+    station = Workstation(MagicMock(), CONFIG)
+    station._position_tool = MagicMock()
+    station._position_tool.invoke.side_effect = TimeoutError("fake service stall")
+    with pytest.raises(OrderError, match="Perception service unavailable"):
+        station.detect("corn")
+    station._position_tool.invoke.assert_called_once()
+
+
+def test_cancel_before_perception_issues_no_vision_request():
+    station = Workstation(MagicMock(), CONFIG, cancel_requested=lambda: True)
+    station._position_tool = MagicMock()
+    with pytest.raises(OrderCancelled):
+        station.detect("corn")
+    station._position_tool.invoke.assert_not_called()
+
+
 def test_motion_feedback_retains_order_counts_between_item_events():
     server = SimpleNamespace(workstation=SimpleNamespace(_completed_by_sku={"corn": 1, "carrot": 1}))
     handle = MagicMock()

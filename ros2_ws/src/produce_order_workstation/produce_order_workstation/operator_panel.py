@@ -40,6 +40,9 @@ class OperatorPanel(QWidget):
         self._bins = []
         self._queue_enabled = False
         self._queue_clear_pending = False
+        self._cancel_requesting = False
+        self._cancel_waiting = False
+        self._cancel_for_id = ""
         self._can_register = False
         self._registration_pending = False
         self._last_queue_terminal = None
@@ -53,6 +56,8 @@ class OperatorPanel(QWidget):
         self._build_ui()
         if hasattr(self.worker, "queue_cleared"):
             self.worker.queue_cleared.connect(self._on_queue_cleared)
+        if hasattr(self.worker, "operation_finished"):
+            self.worker.operation_finished.connect(self._on_operation_finished)
         self._new_id()
         self._refresh_history()
         self._restore_last_task()
@@ -62,7 +67,7 @@ class OperatorPanel(QWidget):
             (self.worker.accepted, self._set_accepted),
             (self.worker.feedback, self._on_feedback),
             (self.worker.finished, self._on_result),
-            (self.worker.notice, self._append),
+            (self.worker.notice, self._on_notice),
             (self.worker.workcell_status, self._set_workcell_status),
             (self.worker.resources, self._set_resources),
             (self.worker.inventory, self._set_inventory),
@@ -191,7 +196,7 @@ class OperatorPanel(QWidget):
         task_header.addWidget(self.task_status)
         self.cancel_button = QPushButton("取消")
         self.cancel_button.setToolTip("取消当前订单：运动到安全检查点后停止")
-        self.cancel_button.clicked.connect(self.worker.cancel)
+        self.cancel_button.clicked.connect(self._request_cancel)
         self.cancel_button.setEnabled(False)
         task_header.addWidget(self.cancel_button)
         task.box.addLayout(task_header)
@@ -238,6 +243,9 @@ class OperatorPanel(QWidget):
         page.addLayout(main)
         records = Card()
         self.records = records
+        self.operation_notice = label("", "muted", wrap=True)
+        self.operation_notice.hide()
+        records.box.addWidget(self.operation_notice)
         self.tabs = QTabWidget()
         self.clear_logs_button = QPushButton("清空日志")
         self.clear_logs_button.setToolTip("仅清空事件和技术日志显示，保留订单报告及系统日志")
@@ -287,6 +295,7 @@ class OperatorPanel(QWidget):
         self.queue_table.setHorizontalHeaderLabels(["订单", "优先级", "状态", "进度", "等待原因"])
         self.queue_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.queue_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.queue_table.itemSelectionChanged.connect(self._update_controls)
         self.queue_table.verticalHeader().hide()
         self.queue_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.queue_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
@@ -300,7 +309,7 @@ class OperatorPanel(QWidget):
         self.queue_clear_button.setToolTip("保留正在执行、已部分装箱及待取货的订单")
         self.queue_clear_button.clicked.connect(self._clear_queue)
         self.scan_button = QPushButton("视觉复查")
-        self.scan_button.clicked.connect(lambda: self.worker.refresh_inventory())
+        self.scan_button.clicked.connect(self._scan_inventory)
         self.replenish_button = QPushButton("补货准备")
         self.replenish_button.clicked.connect(self._replenish)
         for button in (self.queue_cancel_button, self.queue_clear_button, self.scan_button, self.replenish_button):
@@ -352,7 +361,10 @@ class OperatorPanel(QWidget):
             else self._can_submit and not self._order_active))
         self.recover_button.setEnabled(synced and self._can_recover and not self._order_active)
         self.pickup_button.setEnabled(synced and self._can_pickup and self.pickup_orders.count() > 0 and not self._order_active)
-        self.cancel_button.setEnabled(self._online and self._order_active and self._accepted)
+        self.cancel_button.setEnabled(synced and self._order_active and self._accepted
+            and not self._cancel_requesting and not self._cancel_waiting)
+        self.cancel_button.setText("请求取消中…" if self._cancel_requesting else
+                                   "等待安全取消" if self._cancel_waiting else "取消")
         editable = not self._registration_pending if self._queue_enabled else not self._order_active
         self.retry_button.setEnabled(editable)
         self.order_id.setEnabled(editable)
@@ -360,7 +372,11 @@ class OperatorPanel(QWidget):
         for spin in self.quantity_spins.values():
             spin.setEnabled(editable)
         self.scan_button.setEnabled(synced and self._queue_enabled)
-        self.queue_cancel_button.setEnabled(synced and self._queue_enabled)
+        row = self.queue_table.currentRow()
+        cell = self.queue_table.item(row, 0) if row >= 0 else None
+        job = getattr(self, "_queue_jobs", {}).get(cell.text(), {}) if cell else {}
+        self.queue_cancel_button.setEnabled(synced and self._queue_enabled
+            and job.get("state") in ("QUEUED", "WAITING_STOCK", "WAITING_BIN", "PAUSED"))
         self.queue_clear_button.setEnabled(synced and self._queue_enabled
             and not self._queue_clear_pending and bool(self._clearable_orders()))
         self.replenish_button.setEnabled(synced and self._queue_enabled and self._state == "READY")
@@ -413,6 +429,9 @@ class OperatorPanel(QWidget):
         self._check_status()
 
     def _render_queue(self, orders):
+        row = self.queue_table.currentRow()
+        selected_cell = self.queue_table.item(row, 0) if row >= 0 else None
+        selected_id = selected_cell.text() if selected_cell else None
         self._queue_jobs = {job["order_id"]: job for job in orders}
         names = {"QUEUED": "排队", "DISPATCHING": "资源已预留", "RUNNING": "执行中",
                  "WAITING_STOCK": "等待库存核对", "WAITING_BIN": "等待箱位",
@@ -432,15 +451,23 @@ class OperatorPanel(QWidget):
                 cell = QTableWidgetItem(str(value))
                 cell.setToolTip(str(value))
                 self.queue_table.setItem(row, col, cell)
+            if job["order_id"] == selected_id:
+                self.queue_table.selectRow(row)
         if not self._queue_enabled:
             return
         running = next((job for job in orders if job["state"] in ("RUNNING", "DISPATCHING", "EXECUTION_UNCERTAIN")), None)
         self._order_active = self._accepted = running is not None
         if running:
+            if self._cancel_for_id != running["order_id"]:
+                self._cancel_requesting = self._cancel_waiting = False
+            if self.task_id.text() != running["order_id"]:
+                self.failure_reason.clear()
+                self.failure_reason.hide()
             self.task_id.setText(running["order_id"])
             self.task_status.setText(names[running["state"]])
             self._set_progress(running["completed"], running["total"])
         else:
+            self._cancel_requesting = self._cancel_waiting = False
             terminal = max((job for job in orders if job["state"] in (
                 "WAITING_PICKUP", "FAILED", "CANCELLED")),
                 key=lambda job: job.get("finished_sequence", 0), default=None)
@@ -467,10 +494,12 @@ class OperatorPanel(QWidget):
             return
         self._queue_clear_pending = True
         self.queue_clear_button.setEnabled(False)
+        self._on_notice(f"正在清除 {len(ids)} 份待执行订单，等待服务确认…")
         self.worker.clear_queue(ids)
 
     def _on_queue_cleared(self, cleared, skipped):
         self._queue_clear_pending = False
+        self._on_notice(f"队列清理：已清除 {cleared} 份，跳过或未确认 {skipped} 份")
         self._check_status()
 
     def _clear_logs(self):
@@ -479,18 +508,49 @@ class OperatorPanel(QWidget):
 
     def _cancel_queued(self):
         row = self.queue_table.currentRow()
+        if row < 0:
+            self._on_notice("请先选中一份待执行或安全暂停的订单")
+            return
         if row >= 0 and self._queue_enabled:
             order_id = self.queue_table.item(row, 0).text()
             job = self._queue_jobs[order_id]
             if job["completed"]:
                 if QMessageBox.question(self, "丢弃部分订单", "仅允许丢弃安全暂停的订单。确认移走已装商品和订单箱？") == QMessageBox.Yes:
+                    self._on_notice("已请求丢弃安全暂停订单，等待服务确认…")
                     self.worker.cancel_queued(order_id, True)
             else:
+                self._on_notice("正在取消选中订单，等待服务确认…")
                 self.worker.cancel_queued(order_id)
+
+    def _request_cancel(self):
+        if not self.cancel_button.isEnabled():
+            return
+        self._cancel_for_id = self.task_id.text()
+        self._cancel_requesting = True
+        self._on_notice("正在发送取消请求；感知等待可取消，抓放运动须等待安全检查点")
+        self._update_controls()
+        self.worker.cancel()
+
+    def _on_operation_finished(self, operation, success, message):
+        if operation == "cancel":
+            self._cancel_requesting = False
+            self._cancel_waiting = success
+        self._on_notice(message)
+        self._update_controls()
+
+    def _on_notice(self, message):
+        self.operation_notice.setText(message)
+        self.operation_notice.show()
+        self._append(message)
 
     def _replenish(self):
         if QMessageBox.question(self, "补货准备", "替换桌面剩余货源？已完成的订单箱将保留。") == QMessageBox.Yes:
+            self._on_notice("已请求补货准备，等待服务确认…")
             self.worker.replenish()
+
+    def _scan_inventory(self):
+        self._on_notice("已请求视觉复查，将在工作台空闲时扫描")
+        self.worker.refresh_inventory()
 
     def _on_registered(self, success, order_id, message):
         self._registration_pending = False
@@ -626,6 +686,7 @@ class OperatorPanel(QWidget):
         if not self.recover_button.isEnabled():
             return
         if QMessageBox.question(self, "恢复工作台", "清理失败订单和桌面，重新准备库存？\n待取货订单必须先取走。") == QMessageBox.Yes:
+            self._on_notice("已请求恢复工作台，等待服务确认…")
             self.worker.recover()
 
     def _pickup(self):
@@ -633,6 +694,7 @@ class OperatorPanel(QWidget):
             return
         order_id = self.pickup_orders.currentData()
         if QMessageBox.question(self, "确认取货", f"取走订单 {order_id}？\n对应箱子和商品将从仿真中移除。") == QMessageBox.Yes:
+            self._on_notice("已请求确认取货，等待服务确认…")
             self.worker.pickup(order_id)
 
     def _append(self, message):

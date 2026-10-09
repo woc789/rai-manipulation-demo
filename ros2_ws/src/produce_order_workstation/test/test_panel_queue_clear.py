@@ -57,6 +57,20 @@ class QueueClearTests(unittest.TestCase):
         self.worker._clear_queue(self.client, [])
         self.assertEqual(self.results, [(0, 0)])
 
+    def test_single_control_request_times_out_and_ignores_late_response(self):
+        replies = []
+        self.worker.operation_finished.connect(lambda *result: replies.append(result))
+        reply = Future()
+        self.client.call_async.return_value = reply
+        self.worker._trigger(self.client, "cancel")
+        deadline = self.worker._service_waits[reply][2]
+        with patch("produce_order_workstation.debug_panel.time.monotonic", return_value=deadline + 1):
+            self.worker._check_service_timeouts()
+        self.assertEqual(replies[0][0:2], ("cancel", False))
+        self.client.remove_pending_request.assert_called_once_with(reply)
+        reply.set_result(SimpleNamespace(success=True, message="late"))
+        self.assertEqual(len(replies), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

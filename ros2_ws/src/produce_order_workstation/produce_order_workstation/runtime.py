@@ -135,6 +135,9 @@ class Workstation:
                 self.connector.node.declare_parameter(parameter_name, value)
         if self._position_tool is None:
             self._position_tool = GetObjectPositionsTool(connector=self.connector)
+            pipeline = self._position_tool.point_cloud_from_segmentation
+            pipeline.check_cancel = self.check_cancel
+            pipeline.config.service_timeout = self.config.get("perception", {}).get("service_timeout_s", 20.0)
         if self._motion_client is None:
             self._motion_client = ActionClient(
                 self.connector.node, ExecuteMotion, "/produce_orders/execute_motion"
@@ -350,7 +353,14 @@ class Workstation:
         if self._position_tool is None:
             raise RuntimeError("wait_until_ready must be called first")
         for alias in self.config["aliases"][sku]:
-            result = self._position_tool.invoke({"object_name": alias})
+            self.check_cancel()
+            try:
+                result = self._position_tool.invoke({"object_name": alias})
+            except TimeoutError as exc:
+                raise OrderError(f"Perception service unavailable: {exc}; stop instead of retrying aliases") from exc
+            self.check_cancel()
+            if str(result).startswith("Timeout:"):
+                raise OrderError("Perception tool timed out; stop instead of treating it as missing stock")
             points = parse_centroids(result)
             if points:
                 return points

@@ -37,6 +37,7 @@ class RosWorker(QThread):
     inventory = pyqtSignal(str)
     registered = pyqtSignal(bool, str, str)
     queue_cleared = pyqtSignal(int, int)
+    operation_finished = pyqtSignal(str, bool, str)
 
     def __init__(self):
         super().__init__()
@@ -48,6 +49,7 @@ class RosWorker(QThread):
         self._event_counts = {}
         self._clearing_queue = False
         self._clear_queue_batch = None
+        self._service_waits = {}
 
     def submit(self, order_id: str, quantities: dict[str, int], prepare: bool, priority=0) -> None:
         self._commands.put(("submit", order_id, quantities, prepare, priority))
@@ -113,7 +115,7 @@ class RosWorker(QThread):
                                 self._send(client, command[:4])
                         elif command[0] == "cancel":
                             if self._queue_enabled:
-                                self._trigger(active_cancel)
+                                self._trigger(active_cancel, "cancel")
                             else:
                                 self._cancel()
                         elif command[0] == "recover":
@@ -134,6 +136,7 @@ class RosWorker(QThread):
                     break
                 rclpy.spin_once(node, timeout_sec=0.1)
                 self._check_clear_queue_timeout()
+                self._check_service_timeouts()
                 now = node.get_clock().now().nanoseconds / 1e9
                 if now - last_check >= 1.0:
                     online = client.server_is_ready()
@@ -166,21 +169,48 @@ class RosWorker(QThread):
                 self.registered.emit(False, order_id, str(exc))
         client.call_async(request).add_done_callback(done)
 
-    def _trigger(self, client):
+    def _trigger(self, client, operation="maintenance"):
+        self._request_service(client, Trigger.Request(), operation)
+
+    def _request_service(self, client, request, operation):
         if not client.service_is_ready():
-            self.notice.emit("业务服务离线")
+            message = "业务服务离线，请求未发送"
+            self.notice.emit(message)
+            self.operation_finished.emit(operation, False, message)
             return
-        client.call_async(Trigger.Request()).add_done_callback(
-            lambda future: self.notice.emit(future.result().message if future.exception() is None
-                                           else str(future.exception())))
+        try:
+            future = client.call_async(request)
+        except Exception as exc:
+            self.notice.emit(str(exc))
+            self.operation_finished.emit(operation, False, str(exc))
+            return
+        self._service_waits[future] = (operation, client, time.monotonic() + 10.0)
+        def done(reply):
+            pending = self._service_waits.pop(reply, None)
+            if pending is None:
+                return
+            try:
+                response = reply.result()
+                success, message = response.success, response.message
+            except Exception as exc:
+                success, message = False, f"服务请求异常：{exc}"
+            self.notice.emit(message)
+            self.operation_finished.emit(operation, success, message)
+        future.add_done_callback(done)
+
+    def _check_service_timeouts(self):
+        now = time.monotonic()
+        for future, (operation, client, deadline) in tuple(self._service_waits.items()):
+            if now > deadline:
+                self._service_waits.pop(future, None)
+                client.remove_pending_request(future)
+                message = "服务响应超过 10 秒，结果未确认；请查看状态，勿重复点击"
+                self.notice.emit(message)
+                self.operation_finished.emit(operation, False, message)
 
     def _cancel_queued(self, client, order_id, discard_partial=False):
-        if not client.service_is_ready():
-            self.notice.emit("队列服务离线")
-            return
-        client.call_async(CancelQueuedOrder.Request(order_id=order_id, discard_partial=discard_partial)).add_done_callback(
-            lambda future: self.notice.emit(future.result().message if future.exception() is None
-                                           else str(future.exception())))
+        self._request_service(client,
+            CancelQueuedOrder.Request(order_id=order_id, discard_partial=discard_partial), "cancel_queued")
 
     def _clear_queue(self, client, order_ids):
         """Reuse guarded cancellation: never cancel/discard a running or partial job."""
@@ -347,29 +377,13 @@ class RosWorker(QThread):
                       for item in message.items]}, ensure_ascii=False))
 
     def _pickup(self, client, order_id: str) -> None:
-        if not client.service_is_ready():
-            self.notice.emit("取货服务尚未上线。")
-            return
         request = ConfirmPickup.Request()
         request.order_id = order_id
-        client.call_async(request).add_done_callback(
-            lambda future: self.notice.emit(
-                future.result().message if future.exception() is None
-                else f"取货确认失败：{future.exception()}"
-            )
-        )
+        self._request_service(client, request, "pickup")
 
     def _recover(self, client) -> None:
-        if not client.service_is_ready():
-            self.notice.emit("恢复服务尚未上线；请检查订单服务是否运行。")
-            return
         self.notice.emit("已请求恢复工作台，等待服务确认。")
-        client.call_async(Trigger.Request()).add_done_callback(
-            lambda future: self.notice.emit(
-                future.result().message if future.exception() is None
-                else f"恢复请求失败：{future.exception()}"
-            )
-        )
+        self._request_service(client, Trigger.Request(), "recover")
 
 
 class DebugPanel(OperatorPanel):

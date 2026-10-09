@@ -27,9 +27,10 @@ class FakeWorker(QObject):
     resources = pyqtSignal(str)
     inventory = pyqtSignal(str)
     queue_cleared = pyqtSignal(int, int)
+    operation_finished = pyqtSignal(str, bool, str)
 
     def cancel(self):
-        pass
+        self.cancel_requested = True
 
     def submit(self, *args):
         self.submission = args
@@ -225,6 +226,37 @@ class OperatorPanelTests(unittest.TestCase):
         self.assertTrue(report.exists())
         self.panel.tabs.setCurrentIndex(0)
         self.assertTrue(self.panel.clear_logs_button.isHidden())
+
+    def test_cancel_has_immediate_visible_feedback_and_response_state(self):
+        self.ready()
+        self.panel._set_resources(json.dumps({"bins": self.bins, "queue_enabled": True,
+            "can_register": True, "orders": [dict(order_id="active", priority=0, state="RUNNING",
+                completed=0, total=4, reason="")]}))
+        self.panel.cancel_button.click()
+        self.assertTrue(self.panel.worker.cancel_requested)
+        self.assertIn("发送取消", self.panel.operation_notice.text())
+        self.assertFalse(self.panel.cancel_button.isEnabled())
+        self.panel.worker.operation_finished.emit("cancel", True, "已转发取消请求")
+        self.assertEqual(self.panel.cancel_button.text(), "等待安全取消")
+        self.panel.worker.operation_finished.emit("cancel", False, "响应超时，未确认")
+        self.assertEqual(self.panel.cancel_button.text(), "取消")
+        self.assertIn("未确认", self.panel.operation_notice.text())
+
+    def test_new_task_removes_old_failure_and_queue_selection_survives_refresh(self):
+        self.ready()
+        self.panel.task_id.setText("old")
+        self.panel.failure_reason.setText("old failure")
+        self.panel.failure_reason.show()
+        jobs = [dict(order_id="active", priority=0, state="RUNNING", completed=0, total=4, reason=""),
+                dict(order_id="waiting", priority=0, state="QUEUED", completed=0, total=4, reason="")]
+        status = json.dumps({"bins": self.bins, "queue_enabled": True, "orders": jobs})
+        self.panel._set_resources(status)
+        self.assertTrue(self.panel.failure_reason.isHidden())
+        self.assertEqual(self.panel.failure_reason.text(), "")
+        self.panel.queue_table.selectRow(1)
+        self.panel._set_resources(status)
+        self.assertEqual(self.panel.queue_table.item(self.panel.queue_table.currentRow(), 0).text(), "waiting")
+        self.assertTrue(self.panel.queue_cancel_button.isEnabled())
 
     def test_latest_result_uses_completion_order_not_submission_order(self):
         self.ready()

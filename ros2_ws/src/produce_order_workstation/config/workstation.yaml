@@ -51,6 +51,7 @@ agent:
   max_tool_calls_per_item: 6
   max_consecutive_empty_perceptions: 5
 perception:
+  service_timeout_s: 20.0
   association_radius_m: 0.065
 workspace:
   x: [0.20, 0.60]
