@@ -5,6 +5,7 @@ from pathlib import Path
 from queue import Empty, Queue
 import sys
 import signal
+import time
 
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtWidgets import QApplication
@@ -35,6 +36,7 @@ class RosWorker(QThread):
     resources = pyqtSignal(str)
     inventory = pyqtSignal(str)
     registered = pyqtSignal(bool, str, str)
+    queue_cleared = pyqtSignal(int, int)
 
     def __init__(self):
         super().__init__()
@@ -44,12 +46,17 @@ class RosWorker(QThread):
         self._online = None
         self._queue_enabled = False
         self._event_counts = {}
+        self._clearing_queue = False
+        self._clear_queue_batch = None
 
     def submit(self, order_id: str, quantities: dict[str, int], prepare: bool, priority=0) -> None:
         self._commands.put(("submit", order_id, quantities, prepare, priority))
 
     def cancel_queued(self, order_id, discard_partial=False):
         self._commands.put(("cancel_queued", order_id, discard_partial))
+
+    def clear_queue(self, order_ids):
+        self._commands.put(("clear_queue", tuple(order_ids)))
 
     def refresh_inventory(self):
         self._commands.put(("refresh_inventory",))
@@ -115,6 +122,8 @@ class RosWorker(QThread):
                             self._pickup(pickup, command[1])
                         elif command[0] == "cancel_queued":
                             self._cancel_queued(queue_cancel, command[1], command[2])
+                        elif command[0] == "clear_queue":
+                            self._clear_queue(queue_cancel, command[1])
                         elif command[0] == "refresh_inventory":
                             self._trigger(refresh)
                         elif command[0] == "replenish":
@@ -124,6 +133,7 @@ class RosWorker(QThread):
                 if not running:
                     break
                 rclpy.spin_once(node, timeout_sec=0.1)
+                self._check_clear_queue_timeout()
                 now = node.get_clock().now().nanoseconds / 1e9
                 if now - last_check >= 1.0:
                     online = client.server_is_ready()
@@ -171,6 +181,56 @@ class RosWorker(QThread):
         client.call_async(CancelQueuedOrder.Request(order_id=order_id, discard_partial=discard_partial)).add_done_callback(
             lambda future: self.notice.emit(future.result().message if future.exception() is None
                                            else str(future.exception())))
+
+    def _clear_queue(self, client, order_ids):
+        """Reuse guarded cancellation: never cancel/discard a running or partial job."""
+        ids = list(dict.fromkeys(order_ids))
+        if self._clearing_queue:
+            self.notice.emit("正在清除队列，请等待")
+            return
+        if not client.service_is_ready():
+            self.notice.emit("队列服务离线，未清除订单")
+            self.queue_cleared.emit(0, len(ids))
+            return
+        self._clearing_queue = True
+        batch = {"remaining": set(ids), "counts": [0, 0], "deadline": time.monotonic() + 10.0}
+        self._clear_queue_batch = batch
+        if not ids:
+            self._finish_queue_clear_entry(batch, None, True)
+            return
+        for identifier in ids:
+            request = CancelQueuedOrder.Request(order_id=identifier, discard_partial=False)
+            def done(future, order_id=identifier):
+                try:
+                    success = future.result().success
+                except Exception:
+                    success = False
+                self._finish_queue_clear_entry(batch, order_id, success)
+            try:
+                client.call_async(request).add_done_callback(done)
+            except Exception:
+                self._finish_queue_clear_entry(batch, identifier, False)
+
+    def _finish_queue_clear_entry(self, batch, identifier, success):
+        if self._clear_queue_batch is not batch:
+            return
+        if identifier is not None:
+            if identifier not in batch["remaining"]:
+                return
+            batch["remaining"].remove(identifier)
+            batch["counts"][0 if success else 1] += 1
+        if not batch["remaining"]:
+            self._clear_queue_batch = None
+            self._clearing_queue = False
+            cleared, skipped = batch["counts"]
+            self.notice.emit(f"已清除 {cleared} 份待执行订单；跳过或未确认 {skipped} 份，请查看队列状态")
+            self.queue_cleared.emit(cleared, skipped)
+
+    def _check_clear_queue_timeout(self):
+        batch = self._clear_queue_batch
+        if batch and time.monotonic() > batch["deadline"]:
+            for identifier in tuple(batch["remaining"]):
+                self._finish_queue_clear_entry(batch, identifier, False)
 
     def _on_event(self, message):
         if not self._queue_enabled:

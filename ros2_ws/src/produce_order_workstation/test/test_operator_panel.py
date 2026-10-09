@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 try:
@@ -25,6 +26,7 @@ class FakeWorker(QObject):
     workcell_status = pyqtSignal(str, str, bool, bool)
     resources = pyqtSignal(str)
     inventory = pyqtSignal(str)
+    queue_cleared = pyqtSignal(int, int)
 
     def cancel(self):
         pass
@@ -34,6 +36,9 @@ class FakeWorker(QObject):
 
     def cancel_queued(self, order_id):
         self.canceled_order = order_id
+
+    def clear_queue(self, order_ids):
+        self.cleared_ids = order_ids
 
 
 class OperatorPanelTests(unittest.TestCase):
@@ -176,6 +181,50 @@ class OperatorPanelTests(unittest.TestCase):
         self.panel.queue_table.selectRow(0)
         self.panel._cancel_queued()
         self.assertEqual(self.panel.worker.canceled_order, "waiting")
+
+    def test_clear_queue_targets_only_unstarted_orders_and_requires_confirmation(self):
+        from PyQt5.QtWidgets import QMessageBox
+        self.ready()
+        jobs = [dict(order_id=state, priority=0, state=state, completed=count, total=4, reason="")
+                for state, count in (("QUEUED", 0), ("WAITING_STOCK", 0), ("WAITING_BIN", 0),
+                    ("RUNNING", 1), ("PAUSED", 1), ("WAITING_PICKUP", 4), ("DISPATCHING", 0))]
+        self.panel._set_resources(json.dumps({"bins": self.bins, "queue_enabled": True,
+            "can_register": True, "orders": jobs}))
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.No):
+            self.panel._clear_queue()
+        self.assertFalse(hasattr(self.panel.worker, "cleared_ids"))
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.Yes):
+            self.panel._clear_queue()
+        self.assertEqual(self.panel.worker.cleared_ids, ["QUEUED", "WAITING_STOCK", "WAITING_BIN"])
+        self.assertFalse(self.panel.queue_clear_button.isEnabled())
+        self.panel.worker.queue_cleared.emit(3, 0)
+        self.assertFalse(self.panel._queue_clear_pending)
+
+    def test_canceled_jobs_leave_queue_display_but_do_not_delete_resources(self):
+        self.ready()
+        jobs = [dict(order_id=state, priority=0, state=state, completed=0, total=1, reason="")
+                for state in ("CANCELED", "QUEUED")]
+        self.panel._set_resources(json.dumps({"bins": self.bins, "queue_enabled": True,
+            "can_register": True, "orders": jobs}))
+        self.assertEqual(self.panel.queue_table.rowCount(), 1)
+        self.assertEqual(self.panel.queue_table.item(0, 0).text(), "QUEUED")
+        self.assertIn("CANCELED", self.panel._queue_jobs)
+
+    def test_clear_logs_clears_only_display_and_button_is_on_log_tabs(self):
+        report = Path(self.temp.name) / "preserved.json"
+        report.write_text('{"status":"FAILED"}')
+        self.panel.events.appendPlainText("event")
+        self.panel.technical.appendPlainText("technical")
+        self.panel.task_id.setText("keep-task")
+        self.panel.tabs.setCurrentIndex(1)
+        self.assertFalse(self.panel.clear_logs_button.isHidden())
+        self.panel.clear_logs_button.click()
+        self.assertEqual(self.panel.events.toPlainText(), "")
+        self.assertEqual(self.panel.technical.toPlainText(), "")
+        self.assertEqual(self.panel.task_id.text(), "keep-task")
+        self.assertTrue(report.exists())
+        self.panel.tabs.setCurrentIndex(0)
+        self.assertTrue(self.panel.clear_logs_button.isHidden())
 
     def test_latest_result_uses_completion_order_not_submission_order(self):
         self.ready()

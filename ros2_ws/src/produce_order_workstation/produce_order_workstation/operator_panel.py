@@ -39,6 +39,7 @@ class OperatorPanel(QWidget):
         self._state = "UNKNOWN"
         self._bins = []
         self._queue_enabled = False
+        self._queue_clear_pending = False
         self._can_register = False
         self._registration_pending = False
         self._last_queue_terminal = None
@@ -50,6 +51,8 @@ class OperatorPanel(QWidget):
         self.setMinimumSize(1000, 700)
         self.setStyleSheet(STYLE)
         self._build_ui()
+        if hasattr(self.worker, "queue_cleared"):
+            self.worker.queue_cleared.connect(self._on_queue_cleared)
         self._new_id()
         self._refresh_history()
         self._restore_last_task()
@@ -236,6 +239,12 @@ class OperatorPanel(QWidget):
         records = Card()
         self.records = records
         self.tabs = QTabWidget()
+        self.clear_logs_button = QPushButton("清空日志")
+        self.clear_logs_button.setToolTip("仅清空事件和技术日志显示，保留订单报告及系统日志")
+        self.clear_logs_button.clicked.connect(self._clear_logs)
+        self.tabs.setCornerWidget(self.clear_logs_button)
+        self.tabs.currentChanged.connect(lambda index: self.clear_logs_button.setVisible(index in (1, 2)))
+        self.clear_logs_button.hide()
         self.history = QTableWidget(0, 5)
         self.history.setHorizontalHeaderLabels(["订单", "商品", "结果", "完成", "取货"])
         self.history.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -287,11 +296,14 @@ class OperatorPanel(QWidget):
         actions = QHBoxLayout()
         self.queue_cancel_button = QPushButton("取消选中排队单")
         self.queue_cancel_button.clicked.connect(self._cancel_queued)
+        self.queue_clear_button = QPushButton("清除待执行队列")
+        self.queue_clear_button.setToolTip("保留正在执行、已部分装箱及待取货的订单")
+        self.queue_clear_button.clicked.connect(self._clear_queue)
         self.scan_button = QPushButton("视觉复查")
         self.scan_button.clicked.connect(lambda: self.worker.refresh_inventory())
         self.replenish_button = QPushButton("补货准备")
         self.replenish_button.clicked.connect(self._replenish)
-        for button in (self.queue_cancel_button, self.scan_button, self.replenish_button):
+        for button in (self.queue_cancel_button, self.queue_clear_button, self.scan_button, self.replenish_button):
             actions.addWidget(button)
         queue_layout.addLayout(actions)
         self.tabs.addTab(queue_page, "任务调度")
@@ -349,6 +361,8 @@ class OperatorPanel(QWidget):
             spin.setEnabled(editable)
         self.scan_button.setEnabled(synced and self._queue_enabled)
         self.queue_cancel_button.setEnabled(synced and self._queue_enabled)
+        self.queue_clear_button.setEnabled(synced and self._queue_enabled
+            and not self._queue_clear_pending and bool(self._clearable_orders()))
         self.replenish_button.setEnabled(synced and self._queue_enabled and self._state == "READY")
 
     def _set_connected(self, online):
@@ -405,8 +419,9 @@ class OperatorPanel(QWidget):
                  "WAITING_PICKUP": "等待取货", "COLLECTED": "已取货", "FAILED": "失败",
                  "CANCELED": "已取消", "CANCELLED": "已取消", "PAUSED": "暂停 · 保留箱位",
                  "EXECUTION_UNCERTAIN": "执行结果不明 · 待核对"}
-        self.queue_table.setRowCount(len(orders))
-        for row, job in enumerate(orders):
+        visible_orders = [job for job in orders if job["state"] not in ("CANCELED", "CANCELLED")]
+        self.queue_table.setRowCount(len(visible_orders))
+        for row, job in enumerate(visible_orders):
             reason = job.get("reason", "")
             if job.get("missing"):
                 reason += " · " + " / ".join(f"{NAMES.get(sku, sku)}缺少可用观测 {count}"
@@ -436,6 +451,31 @@ class OperatorPanel(QWidget):
                 self._set_progress(terminal["completed"], terminal["total"])
                 self.failure_reason.setText(terminal["reason"])
                 self.failure_reason.setVisible(terminal["state"] != "WAITING_PICKUP")
+
+    def _clearable_orders(self):
+        return [identifier for identifier, job in getattr(self, "_queue_jobs", {}).items()
+                if job["state"] in ("QUEUED", "WAITING_STOCK", "WAITING_BIN")
+                and not job.get("completed", 0)]
+
+    def _clear_queue(self):
+        ids = self._clearable_orders()
+        if not ids or self._queue_clear_pending or not self.queue_clear_button.isEnabled():
+            return
+        if QMessageBox.question(self, "清除待执行队列",
+                f"取消当前 {len(ids)} 份尚未执行的订单？\n正在执行、已部分装箱和待取货订单将保留。",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+        self._queue_clear_pending = True
+        self.queue_clear_button.setEnabled(False)
+        self.worker.clear_queue(ids)
+
+    def _on_queue_cleared(self, cleared, skipped):
+        self._queue_clear_pending = False
+        self._check_status()
+
+    def _clear_logs(self):
+        self.events.clear()
+        self.technical.clear()
 
     def _cancel_queued(self):
         row = self.queue_table.currentRow()
