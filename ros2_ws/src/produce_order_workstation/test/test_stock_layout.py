@@ -1,4 +1,5 @@
 from copy import deepcopy
+from collections import Counter
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -25,6 +26,19 @@ def test_new_mixed_layout_passes_and_keeps_four_of_every_sku():
     validate_stock_layout(scene, config)
     for sku in config["aliases"]:
         assert sum(entity.prefab_name == sku for entity in scene.entities) == 4
+
+
+def test_layout_keeps_both_banks_mixed_and_stronger_clearances():
+    config, scene = fixtures()
+    policy = config["stock"]["layout"]
+    assert policy["min_center_spacing_m"] >= .10
+    assert policy["min_bin_distance_m"] >= .17
+    assert policy["min_base_radius_m"] >= .40
+    for sign in (-1, 1):
+        bank = [item for item in scene.entities if item.prefab_name in config["aliases"]
+                and item.pose.pose.position.y * sign > 0]
+        assert Counter(item.prefab_name for item in bank) == dict.fromkeys(config["aliases"], 2)
+    validate_stock_layout(scene, config)
 
 
 @pytest.mark.parametrize("position, reason", [

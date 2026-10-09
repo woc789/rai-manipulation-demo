@@ -42,9 +42,9 @@ stock:
   # Geometric setup guardrails, NOT a substitute for MoveIt collision/IK checks.
   # Mixed stock occupies two side banks; the tight base/centre corridor is empty.
   layout:
-    min_base_radius_m: 0.39
-    min_center_spacing_m: 0.085
-    min_bin_distance_m: 0.14
+    min_base_radius_m: 0.40
+    min_center_spacing_m: 0.10
+    min_bin_distance_m: 0.17
 agent:
   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
   model: qwen3.7-flash-2026-07-15
