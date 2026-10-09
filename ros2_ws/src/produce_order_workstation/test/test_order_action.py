@@ -72,6 +72,31 @@ def test_scan_failure_has_error_state_and_keeps_waiting_order():
     server.publish_status.assert_called_once()
 
 
+def test_recovery_cleanup_handles_missing_entity_after_successful_delete(monkeypatch):
+    station = Workstation(MagicMock(), CONFIG)
+    first, second = SimpleNamespace(name="first"), SimpleNamespace(name="second")
+    bridge = MagicMock()
+    bridge.spawned_entities = [first, second]
+    def delete(entity):
+        if entity is first:
+            bridge.spawned_entities.remove(first)
+        else:
+            raise RuntimeError("Could not find entity with given name")
+    bridge._despawn_entity.side_effect = delete
+    station._scene_bridge = bridge
+    station.synchronize_scene = MagicMock(return_value=[])
+    station._source_entities = MagicMock(return_value={
+        f"{sku}-{index}": (SimpleNamespace(prefab_name=sku), None)
+        for sku, count in CONFIG["stock"]["initial_counts"].items() for index in range(count)
+    })
+    monkeypatch.setattr(runtime.time, "sleep", lambda _: None)
+    station.prepare_scene(PACKAGE / "config/demo_scene.yaml")
+    assert bridge._despawn_entity.call_args_list == [call(first), call(second)]
+    assert bridge.spawned_entities == []
+    assert bridge.service_timeout_sec == CONFIG["scene_service_timeout_s"]
+    assert station._scene_prepared
+
+
 def test_motion_feedback_retains_order_counts_between_item_events():
     server = SimpleNamespace(workstation=SimpleNamespace(_completed_by_sku={"corn": 1, "carrot": 1}))
     handle = MagicMock()

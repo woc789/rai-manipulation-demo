@@ -157,6 +157,7 @@ class Workstation:
         validate_stock_layout(scene, self.config)
         if self._scene_bridge is None:
             self._scene_bridge = O3DExROS2Bridge(self.connector)
+        self._scene_bridge.service_timeout_sec = self.config.get("scene_service_timeout_s", 20.0)
         # The Action server outlives O3DE. After a simulator restart its bridge
         # still remembers entities from the previous world, which no longer
         # exist. Remove only those confirmed missing by the delete service;
@@ -164,7 +165,7 @@ class Workstation:
         while self._scene_bridge.spawned_entities:
             stale = self._scene_bridge.spawned_entities[0]
             try:
-                self._scene_bridge.clear_scene()
+                self._scene_bridge._despawn_entity(stale)
             except RuntimeError as exc:
                 if "Could not find entity with given name" not in str(exc):
                     raise

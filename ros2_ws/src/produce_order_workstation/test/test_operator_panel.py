@@ -309,6 +309,11 @@ class OperatorPanelTests(unittest.TestCase):
         self.assertEqual(self.panel.incident_card.objectName(), "taskSupport")
         self.assertEqual(self.panel.help_menu_button.text(), "诊断与帮助")
 
+    def test_recovery_error_is_not_overwritten_by_generic_confirmation_hint(self):
+        self.ready()
+        self.panel._set_workcell_status("RECOVERY_REQUIRED", "场景恢复失败：delete_entity 超时", False, True)
+        self.assertIn("delete_entity", self.panel.workcell_notice.text())
+
     def test_scanning_is_visible_and_ready_clears_incident(self):
         self.ready()
         self.panel._set_workcell_status("SCANNING", "扫描中", False, False)

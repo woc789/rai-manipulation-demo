@@ -406,7 +406,8 @@ class OperatorPanel(QWidget):
                 ids = ', '.join(b['bin_id'] for b in self._bins if b.get('state') == 'WAITING_PICKUP')
                 self.workcell_notice.setText(f"现场需要恢复；先确认取走 {ids} 的已完成订单，再恢复失败现场。")
             elif self._can_recover:
-                self.workcell_notice.setText("失败现场需核对；确认后可恢复工作台，将清理失败箱和桌面。")
+                self.workcell_notice.setText(self._state_reason if self._state_reason.startswith("场景恢复失败")
+                    else "失败现场需核对；确认后可恢复工作台，将清理失败箱和桌面。")
         self.pickup_button.setEnabled(synced and self._can_pickup and self.pickup_orders.count() > 0 and not self._order_active)
         self.cancel_button.setEnabled(synced and self._order_active and self._accepted
             and not self._cancel_requesting and not self._cancel_waiting)
