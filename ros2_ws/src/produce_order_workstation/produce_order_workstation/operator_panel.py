@@ -45,6 +45,9 @@ class OperatorPanel(QWidget):
         self._cancel_for_id = ""
         self._can_register = False
         self._registration_pending = False
+        self._registration_order_id = None
+        self._registration_reconcile_allowed = False
+        self._submitted_order_id = None
         self._last_queue_terminal = None
         self._started = start_worker
         self.worker = worker_factory()
@@ -144,6 +147,9 @@ class OperatorPanel(QWidget):
         page.addLayout(metrics)
         self.workcell_notice = label("等待工作台状态同步", "muted", wrap=True)
         page.addWidget(self.workcell_notice)
+        self.operation_notice = label("", "muted", wrap=True)
+        self.operation_notice.hide()
+        page.addWidget(self.operation_notice)
         main = QHBoxLayout()
         main.setSpacing(16)
         form = Card()
@@ -243,9 +249,6 @@ class OperatorPanel(QWidget):
         page.addLayout(main)
         records = Card()
         self.records = records
-        self.operation_notice = label("", "muted", wrap=True)
-        self.operation_notice.hide()
-        records.box.addWidget(self.operation_notice)
         self.tabs = QTabWidget()
         self.clear_logs_button = QPushButton("清空日志")
         self.clear_logs_button.setToolTip("仅清空事件和技术日志显示，保留订单报告及系统日志")
@@ -359,6 +362,7 @@ class OperatorPanel(QWidget):
         self.submit_button.setEnabled(synced and self._valid and (
             self._can_register and not self._registration_pending if self._queue_enabled
             else self._can_submit and not self._order_active))
+        self.submit_button.setText("提交中…" if self._registration_pending else "提交订单")
         self.recover_button.setEnabled(synced and self._can_recover and not self._order_active)
         self.pickup_button.setEnabled(synced and self._can_pickup and self.pickup_orders.count() > 0 and not self._order_active)
         self.cancel_button.setEnabled(synced and self._order_active and self._accepted
@@ -396,6 +400,9 @@ class OperatorPanel(QWidget):
         self._render_bins()
 
     def _set_workcell_status(self, state, reason, can_submit, can_recover):
+        # Compatibility with an older server that labels a failed scan READY.
+        if state == "READY" and reason.startswith("视觉库存复查失败"):
+            state = "INVENTORY_ERROR"
         self._state, self._can_submit, self._can_recover = state, can_submit, can_recover
         self.workcell_notice.setText(reason if state not in ("READY", "RUNNING") else "")
         self.workcell_notice.setVisible(bool(self.workcell_notice.text()))
@@ -413,6 +420,9 @@ class OperatorPanel(QWidget):
         self._bins = status.get("bins", [])
         self._queue_enabled = bool(status.get("queue_enabled"))
         self._can_register = bool(status.get("can_register"))
+        if self._registration_pending and self._registration_reconcile_allowed and any(job.get("order_id") == self._registration_order_id
+                for job in status.get("orders", [])):
+            self._on_registered(True, self._registration_order_id, "状态台账确认订单已登记")
         self._render_queue(status.get("orders", []))
         self._can_pickup = bool(status.get("can_pickup"))
         selected = self.pickup_orders.currentData()
@@ -468,6 +478,22 @@ class OperatorPanel(QWidget):
             self._set_progress(running["completed"], running["total"])
         else:
             self._cancel_requesting = self._cancel_waiting = False
+            waiting = [job for job in orders if job["state"] in (
+                "QUEUED", "WAITING_STOCK", "WAITING_BIN", "PAUSED")]
+            focus = next((job for job in waiting if job["order_id"] == self._submitted_order_id),
+                         waiting[0] if waiting else None)
+            if self._registration_pending:
+                return
+            if focus:
+                self.task_id.setText(focus["order_id"])
+                self.task_status.setText(names[focus["state"]])
+                self.stage.setText(names[focus["state"]])
+                self.steps.set_stage(0)
+                self._set_progress(focus["completed"], focus["total"])
+                self.failure_reason.setText(focus.get("reason", ""))
+                self.failure_reason.setVisible(bool(focus.get("reason")))
+                self._last_queue_terminal = None
+                return
             terminal = max((job for job in orders if job["state"] in (
                 "WAITING_PICKUP", "FAILED", "CANCELLED")),
                 key=lambda job: job.get("finished_sequence", 0), default=None)
@@ -553,10 +579,21 @@ class OperatorPanel(QWidget):
         self.worker.refresh_inventory()
 
     def _on_registered(self, success, order_id, message):
+        if not self._registration_pending or order_id != self._registration_order_id:
+            return
         self._registration_pending = False
-        self._append(f"{order_id} · {message}")
+        self._registration_order_id = None
+        self._on_notice(f"{order_id} · {message}")
         if success:
+            self._submitted_order_id = order_id
             self._new_id()
+            if not self._order_active:
+                self.task_status.setText("已登记 · 等待调度")
+                self.stage.setText("等待调度")
+        elif not self._order_active:
+            self.task_status.setText("未确认" if "未确认" in message else "未接收")
+            self.failure_reason.setText(message)
+            self.failure_reason.show()
         self._update_controls()
 
     def _set_inventory(self, payload):
@@ -601,6 +638,17 @@ class OperatorPanel(QWidget):
         validate_order(order, self.config)
         if self._queue_enabled:
             self._registration_pending = True
+            self._registration_order_id = order.order_id
+            self._registration_reconcile_allowed = order.order_id not in getattr(self, "_queue_jobs", {})
+            self._on_notice(f"正在提交 {order.order_id}，等待登记确认…")
+            if not self._order_active:
+                self.task_id.setText(order.order_id)
+                self.task_status.setText("提交中")
+                self.stage.setText("等待登记确认")
+                self.steps.set_stage(0)
+                self._set_progress(0, order.total_items)
+                self.failure_reason.clear()
+                self.failure_reason.hide()
             self._update_controls()
             self.worker.submit(order.order_id, {line.sku: line.quantity for line in order.lines},
                                True, self.priority.value())

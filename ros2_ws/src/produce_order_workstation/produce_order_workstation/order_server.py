@@ -252,7 +252,8 @@ class OrderActionServer(Node):
         finally:
             with self._lock:
                 self._busy = False
-                self._state, self._state_reason = "READY", reason
+                self._state = "READY" if self._inventory_ready else "INVENTORY_ERROR"
+                self._state_reason = reason
             self.publish_status()
 
     def check_dispatch_timeout(self):
@@ -416,7 +417,7 @@ class OrderActionServer(Node):
             status = {
                 "state": self._state,
                 "reason": self._state_reason,
-                "can_submit": self._scene_ready and not self._busy and self.bin_manager.can_allocate("A"),
+                "can_submit": self._scene_ready and self._inventory_ready and not self._busy and self.bin_manager.can_allocate("A"),
                 "can_recover": not self._busy and not self._dispatch_order_id and self._state not in (
                     "INITIALIZING", "REPLENISHING", "RECOVERING"
                 ) and self.bin_manager.can_reset(),

@@ -157,7 +157,7 @@ class OperatorPanelTests(unittest.TestCase):
         self.assertEqual(self.panel.worker.submission[-1], 10)
         self.assertEqual(self.panel.task_id.text(), "running")
         self.assertFalse(self.panel.submit_button.isEnabled())
-        self.panel._on_registered(True, "queued", "已登记")
+        self.panel._on_registered(True, self.panel.worker.submission[0], "已登记")
         self.assertTrue(self.panel.submit_button.isEnabled())
         self.assertEqual(self.panel.task_count.text(), "1 / 4")
 
@@ -172,6 +172,72 @@ class OperatorPanelTests(unittest.TestCase):
         self.assertEqual(self.panel.task_id.text(), "uncertain")
         self.assertIn("待核对", self.panel.task_status.text())
         self.assertFalse(self.panel.recover_button.isEnabled())
+
+    def test_queue_submit_button_immediately_displays_submission_and_reply(self):
+        self.ready()
+        self.panel._set_resources(json.dumps({"bins": self.bins, "queue_enabled": True,
+            "can_register": True, "orders": []}))
+        self.panel.submit_button.click()
+        identifier = self.panel.worker.submission[0]
+        self.assertEqual(self.panel.submit_button.text(), "提交中…")
+        self.assertEqual(self.panel.task_status.text(), "提交中")
+        self.assertEqual(self.panel.task_id.text(), identifier)
+        self.assertIn("正在提交", self.panel.operation_notice.text())
+        self.panel._on_registered(True, identifier, "已登记")
+        self.assertIn("已登记", self.panel.operation_notice.text())
+        self.assertEqual(self.panel.task_status.text(), "已登记 · 等待调度")
+        self.assertTrue(self.panel.submit_button.isEnabled())
+
+    def test_registration_timeout_unlocks_and_late_reply_does_not_change_draft(self):
+        self.ready()
+        self.panel._set_resources(json.dumps({"bins": self.bins, "queue_enabled": True,
+            "can_register": True, "orders": []}))
+        self.panel.submit_button.click()
+        identifier = self.panel.worker.submission[0]
+        self.panel._on_registered(False, identifier, "登记结果未确认，不要重复下单")
+        self.assertFalse(self.panel._registration_pending)
+        self.assertTrue(self.panel.submit_button.isEnabled())
+        self.assertEqual(self.panel.task_status.text(), "未确认")
+        self.panel._on_registered(True, identifier, "late")
+        self.assertEqual(self.panel.order_id.text(), identifier)
+
+    def test_status_reconciles_pending_registration_and_shows_waiting_task(self):
+        self.ready()
+        self.panel._set_resources(json.dumps({"bins": self.bins, "queue_enabled": True,
+            "can_register": True, "orders": []}))
+        self.panel.submit_button.click()
+        identifier = self.panel.worker.submission[0]
+        job = dict(order_id=identifier, state="WAITING_STOCK", reason="视觉库存复查失败",
+                   priority=0, completed=0, total=4)
+        self.panel._set_resources(json.dumps({"bins": self.bins, "queue_enabled": True,
+            "can_register": True, "orders": [job]}))
+        self.assertFalse(self.panel._registration_pending)
+        self.assertEqual(self.panel.task_id.text(), identifier)
+        self.assertEqual(self.panel.task_status.text(), "等待库存核对")
+        self.assertIn("复查失败", self.panel.failure_reason.text())
+        self.assertFalse(self.panel.failure_reason.isHidden())
+
+    def test_old_server_scan_failure_is_not_hidden_as_ready(self):
+        self.ready()
+        self.panel._set_workcell_status("READY", "视觉库存复查失败：Timeout", True, False)
+        self.assertEqual(self.panel._state, "INVENTORY_ERROR")
+        self.assertIn("复查失败", self.panel.workcell_notice.text())
+        self.assertFalse(self.panel.workcell_notice.isHidden())
+
+    def test_existing_id_in_snapshot_cannot_confirm_a_new_registration(self):
+        self.ready()
+        job = dict(order_id="old-id", state="CANCELED", reason="old", priority=0,
+                   completed=0, total=1)
+        status = json.dumps({"bins": self.bins, "queue_enabled": True,
+            "can_register": True, "orders": [job]})
+        self.panel._set_resources(status)
+        self.panel.order_id.setText("old-id")
+        self.panel.submit_button.click()
+        self.panel._set_resources(status)
+        self.assertTrue(self.panel._registration_pending)
+        self.panel._on_registered(False, "old-id", "订单号已登记")
+        self.assertEqual(self.panel.order_id.text(), "old-id")
+        self.assertIn("订单号已登记", self.panel.operation_notice.text())
 
     def test_queue_displays_wait_reason_and_cancel_targets_selected_id(self):
         self.ready()

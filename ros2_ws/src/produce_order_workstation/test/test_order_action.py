@@ -57,6 +57,21 @@ def test_startup_configures_wrapped_perception_component(monkeypatch):
     assert component.config.service_timeout == CONFIG["perception"]["service_timeout_s"]
 
 
+def test_scan_failure_has_error_state_and_keeps_waiting_order():
+    from threading import RLock
+    pending = SimpleNamespace(state="QUEUED", reason="")
+    server = SimpleNamespace(workstation=MagicMock(), config=CONFIG, queue=MagicMock(),
+        _lock=RLock(), _inventory_ready=True, _busy=True, get_logger=MagicMock(),
+        publish_status=MagicMock())
+    server.queue.pending.return_value = [pending]
+    server.workstation.scan_inventory.side_effect = TimeoutError("test vision timeout")
+    OrderActionServer._scan_stock(server)
+    assert server._state == "INVENTORY_ERROR"
+    assert not server._inventory_ready and not server._busy
+    assert pending.state == "WAITING_STOCK" and "复查失败" in pending.reason
+    server.publish_status.assert_called_once()
+
+
 def test_motion_feedback_retains_order_counts_between_item_events():
     server = SimpleNamespace(workstation=SimpleNamespace(_completed_by_sku={"corn": 1, "carrot": 1}))
     handle = MagicMock()

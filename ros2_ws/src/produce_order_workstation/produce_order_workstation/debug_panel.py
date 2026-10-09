@@ -50,6 +50,7 @@ class RosWorker(QThread):
         self._clearing_queue = False
         self._clear_queue_batch = None
         self._service_waits = {}
+        self._registration_waits = {}
 
     def submit(self, order_id: str, quantities: dict[str, int], prepare: bool, priority=0) -> None:
         self._commands.put(("submit", order_id, quantities, prepare, priority))
@@ -161,13 +162,21 @@ class RosWorker(QThread):
             return
         request = SubmitOrder.Request(order_id=order_id, zone="A", priority=priority,
             lines=[OrderLine(sku=sku, quantity=count) for sku, count in quantities.items() if count])
+        try:
+            future = client.call_async(request)
+        except Exception as exc:
+            self.registered.emit(False, order_id, f"登记请求未发送：{exc}")
+            return
+        self._registration_waits[future] = (order_id, client, time.monotonic() + 10.0)
         def done(future):
+            if self._registration_waits.pop(future, None) is None:
+                return
             try:
                 response = future.result()
                 self.registered.emit(response.success, order_id, response.message)
             except Exception as exc:
                 self.registered.emit(False, order_id, str(exc))
-        client.call_async(request).add_done_callback(done)
+        future.add_done_callback(done)
 
     def _trigger(self, client, operation="maintenance"):
         self._request_service(client, Trigger.Request(), operation)
@@ -200,6 +209,12 @@ class RosWorker(QThread):
 
     def _check_service_timeouts(self):
         now = time.monotonic()
+        for future, (order_id, client, deadline) in tuple(self._registration_waits.items()):
+            if now > deadline:
+                self._registration_waits.pop(future, None)
+                client.remove_pending_request(future)
+                self.registered.emit(False, order_id,
+                    "登记响应超过 10 秒，结果未确认；请在任务调度中核对原订单号，不要换号重复下单")
         for future, (operation, client, deadline) in tuple(self._service_waits.items()):
             if now > deadline:
                 self._service_waits.pop(future, None)

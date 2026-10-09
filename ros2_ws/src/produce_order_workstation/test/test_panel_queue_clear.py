@@ -71,6 +71,35 @@ class QueueClearTests(unittest.TestCase):
         reply.set_result(SimpleNamespace(success=True, message="late"))
         self.assertEqual(len(replies), 1)
 
+    def test_registration_timeout_reports_unknown_and_ignores_late_reply(self):
+        results = []
+        self.worker.registered.connect(lambda *result: results.append(result))
+        reply = Future()
+        self.client.call_async.return_value = reply
+        self.worker._register(self.client, ("submit", "reg-test", {"corn": 1}, True, 0))
+        deadline = self.worker._registration_waits[reply][2]
+        with patch("produce_order_workstation.debug_panel.time.monotonic", return_value=deadline + 1):
+            self.worker._check_service_timeouts()
+        self.assertEqual(results[0][0:2], (False, "reg-test"))
+        self.assertIn("未确认", results[0][2])
+        self.client.remove_pending_request.assert_called_once_with(reply)
+        reply.set_result(SimpleNamespace(success=True, message="late"))
+        self.assertEqual(len(results), 1)
+
+    def test_registration_success_and_send_failure_release_wait(self):
+        results = []
+        self.worker.registered.connect(lambda *result: results.append(result))
+        reply = Future()
+        self.client.call_async.return_value = reply
+        self.worker._register(self.client, ("submit", "reg-test", {"corn": 1}, True, 0))
+        reply.set_result(SimpleNamespace(success=True, message="已登记"))
+        self.assertEqual(results[-1], (True, "reg-test", "已登记"))
+        self.assertFalse(self.worker._registration_waits)
+        self.client.call_async.side_effect = RuntimeError("fake send failure")
+        self.worker._register(self.client, ("submit", "reg-test-2", {"corn": 1}, True, 0))
+        self.assertFalse(results[-1][0])
+        self.assertIn("未发送", results[-1][2])
+
 
 if __name__ == "__main__":
     unittest.main()
