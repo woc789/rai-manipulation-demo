@@ -1,5 +1,9 @@
 # fulfillment: one mixed order per bin; classification: legacy SKU bins.
 operation_mode: fulfillment
+scheduler:
+  accept_timeout_s: 15.0
+  feedback_timeout_s: 180.0
+  result_timeout_s: 900.0
 camera:
   color: /color_image5
   depth: /depth_image5

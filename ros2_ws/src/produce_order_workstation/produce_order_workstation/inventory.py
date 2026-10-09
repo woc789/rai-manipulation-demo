@@ -42,7 +42,7 @@ class InventoryLedger:
             self._items.clear()
             self.epoch += 1
 
-    def observe(self, sku, frame_id, points):
+    def observe(self, sku, frame_id, points, *, complete_scan=True):
         if not sku or not frame_id:
             raise ValueError("Observation needs SKU and frame")
         points = [tuple(float(v) for v in point) for point in points]
@@ -50,6 +50,9 @@ class InventoryLedger:
             raise ValueError("Invalid visual observation position")
         with self._lock:
             self._expire()
+            previous = [item for item in self._items.values()
+                        if item.sku == sku and item.frame_id == frame_id
+                        and item.state in ("AVAILABLE", "UNKNOWN", "RESERVED")]
             used, identities = set(), []
             for point in points:
                 matches = [item for item in self._items.values()
@@ -67,7 +70,19 @@ class InventoryLedger:
                 item.state = "RESERVED" if item.order_id else "AVAILABLE"
                 used.add(item.item_id)
                 identities.append(item.item_id)
-            # Missing detections are NOT deletions, zero stock, or confirmations.
+            if complete_scan:
+                unmatched = [item for item in previous if item.item_id not in used]
+                for item in unmatched:
+                    # Retain history/ownership, but do not promise an old location
+                    # alongside a new candidate that may be the same moved object.
+                    item.state = "UNKNOWN"
+                if any(item.order_id for item in unmatched):
+                    # A new identity may be a moved reserved object. Do not hand
+                    # it to a different order until association is resolved.
+                    for identity in identities:
+                        if not self._items[identity].order_id:
+                            self._items[identity].state = "UNKNOWN"
+            # An empty scan means uncertainty, not deletion or proven zero stock.
             return identities
 
     def reserve(self, item_id, order_id, refreshed_position=None):

@@ -403,7 +403,8 @@ class OperatorPanel(QWidget):
         names = {"QUEUED": "排队", "DISPATCHING": "资源已预留", "RUNNING": "执行中",
                  "WAITING_STOCK": "等待库存核对", "WAITING_BIN": "等待箱位",
                  "WAITING_PICKUP": "等待取货", "COLLECTED": "已取货", "FAILED": "失败",
-                 "CANCELED": "已取消", "CANCELLED": "已取消", "PAUSED": "暂停 · 保留箱位"}
+                 "CANCELED": "已取消", "CANCELLED": "已取消", "PAUSED": "暂停 · 保留箱位",
+                 "EXECUTION_UNCERTAIN": "执行结果不明 · 待核对"}
         self.queue_table.setRowCount(len(orders))
         for row, job in enumerate(orders):
             reason = job.get("reason", "")
@@ -418,7 +419,7 @@ class OperatorPanel(QWidget):
                 self.queue_table.setItem(row, col, cell)
         if not self._queue_enabled:
             return
-        running = next((job for job in orders if job["state"] in ("RUNNING", "DISPATCHING")), None)
+        running = next((job for job in orders if job["state"] in ("RUNNING", "DISPATCHING", "EXECUTION_UNCERTAIN")), None)
         self._order_active = self._accepted = running is not None
         if running:
             self.task_id.setText(running["order_id"])

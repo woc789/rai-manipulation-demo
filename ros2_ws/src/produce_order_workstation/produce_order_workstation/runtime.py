@@ -621,7 +621,7 @@ class Workstation:
         if item_id is None:
             if self.require_order_reservation:
                 raise PerceptionMismatch("Target is not part of this order reservation")
-            item_id = self.inventory.observe(sku, self.config["camera"]["target_frame"], [source])[0]
+            item_id = self.inventory.observe(sku, self.config["camera"]["target_frame"], [source], complete_scan=False)[0]
         self.inventory.reserve(item_id, order.order_id, refreshed_position=source)
         self.event(order.order_id, "INVENTORY_RESERVED", item_id=item_id, sku=sku)
         self.event(

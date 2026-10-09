@@ -15,6 +15,7 @@ STATE_NAMES = {
     "UNKNOWN": "状态未知", "OFFLINE": "离线",
     "PAUSED": "暂停 · 保留箱位", "SCANNING": "视觉复查中",
     "CANCELED": "已取消",
+    "EXECUTION_UNCERTAIN": "执行结果不明 · 待核对",
 }
 
 

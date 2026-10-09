@@ -155,6 +155,18 @@ class OperatorPanelTests(unittest.TestCase):
         self.assertTrue(self.panel.submit_button.isEnabled())
         self.assertEqual(self.panel.task_count.text(), "1 / 4")
 
+    def test_uncertain_execution_remains_active_and_blocks_recovery(self):
+        self.ready()
+        self.panel._set_workcell_status("RECOVERY_REQUIRED", "Action 超时，等待核对", False, False)
+        self.panel._set_resources(json.dumps({"bins": self.bins, "queue_enabled": True,
+            "can_register": True, "can_pickup": False, "orders": [
+                {"order_id": "uncertain", "priority": 0, "state": "EXECUTION_UNCERTAIN",
+                 "completed": 1, "total": 3, "reason": "等待实际结果"}]}))
+        self.assertTrue(self.panel._order_active)
+        self.assertEqual(self.panel.task_id.text(), "uncertain")
+        self.assertIn("待核对", self.panel.task_status.text())
+        self.assertFalse(self.panel.recover_button.isEnabled())
+
     def test_queue_displays_wait_reason_and_cancel_targets_selected_id(self):
         self.ready()
         self.panel._set_resources(json.dumps({"bins": self.bins, "queue_enabled": True,

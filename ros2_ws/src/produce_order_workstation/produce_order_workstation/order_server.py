@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 from threading import Lock, Thread
+import time
+from math import isfinite
 
 from ament_index_python.packages import get_package_share_directory
 import rclpy
@@ -65,6 +67,16 @@ class OrderActionServer(Node):
         self.queue = OrderQueue()
         self._dispatch_order_id = None
         self._dispatch_handle = None
+        self._dispatch_started = None
+        self._last_dispatch_feedback = None
+        self._dispatch_timed_out = False
+        watchdog = self.config.get("scheduler", {})
+        self._accept_timeout = float(watchdog.get("accept_timeout_s", 15.0))
+        self._feedback_timeout = float(watchdog.get("feedback_timeout_s", 180.0))
+        self._result_timeout = float(watchdog.get("result_timeout_s", 900.0))
+        if any(not isfinite(value) or value <= 0 for value in
+               (self._accept_timeout, self._feedback_timeout, self._result_timeout)):
+            raise ValueError("Scheduler watchdog timeouts must be finite and positive")
         self._scan_requested = False
         self._inventory_ready = False
         self._order_contexts = {}
@@ -115,6 +127,8 @@ class OrderActionServer(Node):
         self._dispatch_client = ActionClient(self, ExecuteOrder, "/produce_orders/execute",
                                             callback_group=ReentrantCallbackGroup())
         self._dispatch_timer = self.create_timer(1.0, self.dispatch_pending,
+                                                 callback_group=ReentrantCallbackGroup())
+        self._watchdog_timer = self.create_timer(1.0, self.check_dispatch_timeout,
                                                  callback_group=ReentrantCallbackGroup())
         Thread(target=self._prepare_initial_stock, daemon=True).start()
 
@@ -207,6 +221,9 @@ class OrderActionServer(Node):
             if job is None:
                 return
             self._dispatch_order_id = job.order.order_id
+            self._dispatch_started = time.monotonic()
+            self._last_dispatch_feedback = self._dispatch_started
+            self._dispatch_timed_out = False
         goal = ExecuteOrder.Goal()
         goal.order_id, goal.zone, goal.prepare_scene = job.order.order_id, job.order.zone, True
         from produce_order_interfaces.msg import OrderLine as LineMessage
@@ -215,7 +232,8 @@ class OrderActionServer(Node):
             future = self._dispatch_client.send_goal_async(goal,
                 feedback_callback=lambda message, identifier=job.order.order_id:
                     self._queue_feedback(identifier, message))
-            future.add_done_callback(self._dispatch_response)
+            future.add_done_callback(lambda reply, identifier=job.order.order_id:
+                                     self._dispatch_response(reply, identifier))
         except Exception as exc:
             self._dispatch_failed(str(exc))
 
@@ -237,20 +255,79 @@ class OrderActionServer(Node):
                 self._state, self._state_reason = "READY", reason
             self.publish_status()
 
-    def _dispatch_response(self, future):
+    def check_dispatch_timeout(self):
+        """Quarantine unknown execution; a timeout is NOT proof the robot stopped."""
+        with self._lock:
+            if not self._dispatch_order_id or self._dispatch_timed_out:
+                return
+            identifier = self._dispatch_order_id
+        self._quarantine_dispatch("", identifier, check_timeouts=True)
+
+    def _quarantine_dispatch(self, reason, identifier, *, check_timeouts=False):
+        with self._lock:
+            if not identifier or self._dispatch_order_id != identifier or self._dispatch_timed_out:
+                return
+            if check_timeouts:
+                # Read heartbeat and transition state under the same mutex: a
+                # just-arrived feedback/acceptance must not be timed out by an old read.
+                reason = self._expired_dispatch_reason(time.monotonic())
+                if reason is None:
+                    return
+            self._dispatch_timed_out = True
+            self._scene_ready = False
+            self._state = "RECOVERY_REQUIRED"
+            self._state_reason = reason + "；已阻止后续调度，不释放预留、不自动重发。等待实际结果；无响应时须停机核对现场"
+            job = self.queue.jobs[identifier]
+            job.state, job.reason = "EXECUTION_UNCERTAIN", self._state_reason
+            handle = self._dispatch_handle
+        if handle is not None:
+            try:
+                handle.cancel_goal_async()
+            except Exception as exc:
+                self.get_logger().error(f"Watchdog cancellation failed: {exc}")
+        self.publish_status()
+
+    def _expired_dispatch_reason(self, now):
+        """Caller holds _lock. Monotonic deadlines do not depend on ROS sim time."""
+        age = now - self._dispatch_started
+        if self._dispatch_handle is None and age > self._accept_timeout:
+            return "执行 Action 接收响应超时"
+        if self._dispatch_handle is not None:
+            if age > self._result_timeout:
+                return "执行 Action 总时限超时"
+            if now - self._last_dispatch_feedback > self._feedback_timeout:
+                return "执行 Action 反馈停滞超时"
+        return None
+
+    def _dispatch_response(self, future, identifier):
         try:
+            with self._lock:
+                if self._dispatch_order_id != identifier:
+                    return
             handle = future.result()
+            with self._lock:
+                if self._dispatch_order_id != identifier:
+                    return
             if not handle.accepted:
-                self._dispatch_failed("执行服务拒绝请求，需手动复查后重试")
+                self._dispatch_failed("执行服务拒绝请求，需手动复查后重试", confirmed_rejected=True)
                 return
             with self._lock:
                 self._dispatch_handle = handle
-                self.queue.jobs[self._dispatch_order_id].state = "RUNNING"
-            handle.get_result_async().add_done_callback(self._queue_result)
+                self._last_dispatch_feedback = time.monotonic()
+                timed_out = self._dispatch_timed_out
+                if not timed_out:
+                    self.queue.jobs[identifier].state = "RUNNING"
+            handle.get_result_async().add_done_callback(
+                lambda result: self._queue_result(result, identifier))
+            if timed_out:
+                handle.cancel_goal_async()
         except Exception as exc:
-            self._dispatch_failed(str(exc))
+            self._quarantine_dispatch("执行响应异常：" + str(exc), identifier)
 
-    def _dispatch_failed(self, reason):
+    def _dispatch_failed(self, reason, *, confirmed_rejected=False):
+        if not confirmed_rejected:
+            self._quarantine_dispatch("执行通信异常：" + reason, self._dispatch_order_id)
+            return
         with self._lock:
             if self._dispatch_order_id:
                 job = self.queue.jobs[self._dispatch_order_id]
@@ -267,6 +344,7 @@ class OrderActionServer(Node):
     def _queue_feedback(self, order_id, message):
         with self._lock:
             if self._dispatch_order_id == order_id:
+                self._last_dispatch_feedback = time.monotonic()
                 job = self.queue.jobs[order_id]
                 job.completed = max(job.completed, message.feedback.completed)
 
@@ -285,17 +363,26 @@ class OrderActionServer(Node):
                     return True
         return False
 
-    def _queue_result(self, future):
+    def _queue_result(self, future, identifier):
         try:
+            with self._lock:
+                if self._dispatch_order_id != identifier:
+                    return
             result = future.result().result
             with self._lock:
+                if self._dispatch_order_id != identifier:
+                    return
                 job = self.queue.jobs[self._dispatch_order_id]
                 self.queue.finish(job.order.order_id, result.status, result.completed,
                                   result.error or "配货完成，等待取货")
                 self._dispatch_order_id, self._dispatch_handle = None, None
                 self._scan_requested = True
+                if self._dispatch_timed_out:
+                    self._scene_ready = False
+                    self._state = "RECOVERY_REQUIRED"
+                    self._state_reason = "超时订单结果已收到，仍需核对现场；先处理待取货/暂停订单，再恢复工作台"
         except Exception as exc:
-            self._dispatch_failed(str(exc))
+            self._quarantine_dispatch("执行结果异常：" + str(exc), identifier)
         self.publish_status()
 
     def replenish_callback(self, _request, response):
@@ -330,7 +417,7 @@ class OrderActionServer(Node):
                 "state": self._state,
                 "reason": self._state_reason,
                 "can_submit": self._scene_ready and not self._busy and self.bin_manager.can_allocate("A"),
-                "can_recover": not self._busy and self._state not in (
+                "can_recover": not self._busy and not self._dispatch_order_id and self._state not in (
                     "INITIALIZING", "REPLENISHING", "RECOVERING"
                 ) and self.bin_manager.can_reset(),
                 "can_pickup": not self._busy,
@@ -454,6 +541,7 @@ class OrderActionServer(Node):
         else:
             with self._lock:
                 self.bin_manager.reset()
+                self._dispatch_timed_out = False
                 self._inventory_ready = False
                 self._scan_requested = True
             self._set_state("READY", "场景已重置，库存已就绪", ready=True)
@@ -632,6 +720,9 @@ class OrderActionServer(Node):
                                         self.workstation.motion_attempted or scene_uncertain,
                                         self.workstation._placed_entities)
                 self._state, self._state_reason, self._scene_ready = state, reason, ready
+                if getattr(self, "_dispatch_timed_out", False):
+                    self._state, self._scene_ready = "RECOVERY_REQUIRED", False
+                    self._state_reason = "执行曾超时，等待结果回传并人工核对现场；禁止自动继续"
                 self._busy = False
             self.publish_status()
 

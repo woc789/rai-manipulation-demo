@@ -4,6 +4,8 @@ from pathlib import Path
 from threading import Lock
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+from types import MethodType
+from concurrent.futures import Future
 
 import pytest
 import yaml
@@ -145,6 +147,121 @@ def server_stub():
         report_path=lambda _: Path("/nonexistent-unit-report"), publish_status=MagicMock())
 
 
+def test_moved_candidate_does_not_double_available_stock():
+    book = InventoryLedger()
+    old = book.observe("corn", "base", [(.3, .1, .04)])[0]
+    new = book.observe("corn", "base", [(.36, .1, .04)])[0]
+    assert old != new
+    assert book.summary()["corn"] == {"UNKNOWN": 1, "AVAILABLE": 1}
+    assert book.reserve_order(order("two", 2))[1] == {"corn": 1}
+    assert all(not item["order_id"] for item in book.snapshot()["items"])
+
+
+def test_moved_reserved_candidate_is_not_stolen_even_on_repeat_scan():
+    book = InventoryLedger()
+    old = book.observe("corn", "base", [(.3, .1, .04)])[0]
+    book.reserve_order(order("owner"))
+    for _ in range(2):
+        book.observe("corn", "base", [(.36, .1, .04)])
+        assert book.reserve_order(order("other"))[1] == {"corn": 1}
+    rows = {item["item_id"]: item for item in book.snapshot()["items"]}
+    assert rows[old]["order_id"] == "owner" and rows[old]["state"] == "UNKNOWN"
+    assert book.observe("corn", "base", [(.301, .1, .04)]) == [old]
+    assert book.selectable(old, "owner")
+
+
+def test_empty_scan_retains_uncertain_history_and_partial_update_retains_other_items():
+    book = stocked()
+    book.observe("corn", "base", [(.301, -.1, .04)], complete_scan=False)
+    assert book.summary()["corn"]["AVAILABLE"] == 2
+    book.observe("corn", "base", [])
+    assert book.summary()["corn"] == {"UNKNOWN": 2}
+    assert book.summary()["apple"] == {"AVAILABLE": 1}
+
+
+def watchdog_stub():
+    server = server_stub()
+    server.queue.submit(order("active"))
+    server.workstation.inventory.reserve_order(order("active"))
+    server._dispatch_order_id = "active"
+    server._dispatch_handle = None
+    server._dispatch_started = 100.0
+    server._last_dispatch_feedback = 100.0
+    server._accept_timeout, server._feedback_timeout, server._result_timeout = 15., 180., 900.
+    server._dispatch_timed_out = False
+    server.get_logger = MagicMock()
+    for name in ("_quarantine_dispatch", "_dispatch_failed", "_queue_result", "_expired_dispatch_reason"):
+        setattr(server, name, MethodType(getattr(OrderActionServer, name), server))
+    return server
+
+
+@pytest.mark.parametrize("accepted,now,expected", [
+    (False, 116., "接收响应"), (True, 281., "反馈停滞"), (True, 1001., "总时限")])
+def test_watchdog_quarantines_without_releasing_or_repeating_motion(monkeypatch, accepted, now, expected):
+    server = watchdog_stub()
+    handle = MagicMock() if accepted else None
+    server._dispatch_handle = handle
+    monkeypatch.setattr("produce_order_workstation.order_server.time.monotonic", lambda: now)
+    OrderActionServer.check_dispatch_timeout(server)
+    assert server._dispatch_timed_out and not server._scene_ready
+    assert server._state == "RECOVERY_REQUIRED" and expected in server._state_reason
+    assert server.queue.jobs["active"].state == "EXECUTION_UNCERTAIN"
+    assert server._dispatch_order_id == "active"
+    assert server.workstation.inventory.snapshot()["items"][0]["order_id"] == "active"
+    OrderActionServer.check_dispatch_timeout(server)
+    if handle:
+        handle.cancel_goal_async.assert_called_once()
+
+
+def test_feedback_refreshes_watchdog_without_unquarantining(monkeypatch):
+    server = watchdog_stub()
+    server._dispatch_handle = MagicMock()
+    monkeypatch.setattr("produce_order_workstation.order_server.time.monotonic", lambda: 200.)
+    OrderActionServer._queue_feedback(server, "active", SimpleNamespace(feedback=SimpleNamespace(completed=1)))
+    OrderActionServer.check_dispatch_timeout(server)
+    assert not server._dispatch_timed_out
+    server._quarantine_dispatch("unit timeout", "active")
+    OrderActionServer._queue_feedback(server, "active", SimpleNamespace(feedback=SimpleNamespace(completed=2)))
+    assert server._dispatch_timed_out and not server._scene_ready
+
+
+def test_late_acceptance_requests_cancel_and_late_result_does_not_restart_queue():
+    server = watchdog_stub()
+    server._quarantine_dispatch("unit timeout", "active")
+    result_future = Future()
+    handle = MagicMock(accepted=True)
+    handle.get_result_async.return_value = result_future
+    response = Future()
+    response.set_result(handle)
+    OrderActionServer._dispatch_response(server, response, "active")
+    handle.cancel_goal_async.assert_called_once()
+    result_future.set_result(SimpleNamespace(result=SimpleNamespace(status="COMPLETED", completed=1, error="")))
+    assert server.queue.jobs["active"].state == "WAITING_PICKUP"
+    assert server._dispatch_order_id is None
+    assert server._state == "RECOVERY_REQUIRED" and not server._scene_ready
+
+
+def test_stale_response_or_result_cannot_touch_new_dispatch():
+    server = watchdog_stub()
+    broken = Future()
+    broken.set_exception(RuntimeError("old communication failed"))
+    OrderActionServer._dispatch_response(server, broken, "old")
+    OrderActionServer._queue_result(server, broken, "old")
+    assert not server._dispatch_timed_out
+    assert server._dispatch_order_id == "active"
+
+
+def test_late_rejection_releases_only_confirmed_unstarted_order():
+    server = watchdog_stub()
+    server._quarantine_dispatch("unit timeout", "active")
+    response = Future()
+    response.set_result(SimpleNamespace(accepted=False))
+    OrderActionServer._dispatch_response(server, response, "active")
+    assert server._dispatch_order_id is None
+    assert not server._scene_ready
+    assert not any(item["order_id"] for item in server.workstation.inventory.snapshot()["items"])
+
+
 def test_ros_registration_accepts_while_busy_without_allocating_a_box():
     server = server_stub()
     request = SubmitOrder.Request(order_id="unit", zone="A", priority=3,
@@ -252,7 +369,8 @@ def test_urgent_yield_requires_higher_priority_and_complete_resources():
     assert any(item["order_id"] == "urgent-available" for item in server.workstation.inventory.snapshot()["items"])
 
 
-def test_resume_does_not_spawn_a_second_box_or_count_placed_items_again(tmp_path):
+@pytest.mark.parametrize("timed_out", [False, True])
+def test_resume_does_not_spawn_a_second_box_or_count_placed_items_again(tmp_path, timed_out):
     server = server_stub()
     server._busy = False
     first = order("resume", 2)
@@ -268,7 +386,10 @@ def test_resume_does_not_spawn_a_second_box_or_count_placed_items_again(tmp_path
     station = MagicMock()
     station.inventory = server.workstation.inventory
     station.events = []
-    station.run.return_value = dict(status="COMPLETED", completed=2, requested=2, error=None)
+    def finish_order(_order):
+        server._dispatch_timed_out = timed_out
+        return dict(status="COMPLETED", completed=2, requested=2, error=None)
+    station.run.side_effect = finish_order
     server.workstation = station
     server._publish_feedback = MagicMock()
     server._should_yield = lambda _: False
@@ -284,6 +405,9 @@ def test_resume_does_not_spawn_a_second_box_or_count_placed_items_again(tmp_path
     assert station._completed_by_sku == {"corn": 1}
     assert station._placed_entities == ["already-placed"]
     assert server.bin_manager.bins["A1"].state == "WAITING_PICKUP"
+    assert server._scene_ready is not timed_out
+    if timed_out:
+        assert server._state == "RECOVERY_REQUIRED"
 
 
 def test_replenishment_preserves_delivered_entities_and_order_box(monkeypatch):
