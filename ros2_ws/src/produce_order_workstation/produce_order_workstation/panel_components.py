@@ -129,8 +129,6 @@ class StageStrip(QWidget):
 STYLE = """
 QWidget { font-family: 'Noto Sans CJK SC', 'DejaVu Sans'; font-size: 12px; color: #273d3a; }
 QWidget#operatorPanel { background: #f3f6f5; }
-QFrame#incidentCard { background: #fff6e8; border: 1px solid #e5bd7d; border-radius: 10px; }
-QFrame#incidentCard QLabel#sectionTitle { color: #875719; }
 QFrame#sidebar { background: #173a35; border: none; }
 QFrame#sidebar QLabel { color: #a5beb7; }
 QFrame#sidebar QLabel#brand { color: white; font-size: 18px; font-weight: 700; }

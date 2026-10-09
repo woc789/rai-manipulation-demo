@@ -7,7 +7,7 @@ from time import monotonic
 
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLineEdit,
+    QComboBox, QDialog, QDialogButtonBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLineEdit, QMenu, QToolButton,
     QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea,
     QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
@@ -100,36 +100,11 @@ class OperatorPanel(QWidget):
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-        sidebar = QFrame()
-        sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(166)
-        side = QVBoxLayout(sidebar)
-        side.setContentsMargins(16, 28, 16, 22)
-        side.setSpacing(12)
-        side.addWidget(label("FRESH / 配货", "brand"))
-        side.addSpacing(24)
         self.nav_buttons = []
-        for text, index in (("工作台", 0), ("订单记录", 0), ("视觉库存", 3), ("运行日志", 2)):
-            button = QPushButton(text)
-            button.setObjectName("nav")
-            button.setCheckable(True)
-            button.setChecked(text == "工作台")
-            button.clicked.connect(lambda _, i=index, name=text: self._navigate(name, i))
-            side.addWidget(button)
-            self.nav_buttons.append(button)
-        side.addSpacing(20)
-        side.addWidget(label("后续扩展", "sideHint"))
-        for text in ("任务调度",):
-            button = QPushButton(text)
-            button.setObjectName("nav")
-            button.clicked.connect(lambda _: self._navigate("任务调度", 4))
-            side.addWidget(button)
-        side.addStretch()
-        self.recover_button = QPushButton("恢复工作台")
+        # Internal safety gate; the visible recovery entry is in the task footer.
+        self.recover_button = QPushButton("恢复工作台", self)
+        self.recover_button.hide()
         self.recover_button.clicked.connect(self._recover)
-        side.addWidget(self.recover_button)
-        side.addWidget(label("ROS 2 × Agent", "sideHint"))
-        root.addWidget(sidebar)
         scroll = QScrollArea()
         self.scroll = scroll
         scroll.setWidgetResizable(True)
@@ -159,8 +134,10 @@ class OperatorPanel(QWidget):
         self.operation_notice = label("", "muted", wrap=True)
         self.operation_notice.hide()
         page.addWidget(self.operation_notice)
-        self.incident_card = Card()
-        self.incident_card.setObjectName("incidentCard")
+        self.incident_card = QWidget()
+        self.incident_card.setObjectName("taskSupport")
+        self.incident_card.box = QVBoxLayout(self.incident_card)
+        self.incident_card.box.setContentsMargins(0, 0, 0, 0)
         self.incident_title = label("", "sectionTitle")
         self.incident_reason = label("", "muted", wrap=True)
         self.incident_impact = label("", "muted", wrap=True)
@@ -168,7 +145,8 @@ class OperatorPanel(QWidget):
         self.camera_result = label("", "muted", wrap=True)
         self.camera_result.hide()
         for widget in (self.incident_title, self.incident_reason, self.incident_impact, self.incident_next):
-            self.incident_card.box.addWidget(widget)
+            widget.setParent(self.incident_card)
+            widget.hide()
         self.incident_card.box.addWidget(self.camera_result)
         actions = QHBoxLayout()
         self.incident_camera = QPushButton("检查相机数据")
@@ -183,13 +161,24 @@ class OperatorPanel(QWidget):
         self.incident_logs.clicked.connect(lambda: self._navigate("运行日志", 2))
         self.incident_guide = QPushButton("处理指南")
         self.incident_guide.clicked.connect(self._show_resolution_guide)
-        for button in (self.incident_camera, self.incident_scan, self.incident_cancel,
-                       self.incident_recover, self.incident_guide, self.incident_logs):
+        self.help_menu_button = QToolButton()
+        self.help_menu_button.setText("诊断与帮助")
+        self.help_menu_button.setStyleSheet("QToolButton { background: white; border: 1px solid #dbe5df; border-radius: 6px; padding: 8px 12px; }")
+        self.help_menu_button.setPopupMode(QToolButton.InstantPopup)
+        menu = QMenu(self.help_menu_button)
+        self.camera_action = menu.addAction("检查相机数据", self.incident_camera.click)
+        menu.addAction("处理指南", self._show_resolution_guide)
+        menu.addAction("查看技术日志", lambda: self._navigate("运行日志", 2))
+        self.recovery_action = menu.addAction("恢复 / 重置工作台…", self._recover)
+        self.help_menu_button.setMenu(menu)
+        for button in (self.incident_camera, self.incident_guide, self.incident_logs):
+            button.setParent(self.incident_card)
+            button.hide()
+        for button in (self.incident_scan, self.incident_cancel, self.incident_recover, self.help_menu_button):
             actions.addWidget(button)
         actions.addStretch()
         self.incident_card.box.addLayout(actions)
         self.incident_card.hide()
-        page.addWidget(self.incident_card)
         main = QHBoxLayout()
         main.setSpacing(16)
         form = Card()
@@ -265,8 +254,10 @@ class OperatorPanel(QWidget):
         self.failure_reason = label("", "muted", wrap=True)
         self.failure_reason.hide()
         task.box.addWidget(self.failure_reason)
+        task.box.addWidget(self.incident_card)
         right.addWidget(task)
         boxes = Card()
+        self.boxes_card = boxes
         boxes.box.addWidget(label("订单箱位", "sectionTitle"))
         grid = QGridLayout()
         self.bin_cards = [BinCard(f"A{i+1}") for i in range(4)]
@@ -394,6 +385,8 @@ class OperatorPanel(QWidget):
         limit = self.config["zones"]["A"]["bin_capacity_items"]
         free = next((b.get("bin_id") for b in self._bins if b.get("state") == "FREE"), None)
         hint = f"每单上限 {limit} 件" if not self._valid else (f"预计箱位 {free} · 接单时分配" if free else "等待空闲箱位")
+        if self._valid and self._state == "RECOVERY_REQUIRED":
+            hint = "先处理失败现场；新订单只登记、暂不执行"
         self.draft_hint.setText(hint)
         self._update_controls()
 
@@ -403,7 +396,17 @@ class OperatorPanel(QWidget):
             self._can_register and not self._registration_pending if self._queue_enabled
             else self._can_submit and not self._order_active))
         self.submit_button.setText("提交中…" if self._registration_pending else "提交订单")
-        self.recover_button.setEnabled(synced and self._can_recover and not self._order_active)
+        waiting_pickup = any(b.get("state") == "WAITING_PICKUP" for b in self._bins)
+        paused = any(b.get("state") == "PAUSED" for b in self._bins)
+        self.recover_button.setEnabled(synced and not self._order_active
+            and (self._can_recover or (self._state == "RECOVERY_REQUIRED" and (waiting_pickup or paused))))
+        self.recovery_action.setEnabled(self.recover_button.isEnabled())
+        if self._state == "RECOVERY_REQUIRED":
+            if not self._can_recover and waiting_pickup:
+                ids = ', '.join(b['bin_id'] for b in self._bins if b.get('state') == 'WAITING_PICKUP')
+                self.workcell_notice.setText(f"现场需要恢复；先确认取走 {ids} 的已完成订单，再恢复失败现场。")
+            elif self._can_recover:
+                self.workcell_notice.setText("失败现场需核对；确认后可恢复工作台，将清理失败箱和桌面。")
         self.pickup_button.setEnabled(synced and self._can_pickup and self.pickup_orders.count() > 0 and not self._order_active)
         self.cancel_button.setEnabled(synced and self._order_active and self._accepted
             and not self._cancel_requesting and not self._cancel_waiting)
@@ -447,9 +450,14 @@ class OperatorPanel(QWidget):
         self.incident_cancel.setEnabled(synced and incident.cancel_waiting)
         self.incident_recover.setVisible(self._state == "RECOVERY_REQUIRED")
         self.incident_recover.setEnabled(incident.recover)
+        waiting_pickup = any(b.get("state") == "WAITING_PICKUP" for b in self._bins)
+        self.incident_recover.setText("先确认取货" if not self._can_recover and waiting_pickup
+            else "处理暂停订单" if not self._can_recover and any(b.get("state") == "PAUSED" for b in self._bins)
+            else "恢复工作台…")
         self.incident_logs.setEnabled(True)
-        self.incident_camera.setVisible(incident.scan)
+        self.incident_camera.hide()
         self.incident_camera.setEnabled(synced and not self._camera_checking and hasattr(self.worker, "check_camera"))
+        self.camera_action.setEnabled(self.incident_camera.isEnabled())
         self.incident_camera.setText("检查中…" if self._camera_checking else "检查相机数据")
 
     def _show_resolution_guide(self):
@@ -459,6 +467,8 @@ class OperatorPanel(QWidget):
         dialog.setMinimumWidth(600)
         layout = QVBoxLayout(dialog)
         layout.addWidget(label(self.incident_title.text(), "sectionTitle"))
+        layout.addWidget(label(self.incident_reason.text(), "muted", wrap=True))
+        layout.addWidget(label(self.incident_impact.text(), "muted", wrap=True))
         for index, step in enumerate(resolution_steps(self._state, job), 1):
             layout.addWidget(label(f"{index}. {step}", "muted", wrap=True))
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
@@ -584,6 +594,8 @@ class OperatorPanel(QWidget):
         self.queue_table.setRowCount(len(visible_orders))
         for row, job in enumerate(visible_orders):
             reason = job.get("reason", "")
+            if self._state == "RECOVERY_REQUIRED" and job["state"] in ("QUEUED", "WAITING_STOCK", "WAITING_BIN"):
+                reason = "现场需要恢复，尚未执行 · " + reason
             if job.get("missing"):
                 reason += " · " + " / ".join(f"{NAMES.get(sku, sku)}缺少可用观测 {count}"
                                                 for sku, count in job["missing"].items())
@@ -871,6 +883,16 @@ class OperatorPanel(QWidget):
 
     def _recover(self):
         if not self.recover_button.isEnabled():
+            return
+        if not self._can_recover:
+            waiting = [b.get("bin_id") for b in self._bins if b.get("state") == "WAITING_PICKUP"]
+            if waiting:
+                self._on_notice(f"恢复前请先取走已完成订单箱 {', '.join(waiting)}；在下方选择订单并确认取货。失败箱会保留，未发送重置请求。")
+                self.scroll.ensureWidgetVisible(self.boxes_card)
+                self.pickup_orders.setFocus()
+            else:
+                self._on_notice("恢复前请先核对并处理暂停订单；未发送重置请求。")
+                self._navigate("任务调度", 4)
             return
         if QMessageBox.question(self, "恢复工作台", "清理失败订单和桌面，重新准备库存？\n待取货订单必须先取走。") == QMessageBox.Yes:
             self._on_notice("已请求恢复工作台，等待服务确认…")

@@ -48,6 +48,9 @@ class FakeWorker(QObject):
     def check_camera(self, camera):
         self.camera_checked = camera
 
+    def recover(self):
+        self.recovery_requested = True
+
 
 class OperatorPanelTests(unittest.TestCase):
     @classmethod
@@ -272,6 +275,39 @@ class OperatorPanelTests(unittest.TestCase):
         self.assertTrue(self.panel.incident_scan.isHidden())
         self.assertTrue(self.panel.incident_cancel.isHidden())
         self.assertFalse(self.panel.incident_recover.isEnabled())
+
+    def test_failed_order_recovery_guides_pickup_then_allows_explicit_reset(self):
+        from PyQt5.QtWidgets import QMessageBox
+        self.ready()
+        self.bins[0].update(state="WAITING_PICKUP", order_id="complete")
+        self.bins[1].update(state="RECOVERY_REQUIRED", order_id="failed")
+        job = dict(order_id="failed", state="FAILED", reason="test", priority=0,
+                   completed=2, total=4, finished_sequence=1)
+        self.panel._set_workcell_status("RECOVERY_REQUIRED", "已运动，需核对", False, False)
+        self.panel._set_resources(json.dumps({"bins": self.bins, "queue_enabled": True,
+            "can_register": True, "can_pickup": True, "orders": [job]}))
+        self.assertTrue(self.panel.incident_recover.isEnabled())
+        self.assertEqual(self.panel.incident_recover.text(), "先确认取货")
+        self.panel.incident_recover.click()
+        self.assertIn("A1", self.panel.operation_notice.text())
+        self.assertFalse(hasattr(self.panel.worker, "recovery_requested"))
+        self.assertTrue(self.panel.pickup_button.isEnabled())
+        self.bins[0].update(state="FREE", order_id=None)
+        self.panel._set_workcell_status("RECOVERY_REQUIRED", "需核对", False, True)
+        self.panel._set_resources(json.dumps({"bins": self.bins, "queue_enabled": True,
+            "can_register": True, "orders": [job]}))
+        self.assertEqual(self.panel.incident_recover.text(), "恢复工作台…")
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.Yes):
+            self.panel.incident_recover.click()
+        self.assertTrue(self.panel.worker.recovery_requested)
+
+    def test_no_duplicate_sidebar_or_yellow_incident_frame(self):
+        from PyQt5.QtWidgets import QFrame
+        self.assertFalse(self.panel.nav_buttons)
+        self.assertIsNone(self.panel.findChild(QFrame, "sidebar"))
+        self.assertIsNone(self.panel.findChild(QFrame, "incidentCard"))
+        self.assertEqual(self.panel.incident_card.objectName(), "taskSupport")
+        self.assertEqual(self.panel.help_menu_button.text(), "诊断与帮助")
 
     def test_scanning_is_visible_and_ready_clears_incident(self):
         self.ready()
