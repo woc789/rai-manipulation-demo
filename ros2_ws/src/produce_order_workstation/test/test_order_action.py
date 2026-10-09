@@ -42,6 +42,21 @@ def test_cancel_before_perception_issues_no_vision_request():
     station._position_tool.invoke.assert_not_called()
 
 
+def test_startup_configures_wrapped_perception_component(monkeypatch):
+    import rai_perception.tools
+    component = SimpleNamespace(config=SimpleNamespace(service_timeout=60.0))
+    tool = SimpleNamespace(gripping_points_tool=SimpleNamespace(
+        point_cloud_from_segmentation=component))
+    monkeypatch.setattr(rai_perception.tools, "GetObjectPositionsTool", lambda **_: tool)
+    monkeypatch.setattr(runtime, "wait_for_ros2_topics", lambda *_, **__: None)
+    monkeypatch.setattr(runtime, "wait_for_ros2_services", lambda *_, **__: None)
+    monkeypatch.setattr(runtime, "ActionClient", MagicMock())
+    station = Workstation(MagicMock(), CONFIG)
+    station.wait_until_ready()
+    assert component.check_cancel == station.check_cancel
+    assert component.config.service_timeout == CONFIG["perception"]["service_timeout_s"]
+
+
 def test_motion_feedback_retains_order_counts_between_item_events():
     server = SimpleNamespace(workstation=SimpleNamespace(_completed_by_sku={"corn": 1, "carrot": 1}))
     handle = MagicMock()

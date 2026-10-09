@@ -135,7 +135,7 @@ class Workstation:
                 self.connector.node.declare_parameter(parameter_name, value)
         if self._position_tool is None:
             self._position_tool = GetObjectPositionsTool(connector=self.connector)
-            pipeline = self._position_tool.point_cloud_from_segmentation
+            pipeline = self._position_tool.gripping_points_tool.point_cloud_from_segmentation
             pipeline.check_cancel = self.check_cancel
             pipeline.config.service_timeout = self.config.get("perception", {}).get("service_timeout_s", 20.0)
         if self._motion_client is None:
