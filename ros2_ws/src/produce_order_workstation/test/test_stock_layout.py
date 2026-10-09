@@ -41,6 +41,18 @@ def test_layout_keeps_both_banks_mixed_and_stronger_clearances():
     validate_stock_layout(scene, config)
 
 
+def test_corn_orientations_are_normalized_and_long_axis_stays_horizontal():
+    _, scene = fixtures()
+    for item in scene.entities:
+        if item.prefab_name != "corn":
+            continue
+        q = item.pose.pose.orientation
+        assert q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w == pytest.approx(1.0)
+        # The prefab's long axis is local Z. Rotation must keep it parallel
+        # to the tabletop rather than standing corn up to game detection.
+        assert 1 - 2*(q.x*q.x + q.y*q.y) == pytest.approx(0.0, abs=1e-8)
+
+
 @pytest.mark.parametrize("position, reason", [
     ((.22, -.12), "arm base"),
     ((.57, -.23), "order-bin area"),
