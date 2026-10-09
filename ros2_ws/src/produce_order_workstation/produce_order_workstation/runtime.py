@@ -138,6 +138,8 @@ class Workstation:
             pipeline = self._position_tool.gripping_points_tool.point_cloud_from_segmentation
             pipeline.check_cancel = self.check_cancel
             pipeline.config.service_timeout = self.config.get("perception", {}).get("service_timeout_s", 20.0)
+            pipeline.config.detection_roi = self.config.get("perception", {}).get("detection_roi")
+            pipeline.config.include_full_frame = self.config.get("perception", {}).get("include_full_frame", False)
         if self._motion_client is None:
             self._motion_client = ActionClient(
                 self.connector.node, ExecuteMotion, "/produce_orders/execute_motion"
@@ -363,9 +365,44 @@ class Workstation:
             if str(result).startswith("Timeout:"):
                 raise OrderError("Perception tool timed out; stop instead of treating it as missing stock")
             points = parse_centroids(result)
+            self._record_perception_pipeline(sku, alias, points)
             if points:
                 return points
         return []
+
+    def _record_perception_pipeline(self, sku, alias, points):
+        pipeline = getattr(getattr(self._position_tool, "gripping_points_tool", None),
+                           "point_cloud_from_segmentation", None)
+        diagnostics = getattr(pipeline, "last_diagnostics", None)
+        if not isinstance(diagnostics, dict) or not diagnostics:
+            return
+        details = dict(diagnostics)
+        details["position_count"] = len(points)
+        if not points and details.get("cloud_count", 0):
+            details["empty_stage"] = "point_filter_or_estimator"
+        if not points:
+            details.update(self._save_perception_image(pipeline))
+        self.event(self._active_order_id or "", "PERCEPTION_PIPELINE", sku=sku, alias=alias, **details)
+
+    def _save_perception_image(self, pipeline=None):
+        """Save evidence only; a diagnostic write failure cannot change execution."""
+        try:
+            if pipeline is None:
+                pipeline = self._position_tool.gripping_points_tool.point_cloud_from_segmentation
+            image = getattr(pipeline, "last_image", None)
+            if image is None:
+                return {}
+            import cv2
+            from cv_bridge import CvBridge
+
+            directory = Path.home() / ".local/share/produce_order_workstation/perception"
+            directory.mkdir(parents=True, exist_ok=True)
+            path = directory / f"camera-{time.time_ns()}.jpg"
+            if not cv2.imwrite(str(path), CvBridge().imgmsg_to_cv2(image, desired_encoding="bgr8")):
+                raise RuntimeError("Failed to save camera diagnostic image")
+            return {"image_path": str(path)}
+        except Exception as exc:
+            return {"diagnostic_image_error": str(exc)}
 
     def scan_inventory(self, skus, zone_name="A"):
         """Idle-only caller: populate ledger from RGB-D, never simulator truth."""
@@ -449,17 +486,22 @@ class Workstation:
         self._perception_generation += 1
         raw_points = self.detect(sku)
         points = []
+        filtered = {"workspace_or_bin": 0, "previous_safety_rejection": 0,
+                    "duplicate": 0, "target_clearance": 0, "reservation": 0}
         for point in sorted(raw_points, key=lambda value: (value[1], value[0])):
             try:
                 choose_source([point], self.config, zone)
             except OrderError:
+                filtered["workspace_or_bin"] += 1
                 continue
             if any(
                 distance_xy(point, rejected) < self.config["perception"]["association_radius_m"]
                 for rejected in self._rejected_visual_positions.get(sku, [])
             ):
+                filtered["previous_safety_rejection"] += 1
                 continue
             if any(distance_xy(point, existing) < 0.035 for existing in points):
+                filtered["duplicate"] += 1
                 continue
             points.append(point)
         detections = []
@@ -477,13 +519,16 @@ class Workstation:
             self.inventory.reserve_order(order, excluded_item_ids=excluded)
         for index, (point, item_id) in enumerate(zip(points, inventory_ids), start=1):
             if item_id in excluded:
+                filtered["target_clearance"] += 1
                 continue
             if not self.inventory.selectable(item_id, order.order_id):
+                filtered["reservation"] += 1
                 continue
             if self.require_order_reservation and not any(
                 item["item_id"] == item_id and item["order_id"] == order.order_id
                 for item in self.inventory.snapshot()["items"]
             ):
+                filtered["reservation"] += 1
                 continue
             detection_id = f"visual_{sku}_{self._perception_generation}_{index}"
             self._visual_candidates[detection_id] = (sku, point)
@@ -502,7 +547,12 @@ class Workstation:
             "classification_verified": False,
             "detections": detections,
             "remaining": requested[sku] - self._completed_by_sku.get(sku, 0),
+            "raw_position_count": len(raw_points),
+            "filtered_counts": filtered,
         }
+        if not detections and raw_points:
+            result["empty_reason"] = "All localized candidates were rejected by workspace, safety, or reservation rules"
+            result.update(self._save_perception_image())
         self.event(order.order_id, "PERCEPTION_RESULT", **result)
         return result
 

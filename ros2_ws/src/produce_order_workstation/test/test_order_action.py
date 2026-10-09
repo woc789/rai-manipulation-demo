@@ -42,6 +42,34 @@ def test_cancel_before_perception_issues_no_vision_request():
     station._position_tool.invoke.assert_not_called()
 
 
+def test_empty_detection_records_pipeline_stage_without_masking_primary_result():
+    station = Workstation(MagicMock(), CONFIG)
+    station._active_order_id = "diagnostic"
+    station._position_tool = MagicMock()
+    station._position_tool.invoke.return_value = "No carrots detected."
+    pipeline = station._position_tool.gripping_points_tool.point_cloud_from_segmentation
+    pipeline.last_diagnostics = {"box_count": 0, "mask_count": 0, "cloud_count": 0,
+                                 "empty_stage": "detection", "image_encoding": "rgba8"}
+    station._save_perception_image = MagicMock(return_value={"image_path": "/tmp/evidence.jpg"})
+    assert station.detect("carrot") == []
+    e = station.events[-1]
+    assert e["stage"] == "PERCEPTION_PIPELINE"
+    assert e["empty_stage"] == "detection"
+    assert e["position_count"] == 0
+    assert e["image_path"] == "/tmp/evidence.jpg"
+
+
+def test_filtered_candidates_are_distinguished_from_detector_misses():
+    station = Workstation(MagicMock(), CONFIG)
+    station.detect = MagicMock(return_value=[(0.9, 0.0, 0.04)])
+    station._save_perception_image = MagicMock(return_value={})
+    result = station.get_object_positions(Order("filtered", "A", (OrderLine("corn", 1),)), "corn")
+    assert result["raw_position_count"] == 1
+    assert result["filtered_counts"]["workspace_or_bin"] == 1
+    assert result["detections"] == []
+    assert "rejected" in result["empty_reason"]
+
+
 def test_startup_configures_wrapped_perception_component(monkeypatch):
     import rai_perception.tools
     component = SimpleNamespace(config=SimpleNamespace(service_timeout=60.0))

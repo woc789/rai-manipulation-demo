@@ -52,6 +52,10 @@ agent:
   max_tool_calls_per_item: 6
   max_consecutive_empty_perceptions: 5
 perception:
+  # Normalized ROI for fixed RGBDCamera5. Boxes are mapped back to full-frame
+  # coordinates before SAM/depth/TF. Set null to inspect the full image.
+  detection_roi: [0.20, 0.36, 0.80, 0.80]
+  include_full_frame: true
   service_timeout_s: 20.0
   association_radius_m: 0.065
 workspace:

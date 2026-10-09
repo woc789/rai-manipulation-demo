@@ -236,6 +236,11 @@ class ProduceAgent:
                             sku=arguments["sku"], attempts=empty_perceptions,
                             remaining=self._remaining(),
                         )
+                        if result.get("raw_position_count", 0):
+                            raise OrderError(
+                                f"No selectable {arguments['sku']} candidate after {limit} consecutive "
+                                "visual attempts; localized candidates were filtered by safety or reservation rules"
+                            )
                         raise OrderError(
                             f"No {arguments['sku']} detected after {limit} consecutive "
                             f"visual attempts; {self._remaining()[arguments['sku']]} still needed"

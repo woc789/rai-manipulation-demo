@@ -41,6 +41,14 @@ def readable_error(error: str) -> str:
         sku, attempts, remaining = empty.groups()
         name = {"corn": "玉米", "carrot": "胡萝卜", "apple": "苹果", "tomato": "番茄"}.get(sku, sku)
         return f"连续 {attempts} 次视觉定位未找到{name}，还差 {remaining} 件；订单已停止。"
+    filtered = re.fullmatch(
+        r"No selectable (\w+) candidate after (\d+) consecutive visual attempts; localized candidates were filtered by safety or reservation rules",
+        error,
+    )
+    if filtered:
+        sku, attempts = filtered.groups()
+        name = {"corn": "玉米", "carrot": "胡萝卜", "apple": "苹果", "tomato": "番茄"}.get(sku, sku)
+        return f"已定位到{name}，但连续 {attempts} 次没有满足安全或预留规则的候选；请查看感知过滤记录，勿直接判定缺货。"
     return error
 
 
