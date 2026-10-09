@@ -118,10 +118,17 @@ class InventoryLedger:
                 raise ValueError("Cannot invalidate another order's or a carried item")
             item.state, item.order_id = "UNKNOWN", ""
 
-    def reserve_order(self, order):
+    def reserve_order(self, order, *, excluded_item_ids=()):
         """All-or-nothing reservation. Missing observations are not proven shortages."""
         with self._lock:
             self._expire()
+            excluded = set(excluded_item_ids)
+            # An unsuitable destination does not make observed stock disappear.
+            # Release only this order's untouched candidates, never another
+            # order's reservation or an object already being carried/placed.
+            for item in self._items.values():
+                if item.item_id in excluded and item.order_id == order.order_id and item.state == "RESERVED":
+                    item.state, item.order_id = "AVAILABLE", ""
             selected, missing = [], {}
             blocked = [item.position for item in self._items.values()
                        if item.order_id and item.state in ("RESERVED", "CARRYING", "UNKNOWN")]
@@ -131,7 +138,8 @@ class InventoryLedger:
                          and item.state in ("RESERVED", "CARRYING", "PLACED")]
                 needed = max(0, line.quantity - len(owned))
                 candidates = [item for item in self._items.values()
-                              if item.sku == line.sku and item.state == "AVAILABLE" and not item.order_id]
+                              if item.sku == line.sku and item.state == "AVAILABLE" and not item.order_id
+                              and item.item_id not in excluded]
                 chosen = []
                 for item in candidates:
                     # Cross-SKU false labels must not promise the same spatial candidate twice.

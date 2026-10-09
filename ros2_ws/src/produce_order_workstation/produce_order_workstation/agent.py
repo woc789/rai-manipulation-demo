@@ -211,7 +211,9 @@ class ProduceAgent:
                 try:
                     result = self._invoke_tool(name, arguments)
                 except PerceptionMismatch as exc:
-                    result = {"ok": False, "error": str(exc), "retryable": True}
+                    perceived_sku = None
+                    result = {"ok": False, "error": str(exc), "retryable": True,
+                              "required_tool": "get_object_positions", "required_sku": required_sku}
             self.workstation.event(
                 self.order.order_id, "AGENT_TOOL_RESULT", tool=name, result=result
             )

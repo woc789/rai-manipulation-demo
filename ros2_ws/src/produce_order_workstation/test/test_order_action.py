@@ -355,6 +355,51 @@ def test_new_perception_invalidates_old_ids_even_for_other_skus():
     assert second not in station._visual_candidates
 
 
+def test_fulfillment_filters_near_target_but_preserves_stock_and_replaces_reservation():
+    config = deepcopy(CONFIG)
+    config["operation_mode"] = "fulfillment"
+    station = Workstation(MagicMock(), config)
+    station._allocated_bin_index = 0
+    station._completed_by_sku = {"corn": 1}
+    station.require_order_reservation = True
+    order = Order("clearance", "A", (OrderLine("corn", 1), OrderLine("carrot", 1)))
+    corn_id = station.inventory.observe("corn", "panda_link0", [(0.3, -0.28, 0.04)])[0]
+    station.inventory.reserve(corn_id, order.order_id)
+    station.inventory.transition(corn_id, order.order_id, "CARRYING")
+    station.inventory.transition(corn_id, order.order_id, "PLACED")
+    near = (0.4327, -0.3479, 0.0422)  # Actual reported failure; A1 offset is (0.50, -0.44).
+    safe = (0.30, 0.30, 0.04)
+    ids = station.inventory.observe("carrot", "panda_link0", [near, safe])
+    station.inventory.reserve(ids[0], order.order_id)
+    station.detect = MagicMock(return_value=[near, safe])
+    station._source_entities = MagicMock(side_effect=AssertionError("no truth coordinates"))
+    result = station.get_object_positions(order, "carrot")
+    assert [item["position_m"] for item in result["detections"]] == [list(safe)]
+    items = {item["item_id"]: item for item in station.inventory.snapshot()["items"]}
+    assert items[ids[0]]["state"] == "AVAILABLE"
+    assert items[ids[0]]["order_id"] == ""
+    assert items[ids[1]]["state"] == "RESERVED"
+    assert items[ids[1]]["order_id"] == order.order_id
+    station._source_entities.assert_not_called()
+
+
+def test_fresh_candidate_near_target_is_retryable_before_motion():
+    config = deepcopy(CONFIG)
+    config["operation_mode"] = "fulfillment"
+    station = Workstation(MagicMock(), config)
+    station._allocated_bin_index = 0
+    station._completed_by_sku = {"corn": 1}
+    order = Order("moved-close", "A", (OrderLine("corn", 1), OrderLine("carrot", 1)))
+    station._visual_candidates = {"carrot-id": ("carrot", (0.43, -0.32, 0.04))}
+    station.detect = MagicMock(return_value=[(0.4327, -0.3479, 0.0422)])
+    station.move = MagicMock()
+    with pytest.raises(PerceptionMismatch, match="too close.*no motion executed"):
+        station.pick_and_place(order, "carrot-id")
+    station.move.assert_not_called()
+    assert not station.motion_attempted
+    assert "carrot-id" not in station._visual_candidates
+
+
 def test_agent_tool_rejects_unknown_or_unrequested_visual_id_before_motion():
     station = Workstation(MagicMock(), CONFIG)
     station._scene_prepared = True
@@ -513,6 +558,37 @@ def test_agent_rejects_pick_without_perception_and_allows_recovery():
     assert len(rejected) == 1
     assert rejected[0]["result"]["required_tool"] == "get_object_positions"
     station.pick_and_place.assert_called_once()
+
+
+def test_agent_reperceives_after_clearance_rejection_then_finishes():
+    station = Workstation(MagicMock(), CONFIG)
+    station._scene_prepared = True
+    station.get_object_positions = MagicMock(side_effect=[
+        {"detections": [{"detection_id": "near"}]},
+        {"detections": [{"detection_id": "safe"}]},
+    ])
+    def pick(_order, detection_id):
+        if detection_id == "near":
+            raise PerceptionMismatch("Source is too close to destination slot")
+        station._completed_by_sku["corn"] = 1
+        return {"placed": detection_id}
+    station.pick_and_place = MagicMock(side_effect=pick)
+    station.finish_order = MagicMock(return_value={"status": "verified"})
+    model = FakeModel([
+        ("get_object_positions", {"sku": "corn"}),
+        ("pick_and_place", {"detection_id": "near"}),
+        ("pick_and_place", {"detection_id": "near"}),  # No fresh perception: blocked.
+        ("get_object_positions", {"sku": "corn"}),
+        ("pick_and_place", {"detection_id": "safe"}),
+        ("finish_order", {}),
+    ])
+    result = station.run(Order("replace-near", "A", (OrderLine("corn", 1),)), model=model)
+    assert result["status"] == "COMPLETED"
+    assert [c.args[1] for c in station.pick_and_place.call_args_list] == ["near", "safe"]
+    rejected = [e["result"] for e in result["events"]
+                if e["stage"] == "AGENT_TOOL_RESULT" and e["result"].get("retryable")]
+    assert len(rejected) == 2
+    assert all(r["required_tool"] == "get_object_positions" for r in rejected)
 
 
 def test_agent_retries_after_successful_pick_without_reperception():

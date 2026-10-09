@@ -63,6 +63,25 @@ def test_reservation_owner_and_verified_state_chain():
     assert book.snapshot()["items"][0]["state"] == "COLLECTED"
 
 
+def test_clearance_exclusions_never_release_another_order_or_carried_item():
+    from produce_order_workstation.order import Order, OrderLine
+
+    book, _ = ledger()
+    ids = book.observe("corn", "base", [(0.3, -0.3, 0.04), (0.3, 0, 0.04), (0.3, 0.3, 0.04)])
+    book.reserve(ids[0], "other")
+    book.reserve(ids[1], "current")
+    book.transition(ids[1], "current", "CARRYING")
+    order = Order("current", "A", (OrderLine("corn", 2),))
+    selected, missing = book.reserve_order(order, excluded_item_ids=ids[:2])
+    assert not missing
+    assert selected == [ids[2]]
+    items = {item["item_id"]: item for item in book.snapshot()["items"]}
+    assert items[ids[0]]["state"] == "RESERVED"
+    assert items[ids[0]]["order_id"] == "other"
+    assert items[ids[1]]["state"] == "CARRYING"
+    assert items[ids[1]]["order_id"] == "current"
+
+
 @pytest.mark.parametrize("motion_attempted,expected", [(False, "AVAILABLE"), (True, "UNKNOWN")])
 def test_failure_never_blindly_releases_uncertain_moved_item(motion_attempted, expected):
     book, _ = ledger()

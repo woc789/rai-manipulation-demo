@@ -420,6 +420,20 @@ class Workstation:
             result[entity.name] = (entity, xyz)
         return result
 
+    def _next_placement(self, order: Order, sku: str):
+        placements = [item for item in plan_placements(
+            order, self.config, bin_index=self._allocated_bin_index
+        ) if item.sku == sku]
+        done = self._completed_by_sku.get(sku, 0)
+        if done >= len(placements):
+            raise PerceptionMismatch(f"No remaining placement for {sku}; choose a requested SKU")
+        placement = placements[done]
+        slot = self.config["zones"][order.zone]["slots"][placement.bin_index]
+        return placement, (slot[0] + placement.offset_x, slot[1] + placement.offset_y)
+
+    def _source_target_clearance(self):
+        return self.config["workspace"].get("source_target_clearance_m", 0.12)
+
     def get_object_positions(self, order: Order, sku: str) -> dict:
         """Agent-facing RGB-D perception; never reveal simulator entity labels."""
         self.check_cancel()
@@ -450,11 +464,20 @@ class Workstation:
             points.append(point)
         detections = []
         inventory_ids = self.inventory.observe(sku, self.config["camera"]["target_frame"], points)
+        _, target = self._next_placement(order, sku)
+        excluded = {item_id for point, item_id in zip(points, inventory_ids)
+                    if distance_xy(point, target) <= self._source_target_clearance()}
+        if excluded:
+            self.event(order.order_id, "CANDIDATE_CLEARANCE_REJECTED", sku=sku,
+                       target=list(target), minimum_distance_m=self._source_target_clearance(),
+                       excluded_item_ids=sorted(excluded))
         if self.require_order_reservation:
             # A rejected pre-motion candidate can be replaced only with free
             # visual stock; never steal a different order's reservation.
-            self.inventory.reserve_order(order)
+            self.inventory.reserve_order(order, excluded_item_ids=excluded)
         for index, (point, item_id) in enumerate(zip(points, inventory_ids), start=1):
+            if item_id in excluded:
+                continue
             if not self.inventory.selectable(item_id, order.order_id):
                 continue
             if self.require_order_reservation and not any(
@@ -593,6 +616,16 @@ class Workstation:
         if distance_xy(source, observed_source) > self.config["perception"]["association_radius_m"]:
             self._visual_candidates.clear()
             raise PerceptionMismatch("Visual target moved or detection changed; perceive again")
+        placement, target = self._next_placement(order, sku)
+        if distance_xy(source, target) <= self._source_target_clearance():
+            self._visual_candidates.pop(detection_id, None)
+            self.event(order.order_id, "CANDIDATE_CLEARANCE_REJECTED", sku=sku,
+                       detection_id=detection_id, source=list(source), target=list(target),
+                       minimum_distance_m=self._source_target_clearance())
+            raise PerceptionMismatch(
+                "Source is too close to destination slot; no motion executed. "
+                "Call get_object_positions again and choose another candidate"
+            )
         choose_source([source], self.config, zone)
         # Simulation-only safety oracle. Its labels/positions are never exposed
         # to the Agent and never used as the gripper target; only the RGB-D
@@ -616,17 +649,10 @@ class Workstation:
             raise PerceptionMismatch("Visual class/position failed safety check; choose another detection")
         grasp_source = calibrated_grasp_point(source, sku, self.config)
         choose_source([grasp_source], self.config, zone)
-        placements = [
-            item for item in plan_placements(order, self.config, bin_index=self._allocated_bin_index) if item.sku == sku
-        ]
-        placement = placements[done]
         bin_index = placement.bin_index
         slot = tuple(zone["slots"][bin_index])
-        target = (slot[0] + placement.offset_x, slot[1] + placement.offset_y)
         slot_id = f"{order.zone}{bin_index + 1}"
         bin_position = self.slot_bin_position(zone, bin_index, slot)
-        if distance_xy(source, target) <= 0.12:
-            raise OrderError("Source is too close to destination slot")
         # Reserve from the fresh visual measurement, not from entity labels/poses.
         item_id = self._inventory_candidates.get(detection_id)
         if item_id is None:

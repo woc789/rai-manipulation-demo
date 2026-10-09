@@ -58,6 +58,7 @@ workspace:
   x: [0.20, 0.60]
   y: [-0.55, 0.55]
   source_exclusion_radius_m: 0.08
+  source_target_clearance_m: 0.12
 # Conservative collision proxies in panda_link0. The O3DE world frame is
 # identity-aligned with panda_link0 in workstation.launch.py. Keep these below
 # the proven grasp and bin-release heights until measured geometry is available.
