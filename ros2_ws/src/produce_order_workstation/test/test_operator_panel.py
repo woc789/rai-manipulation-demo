@@ -28,6 +28,7 @@ class FakeWorker(QObject):
     inventory = pyqtSignal(str)
     queue_cleared = pyqtSignal(int, int)
     operation_finished = pyqtSignal(str, bool, str)
+    camera_diagnostic = pyqtSignal(str)
 
     def cancel(self):
         self.cancel_requested = True
@@ -40,6 +41,12 @@ class FakeWorker(QObject):
 
     def clear_queue(self, order_ids):
         self.cleared_ids = order_ids
+
+    def refresh_inventory(self):
+        self.scan_requested = True
+
+    def check_camera(self, camera):
+        self.camera_checked = camera
 
 
 class OperatorPanelTests(unittest.TestCase):
@@ -223,6 +230,94 @@ class OperatorPanelTests(unittest.TestCase):
         self.assertEqual(self.panel._state, "INVENTORY_ERROR")
         self.assertIn("复查失败", self.panel.workcell_notice.text())
         self.assertFalse(self.panel.workcell_notice.isHidden())
+
+    def test_inventory_error_has_local_action_and_no_blind_motion_retry(self):
+        self.ready()
+        self.panel._set_workcell_status("INVENTORY_ERROR", "视觉库存复查失败：Timeout", False, False)
+        self.panel._set_resources(json.dumps({"bins": self.bins, "queue_enabled": True,
+            "can_register": True, "orders": [dict(order_id="waiting", state="WAITING_STOCK",
+            reason="复查失败", priority=0, completed=0, total=4)]}))
+        self.assertFalse(self.panel.incident_card.isHidden())
+        self.assertIn("库存感知", self.panel.incident_title.text())
+        self.assertIn("订单已保留", self.panel.incident_impact.text())
+        self.assertFalse(self.panel.incident_scan.isHidden())
+        self.assertTrue(self.panel.incident_scan.isEnabled())
+        self.panel.incident_scan.click()
+        self.assertTrue(self.panel.worker.scan_requested)
+        self.assertFalse(self.panel.incident_scan.isEnabled())
+        self.panel.worker.operation_finished.emit("refresh_inventory", False, "服务响应未确认")
+        self.assertTrue(self.panel.incident_scan.isEnabled())
+
+    def test_incident_cancel_targets_only_current_waiting_order_and_confirms(self):
+        from PyQt5.QtWidgets import QMessageBox
+        self.ready()
+        self.panel._set_resources(json.dumps({"bins": self.bins, "queue_enabled": True,
+            "can_register": True, "orders": [dict(order_id="waiting", state="WAITING_STOCK",
+            reason="不足", priority=0, completed=0, total=4)]}))
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.No):
+            self.panel.incident_cancel.click()
+        self.assertFalse(hasattr(self.panel.worker, "canceled_order"))
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.Yes):
+            self.panel.incident_cancel.click()
+        self.assertEqual(self.panel.worker.canceled_order, "waiting")
+
+    def test_uncertain_motion_requires_manual_check_and_disables_recovery(self):
+        self.ready()
+        self.panel._set_workcell_status("RECOVERY_REQUIRED", "夹爪状态未明", False, False)
+        self.panel._set_resources(json.dumps({"bins": self.bins, "queue_enabled": True,
+            "can_register": True, "orders": [dict(order_id="uncertain", state="EXECUTION_UNCERTAIN",
+            reason="状态未明", priority=0, completed=0, total=4)]}))
+        self.assertIn("人工核对", self.panel.incident_title.text())
+        self.assertIn("不能盲目", self.panel.incident_impact.text())
+        self.assertTrue(self.panel.incident_scan.isHidden())
+        self.assertTrue(self.panel.incident_cancel.isHidden())
+        self.assertFalse(self.panel.incident_recover.isEnabled())
+
+    def test_scanning_is_visible_and_ready_clears_incident(self):
+        self.ready()
+        self.panel._set_workcell_status("SCANNING", "扫描中", False, False)
+        self.assertIn("正在复查", self.panel.incident_title.text())
+        self.assertFalse(self.panel.scan_button.isEnabled())
+        self.panel._set_workcell_status("READY", "", True, True)
+        self.assertTrue(self.panel.incident_card.isHidden())
+
+    def test_camera_check_guides_without_retrying_or_creating_order(self):
+        self.ready()
+        self.panel._set_workcell_status("INVENTORY_ERROR", "Timeout", False, False)
+        self.panel.incident_camera.click()
+        self.assertEqual(self.panel.worker.camera_checked, self.config["camera"])
+        self.assertFalse(self.panel.incident_camera.isEnabled())
+        rows = [dict(kind=kind, messages=1 if kind != "depth" else 0)
+                for kind in ("color", "depth", "info")]
+        self.panel.worker.camera_diagnostic.emit(json.dumps({"topics": rows, "all_received": False}))
+        self.assertIn("深度：未收到", self.panel.camera_result.text())
+        self.assertIn("仿真", self.panel.camera_result.text())
+        self.assertTrue(self.panel.incident_camera.isEnabled())
+        self.assertFalse(hasattr(self.panel.worker, "scan_requested"))
+        self.assertFalse(hasattr(self.panel.worker, "submission"))
+        for row in rows:
+            row["messages"] = 2
+        self.panel.worker.camera_diagnostic.emit(json.dumps({"topics": rows, "all_received": True}))
+        self.assertIn("可重试", self.panel.camera_result.text())
+        self.assertIn("不代表识别", self.panel.camera_result.text())
+
+    def test_resolution_guide_has_ordered_checks_and_no_blind_reset(self):
+        from produce_order_workstation.operator_incident import resolution_steps
+        steps = resolution_steps("INVENTORY_ERROR")
+        self.assertIn("检查相机", steps[0])
+        self.assertIn("原订单会保留", steps[2])
+        self.assertIn("不直接恢复", steps[4])
+        self.assertIn("确认取货", " ".join(resolution_steps("READY", {"state": "WAITING_BIN"})))
+
+    def test_failed_order_and_waiting_bin_have_distinct_next_steps(self):
+        self.ready()
+        for state, title, next_step in (("FAILED", "本单失败", "查看日志"),
+                                        ("WAITING_BIN", "箱位", "确认")):
+            self.panel._set_resources(json.dumps({"bins": self.bins, "queue_enabled": True,
+                "can_register": True, "orders": [dict(order_id=state, state=state,
+                reason="test", priority=0, completed=0, total=4, finished_sequence=1)]}))
+            self.assertIn(title, self.panel.incident_title.text())
+            self.assertIn(next_step, self.panel.incident_next.text())
 
     def test_existing_id_in_snapshot_cannot_confirm_a_new_registration(self):
         self.ready()

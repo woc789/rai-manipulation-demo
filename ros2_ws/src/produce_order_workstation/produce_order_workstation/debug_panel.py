@@ -12,7 +12,8 @@ from PyQt5.QtWidgets import QApplication
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from sensor_msgs.msg import Image, CameraInfo
 from rclpy.signals import SignalHandlerOptions
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
@@ -38,6 +39,7 @@ class RosWorker(QThread):
     registered = pyqtSignal(bool, str, str)
     queue_cleared = pyqtSignal(int, int)
     operation_finished = pyqtSignal(str, bool, str)
+    camera_diagnostic = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
@@ -51,6 +53,7 @@ class RosWorker(QThread):
         self._clear_queue_batch = None
         self._service_waits = {}
         self._registration_waits = {}
+        self._camera_probe = None
 
     def submit(self, order_id: str, quantities: dict[str, int], prepare: bool, priority=0) -> None:
         self._commands.put(("submit", order_id, quantities, prepare, priority))
@@ -66,6 +69,9 @@ class RosWorker(QThread):
 
     def replenish(self):
         self._commands.put(("replenish",))
+
+    def check_camera(self, camera):
+        self._commands.put(("check_camera", dict(camera)))
 
     def cancel(self) -> None:
         self._commands.put(("cancel",))
@@ -128,9 +134,11 @@ class RosWorker(QThread):
                         elif command[0] == "clear_queue":
                             self._clear_queue(queue_cancel, command[1])
                         elif command[0] == "refresh_inventory":
-                            self._trigger(refresh)
+                            self._trigger(refresh, "refresh_inventory")
                         elif command[0] == "replenish":
                             self._trigger(replenish)
+                        elif command[0] == "check_camera":
+                            self._start_camera_check(node, command[1])
                 except Empty:
                     pass
                 if not running:
@@ -138,6 +146,7 @@ class RosWorker(QThread):
                 rclpy.spin_once(node, timeout_sec=0.1)
                 self._check_clear_queue_timeout()
                 self._check_service_timeouts()
+                self._poll_camera_check(node)
                 now = node.get_clock().now().nanoseconds / 1e9
                 if now - last_check >= 1.0:
                     online = client.server_is_ready()
@@ -154,6 +163,29 @@ class RosWorker(QThread):
             node.destroy_node()
             if rclpy.ok():
                 rclpy.shutdown()
+
+    def _start_camera_check(self, node, camera):
+        if self._camera_probe is not None:
+            return
+        probe = {"deadline": time.monotonic() + 2.0, "rows": [], "subscriptions": []}
+        self._camera_probe = probe
+        qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
+        for kind, msg_type in (("color", Image), ("depth", Image), ("info", CameraInfo)):
+            row = {"kind": kind, "topic": camera[kind], "messages": 0}
+            probe["rows"].append(row)
+            def received(_message, row=row):
+                row["messages"] += 1
+            probe["subscriptions"].append(node.create_subscription(msg_type, camera[kind], received, qos))
+
+    def _poll_camera_check(self, node):
+        probe = self._camera_probe
+        if probe is None or time.monotonic() < probe["deadline"]:
+            return
+        self._camera_probe = None
+        for subscription in probe["subscriptions"]:
+            node.destroy_subscription(subscription)
+        self.camera_diagnostic.emit(json.dumps({"topics": probe["rows"],
+            "all_received": all(row["messages"] > 0 for row in probe["rows"])}, ensure_ascii=False))
 
     def _register(self, client, command):
         _, order_id, quantities, _, priority = command

@@ -7,13 +7,14 @@ from time import monotonic
 
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
-    QComboBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLineEdit,
+    QComboBox, QDialog, QDialogButtonBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLineEdit,
     QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea,
     QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 import yaml
 
 from .order import Order, OrderLine, validate_order, readable_error
+from .operator_incident import describe_incident, resolution_steps
 from .panel_components import BinCard, Card, Metric, NAMES, ProduceGlyph, StageStrip, STYLE, STATE_NAMES, label
 
 
@@ -37,6 +38,12 @@ class OperatorPanel(QWidget):
         self._can_submit = self._can_recover = self._can_pickup = False
         self._valid = False
         self._state = "UNKNOWN"
+        self._state_reason = ""
+        self._scan_request_pending = False
+        self._scan_requested_at = 0.0
+        self._incident_order_id = None
+        self._camera_checking = False
+        self._camera_check_started = 0.0
         self._bins = []
         self._queue_enabled = False
         self._queue_clear_pending = False
@@ -61,6 +68,8 @@ class OperatorPanel(QWidget):
             self.worker.queue_cleared.connect(self._on_queue_cleared)
         if hasattr(self.worker, "operation_finished"):
             self.worker.operation_finished.connect(self._on_operation_finished)
+        if hasattr(self.worker, "camera_diagnostic"):
+            self.worker.camera_diagnostic.connect(self._on_camera_diagnostic)
         self._new_id()
         self._refresh_history()
         self._restore_last_task()
@@ -150,6 +159,37 @@ class OperatorPanel(QWidget):
         self.operation_notice = label("", "muted", wrap=True)
         self.operation_notice.hide()
         page.addWidget(self.operation_notice)
+        self.incident_card = Card()
+        self.incident_card.setObjectName("incidentCard")
+        self.incident_title = label("", "sectionTitle")
+        self.incident_reason = label("", "muted", wrap=True)
+        self.incident_impact = label("", "muted", wrap=True)
+        self.incident_next = label("", "muted", wrap=True)
+        self.camera_result = label("", "muted", wrap=True)
+        self.camera_result.hide()
+        for widget in (self.incident_title, self.incident_reason, self.incident_impact, self.incident_next):
+            self.incident_card.box.addWidget(widget)
+        self.incident_card.box.addWidget(self.camera_result)
+        actions = QHBoxLayout()
+        self.incident_camera = QPushButton("检查相机数据")
+        self.incident_camera.clicked.connect(self._check_camera)
+        self.incident_scan = QPushButton("重试库存复查")
+        self.incident_scan.clicked.connect(self._scan_inventory)
+        self.incident_cancel = QPushButton("取消此等待订单")
+        self.incident_cancel.clicked.connect(self._cancel_incident_order)
+        self.incident_recover = QPushButton("恢复工作台…")
+        self.incident_recover.clicked.connect(self._recover)
+        self.incident_logs = QPushButton("查看技术日志")
+        self.incident_logs.clicked.connect(lambda: self._navigate("运行日志", 2))
+        self.incident_guide = QPushButton("处理指南")
+        self.incident_guide.clicked.connect(self._show_resolution_guide)
+        for button in (self.incident_camera, self.incident_scan, self.incident_cancel,
+                       self.incident_recover, self.incident_guide, self.incident_logs):
+            actions.addWidget(button)
+        actions.addStretch()
+        self.incident_card.box.addLayout(actions)
+        self.incident_card.hide()
+        page.addWidget(self.incident_card)
         main = QHBoxLayout()
         main.setSpacing(16)
         form = Card()
@@ -375,7 +415,8 @@ class OperatorPanel(QWidget):
         self.priority.setEnabled(editable)
         for spin in self.quantity_spins.values():
             spin.setEnabled(editable)
-        self.scan_button.setEnabled(synced and self._queue_enabled)
+        self.scan_button.setEnabled(synced and self._queue_enabled
+            and not self._scan_request_pending and self._state != "SCANNING")
         row = self.queue_table.currentRow()
         cell = self.queue_table.item(row, 0) if row >= 0 else None
         job = getattr(self, "_queue_jobs", {}).get(cell.text(), {}) if cell else {}
@@ -384,12 +425,96 @@ class OperatorPanel(QWidget):
         self.queue_clear_button.setEnabled(synced and self._queue_enabled
             and not self._queue_clear_pending and bool(self._clearable_orders()))
         self.replenish_button.setEnabled(synced and self._queue_enabled and self._state == "READY")
+        self._refresh_incident(synced)
+
+    def _refresh_incident(self, synced):
+        job = getattr(self, "_queue_jobs", {}).get(self.task_id.text())
+        incident = describe_incident(self._state, self._state_reason, synced, job,
+                                     self.recover_button.isEnabled())
+        self.incident_card.setVisible(incident is not None)
+        if incident is None:
+            self._incident_order_id = None
+            return
+        self._incident_order_id = job.get("order_id") if job else None
+        self.incident_title.setText(incident.title)
+        self.incident_reason.setText("原因：" + (incident.reason[:180] or "等待进一步核对"))
+        self.incident_reason.setToolTip(incident.reason)
+        self.incident_impact.setText("影响：" + incident.impact)
+        self.incident_next.setText("下一步：" + incident.next_step)
+        self.incident_scan.setVisible(incident.scan)
+        self.incident_scan.setEnabled(self.scan_button.isEnabled())
+        self.incident_cancel.setVisible(incident.cancel_waiting)
+        self.incident_cancel.setEnabled(synced and incident.cancel_waiting)
+        self.incident_recover.setVisible(self._state == "RECOVERY_REQUIRED")
+        self.incident_recover.setEnabled(incident.recover)
+        self.incident_logs.setEnabled(True)
+        self.incident_camera.setVisible(incident.scan)
+        self.incident_camera.setEnabled(synced and not self._camera_checking and hasattr(self.worker, "check_camera"))
+        self.incident_camera.setText("检查中…" if self._camera_checking else "检查相机数据")
+
+    def _show_resolution_guide(self):
+        job = getattr(self, "_queue_jobs", {}).get(self._incident_order_id)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("问题处理指南")
+        dialog.setMinimumWidth(600)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(label(self.incident_title.text(), "sectionTitle"))
+        for index, step in enumerate(resolution_steps(self._state, job), 1):
+            layout.addWidget(label(f"{index}. {step}", "muted", wrap=True))
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.exec_()
+
+    def _check_camera(self):
+        if not self.incident_camera.isEnabled():
+            return
+        self._camera_checking = True
+        self._camera_check_started = monotonic()
+        self.camera_result.setText("正在检查三路相机消息，约 2 秒；不运行视觉模型、不移动机械臂。")
+        self.camera_result.show()
+        self.worker.check_camera(self.config["camera"])
+        self._update_controls()
+
+    def _on_camera_diagnostic(self, payload):
+        try:
+            result = json.loads(payload)
+        except (ValueError, TypeError):
+            return
+        self._camera_checking = False
+        names = {"color": "图像", "depth": "深度", "info": "相机参数"}
+        summary = " / ".join(f"{names.get(row['kind'], row['kind'])}：{'收到' if row['messages'] else '未收到'}"
+                             for row in result["topics"])
+        next_step = "消息链路有数据，可重试库存复查；不代表识别、时间同步或三维坐标已正确。" if result["all_received"] else "先检查仿真是否暂停或退出，恢复后重新检查；不要重复下单。"
+        self.camera_result.setText(f"{datetime.now():%H:%M:%S} 检查 · " + summary + "。" + next_step)
+        self.camera_result.setToolTip(payload)
+        self.camera_result.show()
+        self._on_notice(summary + "。" + next_step)
+        self._update_controls()
+
+    def _cancel_incident_order(self):
+        identifier = self._incident_order_id
+        job = getattr(self, "_queue_jobs", {}).get(identifier, {})
+        if not self.incident_cancel.isEnabled() or job.get("state") not in (
+                "QUEUED", "WAITING_STOCK", "WAITING_BIN") or job.get("completed", 0):
+            self._on_notice("订单状态已变化，请核对当前任务；未发送取消请求")
+            return
+        if QMessageBox.question(self, "取消等待订单", f"取消订单 {identifier}？\n不会清除其他订单或移动商品。",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes:
+            self._on_notice(f"正在请求取消等待订单 {identifier}…")
+            self.worker.cancel_queued(identifier)
 
     def _set_connected(self, online):
         self._online = online
         self._check_status()
 
     def _check_status(self):
+        if self._camera_checking and monotonic() - self._camera_check_started > 10:
+            self._camera_checking = False
+            self.camera_result.setText("相机检查响应未确认，请先检查通信；不能据此认定相机故障。")
+        if self._scan_request_pending and monotonic() - self._scan_requested_at > 10:
+            self._scan_request_pending = False
+            self._on_notice("复查请求状态尚未确认；请核对工作台状态，勿连续点击")
         synced = self._online and monotonic() - self._last_status < 5
         if self._last_inventory and (not synced or monotonic() - self._last_inventory >= 5):
             self.inventory_hint.setText("历史视觉观测 · 台账未同步 · 不可当作当前实物库存")
@@ -403,8 +528,15 @@ class OperatorPanel(QWidget):
         # Compatibility with an older server that labels a failed scan READY.
         if state == "READY" and reason.startswith("视觉库存复查失败"):
             state = "INVENTORY_ERROR"
+        if state != self._state:
+            self.camera_result.hide()
         self._state, self._can_submit, self._can_recover = state, can_submit, can_recover
-        self.workcell_notice.setText(reason if state not in ("READY", "RUNNING") else "")
+        self._state_reason = reason
+        if state == "SCANNING":
+            self._scan_request_pending = False
+        self.workcell_notice.setText("库存复查失败 · 订单保留，处理步骤见下方" if state == "INVENTORY_ERROR"
+            else reason if state not in ("READY", "RUNNING") else "")
+        self.workcell_notice.setToolTip(reason)
         self.workcell_notice.setVisible(bool(self.workcell_notice.text()))
         self._update_metrics()
         self._update_controls()
@@ -561,6 +693,8 @@ class OperatorPanel(QWidget):
         if operation == "cancel":
             self._cancel_requesting = False
             self._cancel_waiting = success
+        if operation == "refresh_inventory" and not success:
+            self._scan_request_pending = False
         self._on_notice(message)
         self._update_controls()
 
@@ -575,8 +709,13 @@ class OperatorPanel(QWidget):
             self.worker.replenish()
 
     def _scan_inventory(self):
+        if not self.scan_button.isEnabled():
+            return
+        self._scan_request_pending = True
+        self._scan_requested_at = monotonic()
         self._on_notice("已请求视觉复查，将在工作台空闲时扫描")
         self.worker.refresh_inventory()
+        self._update_controls()
 
     def _on_registered(self, success, order_id, message):
         if not self._registration_pending or order_id != self._registration_order_id:

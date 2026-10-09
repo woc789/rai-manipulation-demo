@@ -100,6 +100,25 @@ class QueueClearTests(unittest.TestCase):
         self.assertFalse(results[-1][0])
         self.assertIn("未发送", results[-1][2])
 
+    def test_camera_probe_counts_messages_cleans_subscriptions_and_does_not_call_service(self):
+        node = MagicMock()
+        reports = []
+        self.worker.camera_diagnostic.connect(reports.append)
+        self.worker._start_camera_check(node, {"color": "/c", "depth": "/d", "info": "/i"})
+        callbacks = [entry.args[2] for entry in node.create_subscription.call_args_list]
+        callbacks[0](None)
+        callbacks[1](None)
+        deadline = self.worker._camera_probe["deadline"]
+        with patch("produce_order_workstation.debug_panel.time.monotonic", return_value=deadline + 1):
+            self.worker._poll_camera_check(node)
+        import json
+        report = json.loads(reports[0])
+        self.assertFalse(report["all_received"])
+        self.assertEqual([r["messages"] for r in report["topics"]], [1, 1, 0])
+        self.assertEqual(node.destroy_subscription.call_count, 3)
+        self.assertIsNone(self.worker._camera_probe)
+        node.create_client.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
