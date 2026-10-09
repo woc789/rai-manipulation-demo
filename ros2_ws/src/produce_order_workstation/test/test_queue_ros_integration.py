@@ -16,7 +16,7 @@ import rclpy
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
-from produce_order_interfaces.srv import SubmitOrder, ConfirmPickup
+from produce_order_interfaces.srv import SubmitOrder, ConfirmPickup, CancelQueuedOrder
 from produce_order_interfaces.msg import OrderLine
 from produce_order_workstation.inventory import InventoryLedger
 from produce_order_workstation import order_server
@@ -136,6 +136,7 @@ def test_service_queue_action_feedback_priority_resume_and_pickup(monkeypatch, t
     thread.start()
     submit = client.create_client(SubmitOrder, "/produce_orders/submit")
     pickup = client.create_client(ConfirmPickup, "/produce_orders/confirm_pickup")
+    cancel_queued = client.create_client(CancelQueuedOrder, "/produce_orders/cancel_queued")
 
     def register(identifier, quantities, priority):
         future = submit.call_async(SubmitOrder.Request(order_id=identifier, zone="A", priority=priority,
@@ -146,10 +147,22 @@ def test_service_queue_action_feedback_priority_resume_and_pickup(monkeypatch, t
     try:
         assert submit.wait_for_service(timeout_sec=5)
         wait_for(lambda: server._inventory_ready)
-        server.workstation.after_first_item = lambda: register("isolated-urgent", {"apple": 1}, 10)
+        def submit_while_running():
+            assert server._busy
+            register("isolated-cancel", {"apple": 1}, 1)
+            assert server.queue.jobs["isolated-cancel"].state == "QUEUED"
+            future = cancel_queued.call_async(CancelQueuedOrder.Request(
+                order_id="isolated-cancel", discard_partial=False))
+            wait_for(future.done)
+            assert future.result().success
+            assert server.queue.jobs["isolated-cancel"].state == "CANCELED"
+            assert "isolated-cancel" not in server.bin_manager.orders
+            register("isolated-urgent", {"apple": 1}, 10)
+        server.workstation.after_first_item = submit_while_running
         register("isolated-normal", {"corn": 2, "apple": 1}, 0)
-        wait_for(lambda: len(server.queue.jobs) == 2 and all(
-            job.state == "WAITING_PICKUP" for job in server.queue.jobs.values()))
+        wait_for(lambda: len(server.queue.jobs) == 3 and all(
+            job.state == "WAITING_PICKUP" for job in server.queue.jobs.values()
+            if job.order.order_id != "isolated-cancel"))
         assert server.workstation.execution_slices == ["isolated-normal", "isolated-urgent", "isolated-normal"]
         assert len(server.workstation.boxes_created) == 2
         assert server.bin_manager.orders["isolated-normal"].bin_indices == (0,)

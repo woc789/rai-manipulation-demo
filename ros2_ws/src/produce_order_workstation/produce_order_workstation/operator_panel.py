@@ -29,6 +29,14 @@ class OperatorPanel(QWidget):
             config = yaml.safe_load(path.read_text(encoding="utf-8"))
         self.config = config
         self.report_dir = report_dir or Path.home() / ".local/share/produce_order_workstation/reports"
+        self._hidden_history_path = self.report_dir / ".panel_hidden_orders.json"
+        try:
+            hidden = json.loads(self._hidden_history_path.read_text(encoding="utf-8"))
+            self._hidden_history = set(hidden) if isinstance(hidden, list) and all(isinstance(v, str) for v in hidden) else set()
+        except (OSError, ValueError, TypeError):
+            self._hidden_history = set()
+        self._registration_receipt_id = None
+        self._queue_cancel_pending = None
         self._online = False
         self._last_status = 0.0
         self._last_inventory = 0.0
@@ -212,7 +220,7 @@ class OperatorPanel(QWidget):
         self.priority.setPrefix("优先级 ")
         self.priority.setToolTip("数值越大越优先；不会中途抢占正在搬运的商品")
         form.box.addWidget(self.priority)
-        form.box.addStretch()
+        form.box.addSpacing(8)
         self.submit_button = QPushButton("提交订单")
         self.submit_button.setObjectName("primary")
         self.submit_button.clicked.connect(self._submit)
@@ -220,6 +228,9 @@ class OperatorPanel(QWidget):
         self.retry_button = QPushButton("换订单号")
         self.retry_button.clicked.connect(self._new_id)
         form.box.addWidget(self.retry_button)
+        self.registration_receipt = label("尚未提交订单", "muted", wrap=True)
+        form.box.addWidget(self.registration_receipt)
+        form.box.addStretch()
         main.addWidget(form)
         right = QVBoxLayout()
         task = Card()
@@ -305,6 +316,22 @@ class OperatorPanel(QWidget):
             log.setMinimumHeight(140)
             log.setMaximumHeight(180)
         self.tabs.addTab(self.history, "订单记录")
+        history_page = QWidget()
+        history_layout = QVBoxLayout(history_page)
+        history_layout.setContentsMargins(0, 0, 0, 0)
+        history_layout.addWidget(self.history)
+        history_actions = QHBoxLayout()
+        self.history_clear_button = QPushButton("清除已结束记录")
+        self.history_clear_button.setToolTip("清除界面记录，保留原始报告；执行中、暂停、待取货及需恢复订单保留")
+        self.history_clear_button.clicked.connect(self._clear_history)
+        self.history_restore_button = QPushButton("恢复显示")
+        self.history_restore_button.clicked.connect(self._restore_history)
+        history_actions.addWidget(self.history_clear_button)
+        history_actions.addWidget(self.history_restore_button)
+        history_actions.addStretch()
+        history_layout.addLayout(history_actions)
+        self.tabs.removeTab(0)
+        self.tabs.insertTab(0, history_page, "订单记录")
         self.tabs.addTab(self.events, "事件")
         self.tabs.addTab(self.technical, "技术日志")
         inventory_page = QWidget()
@@ -322,13 +349,15 @@ class OperatorPanel(QWidget):
         self.inventory_table.setMaximumHeight(180)
         inventory_layout.addWidget(self.inventory_table)
         self.tabs.addTab(inventory_page, "视觉台账")
-        queue_page = QWidget()
-        queue_layout = QVBoxLayout(queue_page)
-        queue_layout.setContentsMargins(0, 6, 0, 0)
-        self.queue_table = QTableWidget(0, 5)
-        self.queue_table.setHorizontalHeaderLabels(["订单", "优先级", "状态", "进度", "等待原因"])
+        self.queue_card = Card()
+        queue_layout = self.queue_card.box
+        self.queue_summary = label("订单队列 · 等待同步", "sectionTitle")
+        queue_layout.addWidget(self.queue_summary)
+        self.queue_table = QTableWidget(0, 7)
+        self.queue_table.setHorizontalHeaderLabels(["订单", "优先级", "状态", "进度", "等待原因", "顺位", "商品"])
         self.queue_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.queue_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.queue_table.setSelectionMode(QTableWidget.SingleSelection)
         self.queue_table.itemSelectionChanged.connect(self._update_controls)
         self.queue_table.verticalHeader().hide()
         self.queue_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
@@ -349,7 +378,8 @@ class OperatorPanel(QWidget):
         for button in (self.queue_cancel_button, self.queue_clear_button, self.scan_button, self.replenish_button):
             actions.addWidget(button)
         queue_layout.addLayout(actions)
-        self.tabs.addTab(queue_page, "任务调度")
+        # Queue is always visible next to the draft, not hidden in a log tab.
+        right.insertWidget(1, self.queue_card)
         records.box.addWidget(self.tabs)
         page.addWidget(records)
         page.addStretch()
@@ -361,6 +391,8 @@ class OperatorPanel(QWidget):
             button.setChecked(button.text() == name)
         if name == "工作台":
             self.scroll.verticalScrollBar().setValue(0)
+        elif name == "任务调度":
+            self.scroll.ensureWidgetVisible(self.queue_card)
         else:
             self.tabs.setCurrentIndex(index)
             self.scroll.ensureWidgetVisible(self.records)
@@ -425,7 +457,10 @@ class OperatorPanel(QWidget):
         cell = self.queue_table.item(row, 0) if row >= 0 else None
         job = getattr(self, "_queue_jobs", {}).get(cell.text(), {}) if cell else {}
         self.queue_cancel_button.setEnabled(synced and self._queue_enabled
+            and self._queue_cancel_pending is None
             and job.get("state") in ("QUEUED", "WAITING_STOCK", "WAITING_BIN", "PAUSED"))
+        self.queue_cancel_button.setText("正在取消…" if self._queue_cancel_pending else
+            "丢弃暂停订单…" if job.get("state") == "PAUSED" else "取消选中排队单")
         self.queue_clear_button.setEnabled(synced and self._queue_enabled
             and not self._queue_clear_pending and bool(self._clearable_orders()))
         self.replenish_button.setEnabled(synced and self._queue_enabled and self._state == "READY")
@@ -567,6 +602,14 @@ class OperatorPanel(QWidget):
                 for job in status.get("orders", [])):
             self._on_registered(True, self._registration_order_id, "状态台账确认订单已登记")
         self._render_queue(status.get("orders", []))
+        if self._registration_receipt_id:
+            job = self._queue_jobs.get(self._registration_receipt_id)
+            if job:
+                state_name = {"QUEUED": "排队", "WAITING_STOCK": "等待库存核对",
+                    "WAITING_BIN": "等待箱位", "DISPATCHING": "准备执行", "RUNNING": "执行中",
+                    "PAUSED": "安全暂停", "WAITING_PICKUP": "待取货", "COLLECTED": "已取货",
+                    "CANCELED": "已取消", "CANCELLED": "已取消", "FAILED": "失败"}.get(job["state"], job["state"])
+                self.registration_receipt.setText(f"✓ 已登记：{job['order_id']}\n当前状态：{state_name} · {job.get('reason', '')}")
         self._can_pickup = bool(status.get("can_pickup"))
         selected = self.pickup_orders.currentData()
         self.pickup_orders.clear()
@@ -591,7 +634,16 @@ class OperatorPanel(QWidget):
                  "WAITING_PICKUP": "等待取货", "COLLECTED": "已取货", "FAILED": "失败",
                  "CANCELED": "已取消", "CANCELLED": "已取消", "PAUSED": "暂停 · 保留箱位",
                  "EXECUTION_UNCERTAIN": "执行结果不明 · 待核对"}
-        visible_orders = [job for job in orders if job["state"] not in ("CANCELED", "CANCELLED")]
+        visible_orders = [job for job in orders if job["state"] not in ("CANCELED", "CANCELLED")
+            and (job["order_id"] not in self._hidden_history or self._history_protected(job["order_id"], job["state"]))]
+        pending_states = ("QUEUED", "WAITING_STOCK", "WAITING_BIN", "PAUSED")
+        waiting_jobs = sorted((job for job in orders if job["state"] in pending_states),
+                              key=lambda job: -job["priority"])
+        ranks = {job["order_id"]: str(index + 1) for index, job in enumerate(waiting_jobs)}
+        running_states = ("RUNNING", "DISPATCHING", "EXECUTION_UNCERTAIN")
+        visible_orders.sort(key=lambda job: (0 if job["state"] in running_states else
+            1 if job["state"] in pending_states else 2, -job["priority"] if job["state"] in pending_states else 0))
+        self.queue_summary.setText(f"订单队列 · 执行 {sum(j['state'] in running_states for j in orders)} · 等待 {len(waiting_jobs)}")
         self.queue_table.setRowCount(len(visible_orders))
         for row, job in enumerate(visible_orders):
             reason = job.get("reason", "")
@@ -601,13 +653,16 @@ class OperatorPanel(QWidget):
                 reason += " · " + " / ".join(f"{NAMES.get(sku, sku)}缺少可用观测 {count}"
                                                 for sku, count in job["missing"].items())
             values = [job["order_id"], job["priority"], names.get(job["state"], job["state"]),
-                      f"{job['completed']}/{job['total']}", reason]
+                      f"{job['completed']}/{job['total']}", reason,
+                      ranks.get(job["order_id"], "—"),
+                      " / ".join(f"{NAMES.get(line['sku'], line['sku'])}×{line['quantity']}" for line in job.get("lines", []))]
             for col, value in enumerate(values):
                 cell = QTableWidgetItem(str(value))
                 cell.setToolTip(str(value))
                 self.queue_table.setItem(row, col, cell)
             if job["order_id"] == selected_id:
                 self.queue_table.selectRow(row)
+        self.history_clear_button.setEnabled(self.history.rowCount() > 0)
         if not self._queue_enabled:
             return
         running = next((job for job in orders if job["state"] in ("RUNNING", "DISPATCHING", "EXECUTION_UNCERTAIN")), None)
@@ -640,12 +695,16 @@ class OperatorPanel(QWidget):
                 self._last_queue_terminal = None
                 return
             terminal = max((job for job in orders if job["state"] in (
-                "WAITING_PICKUP", "FAILED", "CANCELLED")),
+                "WAITING_PICKUP", "FAILED", "CANCELLED", "CANCELED")),
                 key=lambda job: job.get("finished_sequence", 0), default=None)
+            terminal = next((job for job in orders if job["order_id"] == self._submitted_order_id
+                and job["state"] in ("CANCELED", "CANCELLED")), terminal)
             if terminal and self._last_queue_terminal != (terminal["order_id"], terminal["state"]):
                 self._last_queue_terminal = (terminal["order_id"], terminal["state"])
                 self.task_id.setText(terminal["order_id"])
                 self.task_status.setText(names[terminal["state"]])
+                if terminal["state"] in ("CANCELED", "CANCELLED"):
+                    self.stage.setText("已取消")
                 self._set_progress(terminal["completed"], terminal["total"])
                 self.failure_reason.setText(terminal["reason"])
                 self.failure_reason.setVisible(terminal["state"] != "WAITING_PICKUP")
@@ -685,13 +744,16 @@ class OperatorPanel(QWidget):
         if row >= 0 and self._queue_enabled:
             order_id = self.queue_table.item(row, 0).text()
             job = self._queue_jobs[order_id]
-            if job["completed"]:
+            if job["state"] == "PAUSED":
                 if QMessageBox.question(self, "丢弃部分订单", "仅允许丢弃安全暂停的订单。确认移走已装商品和订单箱？") == QMessageBox.Yes:
+                    self._queue_cancel_pending = order_id
                     self._on_notice("已请求丢弃安全暂停订单，等待服务确认…")
                     self.worker.cancel_queued(order_id, True)
             else:
+                self._queue_cancel_pending = order_id
                 self._on_notice("正在取消选中订单，等待服务确认…")
                 self.worker.cancel_queued(order_id)
+            self._update_controls()
 
     def _request_cancel(self):
         if not self.cancel_button.isEnabled():
@@ -703,6 +765,13 @@ class OperatorPanel(QWidget):
         self.worker.cancel()
 
     def _on_operation_finished(self, operation, success, message):
+        if operation == "cancel_queued":
+            identifier = self._queue_cancel_pending
+            self._queue_cancel_pending = None
+            if success and identifier in getattr(self, "_queue_jobs", {}):
+                self._queue_jobs[identifier]["state"] = "CANCELED"
+                self._queue_jobs[identifier]["reason"] = "用户取消排队订单"
+                self._render_queue(list(self._queue_jobs.values()))
         if operation == "cancel":
             self._cancel_requesting = False
             self._cancel_waiting = success
@@ -738,6 +807,9 @@ class OperatorPanel(QWidget):
         self._on_notice(f"{order_id} · {message}")
         if success:
             self._submitted_order_id = order_id
+            self._registration_receipt_id = order_id
+            self.registration_receipt.setText(f"✓ 已登记：{order_id}\n等待服务端队列状态同步")
+            self.scroll.ensureWidgetVisible(self.queue_card)
             self._new_id()
             if not self._order_active:
                 self.task_status.setText("已登记 · 等待调度")
@@ -746,6 +818,10 @@ class OperatorPanel(QWidget):
             self.task_status.setText("未确认" if "未确认" in message else "未接收")
             self.failure_reason.setText(message)
             self.failure_reason.show()
+        if not success:
+            if "未确认" in message:
+                self._registration_receipt_id = order_id
+            self.registration_receipt.setText(f"{'登记未确认' if '未确认' in message else '登记失败'}：{order_id}\n{message}")
         self._update_controls()
 
     def _set_inventory(self, payload):
@@ -792,6 +868,8 @@ class OperatorPanel(QWidget):
             self._registration_pending = True
             self._registration_order_id = order.order_id
             self._registration_reconcile_allowed = order.order_id not in getattr(self, "_queue_jobs", {})
+            self._registration_receipt_id = None
+            self.registration_receipt.setText(f"正在登记：{order.order_id}")
             self._on_notice(f"正在提交 {order.order_id}，等待登记确认…")
             if not self._order_active:
                 self.task_id.setText(order.order_id)
@@ -942,7 +1020,11 @@ class OperatorPanel(QWidget):
                 continue
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(data, dict) or not data.get("order_id") or "status" not in data or "requested" not in data:
+                    continue
                 order_id = data.get("order_id", path.stem)
+                if order_id in self._hidden_history and not self._history_protected(order_id, data.get("status")):
+                    continue
                 lines = data.get("lines", [])
                 products = " / ".join(f"{NAMES.get(l.get('sku'), l.get('sku', ''))}×{l.get('quantity', '')}" for l in lines)
                 delivery = "已取货" if path.with_name(f"{path.stem}.pickup.json").exists() else "—"
@@ -964,6 +1046,59 @@ class OperatorPanel(QWidget):
                 item.setToolTip(str(path) if col == 0 else str(value))
                 self.history.setItem(row, col, item)
         self.tabs.setTabText(0, f"订单记录 · {len(rows)}")
+        self.history_restore_button.setEnabled(bool(self._hidden_history))
+        self.history_clear_button.setEnabled(bool(rows))
+
+    def _history_protected(self, order_id, status):
+        if any(b.get("order_id") == order_id and b.get("state") != "FREE" for b in self._bins):
+            return True
+        job = getattr(self, "_queue_jobs", {}).get(order_id, {})
+        return job.get("state") in ("QUEUED", "WAITING_STOCK", "WAITING_BIN", "PAUSED",
+            "RUNNING", "DISPATCHING", "EXECUTION_UNCERTAIN", "WAITING_PICKUP") or (
+            status == "COMPLETED" and not (self.report_dir / f"{order_id}.pickup.json").exists()) or (
+            status == "PAUSED" and not (self.report_dir / f"{order_id}.discard.json").exists())
+
+    def _save_hidden_history(self):
+        self.report_dir.mkdir(parents=True, exist_ok=True)
+        temporary = self._hidden_history_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(sorted(self._hidden_history)), encoding="utf-8")
+        temporary.replace(self._hidden_history_path)
+
+    def _clear_history(self):
+        if QMessageBox.question(self, "清除已结束记录", "清除已结束订单的界面记录？\n原始报告保留，可恢复显示；执行中、暂停、待取货和需恢复订单不会清除。",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+        previous = set(self._hidden_history)
+        for path in self.report_dir.glob("*.json"):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(data, dict) and data.get("order_id") and "requested" in data and data.get("status") in (
+                        "COMPLETED", "FAILED", "CANCELLED", "CANCELED") and not self._history_protected(data["order_id"], data["status"]):
+                    self._hidden_history.add(data["order_id"])
+            except (OSError, ValueError, TypeError):
+                continue
+        try:
+            self._save_hidden_history()
+        except OSError as exc:
+            self._hidden_history = previous
+            self._on_notice(f"清除记录失败：{exc}")
+            return
+        self._refresh_history()
+        self._render_queue(list(getattr(self, "_queue_jobs", {}).values()))
+        self._on_notice(f"已清除 {len(self._hidden_history - previous)} 份界面记录；原始报告保留")
+
+    def _restore_history(self):
+        previous = set(self._hidden_history)
+        self._hidden_history.clear()
+        try:
+            self._save_hidden_history()
+        except OSError as exc:
+            self._hidden_history = previous
+            self._on_notice(f"恢复记录失败：{exc}")
+            return
+        self._refresh_history()
+        self._render_queue(list(getattr(self, "_queue_jobs", {}).values()))
+        self._on_notice("已恢复订单记录显示")
 
     def closeEvent(self, event):
         if self._started:

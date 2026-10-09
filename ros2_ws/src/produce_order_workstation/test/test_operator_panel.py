@@ -138,6 +138,80 @@ class OperatorPanelTests(unittest.TestCase):
         self.assertEqual(self.panel.task_count.text(), "1 / 1")
         self.assertFalse(hasattr(self.panel.worker, "submission"))
 
+    def test_queue_is_on_main_page_sorted_and_registration_receipt_survives_notices(self):
+        self.ready()
+        jobs = [dict(order_id=identifier, priority=priority, state=state, completed=0,
+                     total=1, reason="等待调度", lines=[dict(sku="corn", quantity=1)])
+                for identifier, priority, state in (("ordinary", 1, "QUEUED"),
+                    ("urgent", 8, "QUEUED"), ("active", 0, "RUNNING"))]
+        self.panel._set_resources(json.dumps(dict(bins=self.bins, queue_enabled=True,
+            can_register=True, orders=jobs)))
+        self.assertEqual([self.panel.queue_table.item(r, 0).text() for r in range(3)],
+                         ["active", "urgent", "ordinary"])
+        self.assertEqual(self.panel.queue_table.item(1, 5).text(), "1")
+        self.assertEqual(self.panel.queue_table.item(1, 6).text(), "玉米×1")
+        self.assertIn("等待 2", self.panel.queue_summary.text())
+        self.assertEqual(self.panel.tabs.count(), 4)
+        self.panel._submit()
+        identifier = self.panel.worker.submission[0]
+        self.panel._on_registered(True, identifier, "已登记")
+        self.panel._on_notice("一条后来的普通日志")
+        self.assertIn(identifier, self.panel.registration_receipt.text())
+        self.assertIn("已登记", self.panel.registration_receipt.text())
+        self.assertEqual(self.panel.task_id.text(), "active")
+
+    def test_queued_cancel_response_releases_button_and_removes_confirmed_job(self):
+        self.ready()
+        job = dict(order_id="waiting", priority=0, state="QUEUED", completed=0, total=1, reason="")
+        self.panel._set_resources(json.dumps(dict(bins=self.bins, queue_enabled=True,
+            can_register=True, orders=[job])))
+        self.panel.queue_table.selectRow(0)
+        self.panel._cancel_queued()
+        self.assertFalse(self.panel.queue_cancel_button.isEnabled())
+        self.panel._on_operation_finished("cancel_queued", False, "超时，结果未确认")
+        self.assertTrue(self.panel.queue_cancel_button.isEnabled())
+        self.assertEqual(self.panel.queue_table.rowCount(), 1)
+        self.panel._cancel_queued()
+        self.panel._on_operation_finished("cancel_queued", True, "已取消")
+        self.assertEqual(self.panel.queue_table.rowCount(), 0)
+        self.assertIsNone(self.panel._queue_cancel_pending)
+
+    def test_history_clear_persists_preserves_reports_and_protects_live_resources(self):
+        from PyQt5.QtWidgets import QMessageBox
+        for identifier, status in (("old", "FAILED"), ("waiting-pickup", "COMPLETED"),
+                                   ("needs-recovery", "FAILED")):
+            (Path(self.temp.name) / f"{identifier}.json").write_text(json.dumps(dict(
+                order_id=identifier, status=status, completed=0, requested=1)))
+        (Path(self.temp.name) / "diagnostic.json").write_text('{"samples": []}')
+        self.panel._bins = [dict(bin_id="A1", order_id="needs-recovery", state="RECOVERY_REQUIRED")]
+        self.panel._refresh_history()
+        self.assertEqual(self.panel.history.rowCount(), 3)
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.Yes):
+            self.panel._clear_history()
+        self.assertEqual(self.panel.history.rowCount(), 2)
+        self.assertTrue((Path(self.temp.name) / "old.json").exists())
+        self.assertEqual(self.panel._hidden_history, {"old"})
+        other = OperatorPanel(FakeWorker, start_worker=False, config=self.config, report_dir=Path(self.temp.name))
+        try:
+            self.assertEqual(other._hidden_history, {"old"})
+            other._restore_history()
+            self.assertEqual(other.history.rowCount(), 3)
+        finally:
+            other.close()
+
+    def test_registration_timeout_can_be_confirmed_by_later_server_snapshot(self):
+        self.ready()
+        self.panel._set_resources(json.dumps(dict(bins=self.bins, queue_enabled=True,
+            can_register=True, orders=[])))
+        self.panel._submit()
+        identifier = self.panel.worker.submission[0]
+        self.panel._on_registered(False, identifier, "登记结果未确认")
+        self.assertIn("未确认", self.panel.registration_receipt.text())
+        self.panel._set_resources(json.dumps(dict(bins=self.bins, queue_enabled=True,
+            can_register=True, orders=[dict(order_id=identifier, priority=0, state="QUEUED",
+                completed=0, total=4, reason="等待调度")])))
+        self.assertIn("✓ 已登记", self.panel.registration_receipt.text())
+
     def test_small_window_has_no_horizontal_page_scroll(self):
         self.panel.resize(1024, 768)
         self.panel.show()
