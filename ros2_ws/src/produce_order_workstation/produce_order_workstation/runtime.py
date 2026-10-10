@@ -58,15 +58,23 @@ class Workstation:
         self._planning_scene = None
         self._scene_prepared = False
         self._placed_entities: list[tuple] = []
+        self._used_placement_targets = []
         self._delivered_entity_names: set[str] = set()
         self._allocated_bin_index: int | None = None
         self._bin_templates = {}
         self._completed_by_sku: dict[str, int] = {}
         self._visual_candidates: dict[str, tuple[str, tuple[float, float, float]]] = {}
         self._inventory_candidates: dict[str, str] = {}
-        self.inventory = InventoryLedger()
+        perception = config.get("perception", {})
+        self.inventory = InventoryLedger(
+            association_radius=perception.get("association_radius_m", 0.035),
+            ttl=perception.get("inventory_ttl_s", 60.0),
+        )
         self._perception_generation = 0
         self._rejected_visual_positions: dict[str, list[tuple[float, float, float]]] = {}
+        self._candidate_rejections = {}
+        self._visual_observed_at = 0.0
+        self.physical_state_uncertain = False
         self.motion_attempted = False
         self._motion_client = None
         self._active_order_id: str | None = None
@@ -198,12 +206,16 @@ class Workstation:
         self._scene_prepared = True
         self.inventory.reset()
         self._placed_entities = []
+        self._used_placement_targets = []
         self._delivered_entity_names = set()
         self._allocated_bin_index = None
         self._completed_by_sku = {}
         self._visual_candidates = {}
         self._perception_generation = 0
         self._rejected_visual_positions = {}
+        self._candidate_rejections = {}
+        self._visual_observed_at = 0.0
+        self.physical_state_uncertain = False
         self.motion_attempted = False
         self._active_order_id = None
         zone = self.config["zones"]["A"]
@@ -289,11 +301,15 @@ class Workstation:
         if not self._scene_prepared:
             raise OrderError("Preloaded scene is not ready")
         self._placed_entities = []
+        self._used_placement_targets = []
         self._completed_by_sku = {line.sku: 0 for line in order.lines}
         self._visual_candidates = {}
         self._inventory_candidates = {}
         self._perception_generation = 0
         self._rejected_visual_positions = {}
+        self._candidate_rejections = {}
+        self._visual_observed_at = 0.0
+        self.physical_state_uncertain = False
         self.motion_attempted = False
         self._active_order_id = order.order_id
         self._allocated_bin_index = bin_index
@@ -366,9 +382,41 @@ class Workstation:
                 raise OrderError("Perception tool timed out; stop instead of treating it as missing stock")
             points = parse_centroids(result)
             self._record_perception_pipeline(sku, alias, points)
-            if points:
+            # An alias producing only recently rejected candidates is not a
+            # usable result. Try the next configured alias, still bounded.
+            if points and any(not self._recently_rejected(sku, p) for p in points):
                 return points
         return []
+
+    def _recently_rejected(self, sku, point):
+        now = time.monotonic()
+        ttl = self.config.get("perception", {}).get("rejection_cooldown_s", 20.0)
+        radius = self.config.get("perception", {}).get("rejection_radius_m", 0.02)
+        self._candidate_rejections = {
+            key: value for key, value in self._candidate_rejections.items()
+            if now - value["time"] < ttl
+        }
+        return any(record["sku"] == sku and distance_xy(point, record["position"]) < radius
+                   for record in self._candidate_rejections.values())
+
+    def _reject_visual_candidate(self, order, detection_id, sku, source, code, details):
+        self._candidate_rejections[detection_id] = dict(
+            sku=sku, position=source, time=time.monotonic(), code=code)
+        item_id = self._inventory_candidates.get(detection_id)
+        if item_id is not None:
+            self.inventory.reject_candidate(item_id, order.order_id)
+        self._visual_candidates.pop(detection_id, None)
+        self.event(order.order_id, "CANDIDATE_REJECTED", detection_id=detection_id,
+                   sku=sku, reason_code=code, visual_position=list(source), **details)
+
+    def _choose_source(self, points, zone):
+        # In fulfillment mode, absent box templates are not physical exclusion
+        # zones. Never expose simulator object labels/coordinates as detections.
+        if fulfillment_mode(self.config) == "fulfillment" and self._scene_prepared and self._scene_bridge:
+            existing = {entity.name for entity in self._scene_bridge.spawned_entities}
+            zone = dict(zone, slots=[slot for slot, name in zip(zone["slots"], zone["slot_entities"])
+                                     if name in existing])
+        return choose_source(points, self.config, zone)
 
     def _record_perception_pipeline(self, sku, alias, points):
         pipeline = getattr(getattr(self._position_tool, "gripping_points_tool", None),
@@ -411,7 +459,7 @@ class Workstation:
             points = []
             for point in self.detect(sku):
                 try:
-                    choose_source([point], self.config, zone)
+                    self._choose_source([point], zone)
                 except OrderError:
                     continue
                 if not any(distance_xy(point, existing) < .035 for existing in points):
@@ -451,7 +499,7 @@ class Workstation:
             point = self._scene_bridge.get_object_pose(entity).pose.position
             xyz = (point.x, point.y, point.z)
             try:
-                choose_source([xyz], self.config, zone)
+                self._choose_source([xyz], zone)
             except OrderError:
                 continue
             result[entity.name] = (entity, xyz)
@@ -470,6 +518,21 @@ class Workstation:
 
     def _source_target_clearance(self):
         return self.config["workspace"].get("source_target_clearance_m", 0.12)
+
+    def _placement_target(self, order, sku, source):
+        placement, preferred = self._next_placement(order, sku)
+        if fulfillment_mode(self.config) != "fulfillment":
+            return placement, preferred
+        center = self.config["zones"][order.zone]["slots"][placement.bin_index]
+        options = [preferred] + [(center[0] + dx, center[1] + dy)
+                                 for dx, dy in ((-.03, -.04), (-.03, .04), (.03, -.04), (.03, .04))]
+        for target in options:
+            if (distance_xy(source, target) > self._source_target_clearance()
+                    and all(distance_xy(target, used) >= .04 - 1e-6
+                            for used in self._used_placement_targets)):
+                return placement, target
+        raise PerceptionMismatch("No unoccupied destination offset has safe source clearance; choose another candidate",
+                                 code="DESTINATION_CONFLICT", reobserve=False)
 
     def get_object_positions(self, order: Order, sku: str) -> dict:
         """Agent-facing RGB-D perception; never reveal simulator entity labels."""
@@ -490,14 +553,11 @@ class Workstation:
                     "duplicate": 0, "target_clearance": 0, "reservation": 0}
         for point in sorted(raw_points, key=lambda value: (value[1], value[0])):
             try:
-                choose_source([point], self.config, zone)
+                self._choose_source([point], zone)
             except OrderError:
                 filtered["workspace_or_bin"] += 1
                 continue
-            if any(
-                distance_xy(point, rejected) < self.config["perception"]["association_radius_m"]
-                for rejected in self._rejected_visual_positions.get(sku, [])
-            ):
+            if self._recently_rejected(sku, point):
                 filtered["previous_safety_rejection"] += 1
                 continue
             if any(distance_xy(point, existing) < 0.035 for existing in points):
@@ -507,8 +567,14 @@ class Workstation:
         detections = []
         inventory_ids = self.inventory.observe(sku, self.config["camera"]["target_frame"], points)
         _, target = self._next_placement(order, sku)
-        excluded = {item_id for point, item_id in zip(points, inventory_ids)
-                    if distance_xy(point, target) <= self._source_target_clearance()}
+        excluded = set()
+        for point, item_id in zip(points, inventory_ids):
+            try:
+                _, adjusted = self._placement_target(order, sku, point)
+                if distance_xy(point, adjusted) <= self._source_target_clearance():
+                    excluded.add(item_id)
+            except PerceptionMismatch:
+                excluded.add(item_id)
         if excluded:
             self.event(order.order_id, "CANDIDATE_CLEARANCE_REJECTED", sku=sku,
                        target=list(target), minimum_distance_m=self._source_target_clearance(),
@@ -540,6 +606,7 @@ class Workstation:
                     "inventory_item_id": item_id,
                 }
             )
+        self._visual_observed_at = time.monotonic()
         result = {
             "sku": sku,
             "frame": self.config["camera"]["target_frame"],
@@ -658,15 +725,30 @@ class Workstation:
         done = self._completed_by_sku.get(sku, 0)
         if sku not in requested or done >= requested[sku]:
             raise PerceptionMismatch(f"Visual detection {detection_id!r} is not needed; choose a requested SKU")
-        refreshed = self.detect(sku)
-        if not refreshed:
-            self._visual_candidates.clear()
-            raise PerceptionMismatch("Visual target disappeared; perceive the table again")
-        source = min(refreshed, key=lambda point: distance_xy(point, observed_source))
-        if distance_xy(source, observed_source) > self.config["perception"]["association_radius_m"]:
-            self._visual_candidates.clear()
-            raise PerceptionMismatch("Visual target moved or detection changed; perceive again")
-        placement, target = self._next_placement(order, sku)
+        freshness = self.config.get("perception", {}).get("visual_freshness_s", 8.0)
+        if time.monotonic() - self._visual_observed_at <= freshness:
+            source = observed_source
+        else:
+            refreshed = self.detect(sku)
+            matched = sorted((point for point in refreshed
+                              if not self._recently_rejected(sku, point)
+                              and distance_xy(point, observed_source) <= self.inventory.radius),
+                             key=lambda point: distance_xy(point, observed_source))
+            if not matched:
+                self._visual_candidates.clear()
+                raise PerceptionMismatch("Visual target disappeared or moved; perceive again",
+                                         code="TARGET_ASSOCIATION_LOST")
+            if len(matched) > 1 and (distance_xy(matched[1], observed_source)
+                                   - distance_xy(matched[0], observed_source)) < 0.01:
+                self._visual_candidates.clear()
+                raise PerceptionMismatch("Target identity is ambiguous; perceive again",
+                                         code="TARGET_ASSOCIATION_AMBIGUOUS")
+            source = matched[0]
+        try:
+            placement, target = self._placement_target(order, sku, source)
+        except PerceptionMismatch:
+            self._visual_candidates.pop(detection_id, None)
+            raise
         if distance_xy(source, target) <= self._source_target_clearance():
             self._visual_candidates.pop(detection_id, None)
             self.event(order.order_id, "CANDIDATE_CLEARANCE_REJECTED", sku=sku,
@@ -676,7 +758,7 @@ class Workstation:
                 "Source is too close to destination slot; no motion executed. "
                 "Call get_object_positions again and choose another candidate"
             )
-        choose_source([source], self.config, zone)
+        self._choose_source([source], zone)
         # Simulation-only safety oracle. Its labels/positions are never exposed
         # to the Agent and never used as the gripper target; only the RGB-D
         # estimate above drives the grasp. It prevents a known false positive
@@ -687,18 +769,14 @@ class Workstation:
         entity, actual = min(
             truth.values(), key=lambda item: distance_xy(item[1], source)
         )
-        if (
-            distance_xy(actual, source) > self.config["perception"]["association_radius_m"]
-            or entity.prefab_name != sku
-        ):
-            self._rejected_visual_positions.setdefault(sku, []).append(source)
-            item_id = self._inventory_candidates.get(detection_id)
-            if item_id is not None:
-                self.inventory.reject_candidate(item_id, order.order_id)
-            self._visual_candidates.pop(detection_id, None)
-            raise PerceptionMismatch("Visual class/position failed safety check; choose another detection")
+        if distance_xy(actual, source) > self.inventory.radius or entity.prefab_name != sku:
+            code = "POSITION_UNCONFIRMED" if distance_xy(actual, source) > self.inventory.radius else "CLASS_CONFLICT"
+            self._reject_visual_candidate(order, detection_id, sku, source, code,
+                                          {"xy_error_m": distance_xy(actual, source)})
+            raise PerceptionMismatch("Visual class/position failed safety check; choose another detection",
+                                     code=code, reobserve=not bool(self._visual_candidates))
         grasp_source = calibrated_grasp_point(source, sku, self.config)
-        choose_source([grasp_source], self.config, zone)
+        self._choose_source([grasp_source], zone)
         bin_index = placement.bin_index
         slot = tuple(zone["slots"][bin_index])
         slot_id = f"{order.zone}{bin_index + 1}"
@@ -717,6 +795,8 @@ class Workstation:
             position_source="rgbd_perception_with_workcell_calibration",
         )
         self.motion_attempted = True
+        self.physical_state_uncertain = True
+        self._visual_observed_at = 0.0
         self.move(grasp_source, step="grab")
         self.event(order.order_id, "LIFTING", sku=sku, detection_id=detection_id)
         self.move(
@@ -776,7 +856,11 @@ class Workstation:
         self.inventory.transition(item_id, order.order_id, "PLACED")
         self.event(order.order_id, "INVENTORY_PLACED", item_id=item_id, sku=sku, bin_id=slot_id)
         self._placed_entities.append((sku, entity, bin_index, source))
+        self._used_placement_targets.append(target)
         self._delivered_entity_names.add(entity.name)
+        # This checkpoint proves that transport/placement/retreat completed.
+        # A later perception failure must not erase that confirmed progress.
+        self.physical_state_uncertain = False
         self._visual_candidates.clear()
         completed = sum(self._completed_by_sku.values())
         self.event(
@@ -811,6 +895,8 @@ class Workstation:
             order.order_id, "FINAL_AUDIT",
             completed=len(self._placed_entities), total=order.total_items,
         )
+        # A failed physical audit must not be downgraded to a perception pause.
+        self.physical_state_uncertain = True
         for sku, entity, bin_index, source in self._placed_entities:
             slot = tuple(zone["slots"][bin_index])
             bin_position = self.slot_bin_position(zone, bin_index, slot)
@@ -822,6 +908,7 @@ class Workstation:
                 raise OrderError(
                     f"Final audit found {sku} outside bin {order.zone}{bin_index + 1}"
                 )
+        self.physical_state_uncertain = False
         return {"status": "verified", "completed": len(self._placed_entities)}
 
     def run(self, order: Order, *, model=None) -> dict:
@@ -843,9 +930,15 @@ class Workstation:
             status = "CANCELLED"
         except Exception as exc:
             failure = str(exc)
-            self.inventory.finish_failed(order.order_id, self.motion_attempted)
-            self.event(order.order_id, "ORDER_FAILED", reason=failure)
-            status = "FAILED"
+            if self._placed_entities and not self.physical_state_uncertain:
+                failure = "[REVIEW_REQUIRED] " + failure
+                self.event(order.order_id, "ORDER_PAUSED", reason=failure,
+                           next_action="视觉复查后继续；或明确丢弃部分订单")
+                status = "PAUSED"
+            else:
+                self.inventory.finish_failed(order.order_id, self.physical_state_uncertain)
+                self.event(order.order_id, "ORDER_FAILED", reason=failure)
+                status = "FAILED"
         else:
             self.event(order.order_id, "ORDER_COMPLETED", completed=len(self._placed_entities))
             status = "COMPLETED"

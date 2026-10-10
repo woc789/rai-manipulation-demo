@@ -29,7 +29,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "pick_and_place",
-            "description": "Pick one visual detection by detection_id, re-localize it with RGB-D, and put it in the receiving bin assigned by the workstation. The tool owns bin selection, motion and verification.",
+            "description": "Pick one visual detection by detection_id, refresh it with RGB-D if stale, and put it in the receiving bin assigned by the workstation. The tool owns bin selection, motion and verification.",
             "parameters": {
                 "type": "object",
                 "properties": {"detection_id": {"type": "string"}},
@@ -119,9 +119,9 @@ class ProduceAgent:
                     "calculate their 3D positions from the RGB-D camera. Then choose "
                     "one returned detection_id for pick_and_place. Re-perceive after "
                     "every successful pick because coordinates become stale. If a "
-                    "candidate fails the visual safety check, choose a different "
-                    "detection or perceive again. A rejected or stale detection is "
-                    "not a completed pick; follow the tool error and re-perceive. "
+                    "candidate fails the visual safety check, follow required_tool "
+                    "and alternative_detection_ids to choose a different candidate "
+                    "or perceive again. A rejected or stale detection is not a completed pick. "
                     "Complete each requested SKU in order before switching to the next. "
                     "Fulfil all requested counts, then call finish_order. "
                     "Never invent IDs or coordinates. Call one tool at a time."
@@ -138,6 +138,7 @@ class ProduceAgent:
         ]
         perceived_sku = None
         empty_perceptions = 0
+        candidate_rejections = 0
         max_calls = self.config["max_tool_calls_per_item"] * self.order.total_items + 6
         for _ in range(max_calls):
             self.workstation.check_cancel()
@@ -211,9 +212,19 @@ class ProduceAgent:
                 try:
                     result = self._invoke_tool(name, arguments)
                 except PerceptionMismatch as exc:
-                    perceived_sku = None
+                    candidate_rejections += 1
+                    if candidate_rejections >= self.config["max_consecutive_empty_perceptions"]:
+                        raise OrderError(
+                            f"Candidate validation stopped after {candidate_rejections} rejections; "
+                            f"last reason {exc.code}: {exc}. Inspect candidate diagnostics before retrying"
+                        ) from exc
+                    remaining_ids = list(self.workstation._visual_candidates) if not exc.reobserve else []
+                    if not remaining_ids:
+                        perceived_sku = None
                     result = {"ok": False, "error": str(exc), "retryable": True,
-                              "required_tool": "get_object_positions", "required_sku": required_sku}
+                              "reason_code": exc.code,
+                              "required_tool": "pick_and_place" if remaining_ids else "get_object_positions",
+                              "alternative_detection_ids": remaining_ids, "required_sku": required_sku}
             self.workstation.event(
                 self.order.order_id, "AGENT_TOOL_RESULT", tool=name, result=result
             )
@@ -248,6 +259,7 @@ class ProduceAgent:
             elif name == "pick_and_place" and result.get("placed"):
                 perceived_sku = None
                 empty_perceptions = 0
+                candidate_rejections = 0
             if name == "finish_order" and result.get("status") == "verified":
                 return
             if name == "pick_and_place" and result.get("placed"):

@@ -16,6 +16,7 @@ class QueuedOrder:
     completed: int = 0
     total: int = 0
     finished_sequence: int = 0
+    review_required: bool = False
 
 
 class OrderQueue:
@@ -39,7 +40,8 @@ class OrderQueue:
 
     def pending(self):
         return sorted((job for job in self.jobs.values()
-                       if job.state in ("QUEUED", "WAITING_STOCK", "WAITING_BIN", "PAUSED")),
+                       if job.state in ("QUEUED", "WAITING_STOCK", "WAITING_BIN", "PAUSED")
+                       and not job.review_required),
                       key=lambda job: (-job.priority, job.sequence))
 
     def select(self, bins, inventory):
@@ -68,6 +70,7 @@ class OrderQueue:
     def snapshot(self):
         return [dict(order_id=job.order.order_id, priority=job.priority, state=job.state,
                      reason=job.reason, missing=job.missing, completed=job.completed,
+                     review_required=job.review_required,
                      total=job.total, finished_sequence=job.finished_sequence,
                      lines=[dict(sku=line.sku, quantity=line.quantity)
                                            for line in job.order.lines])
@@ -79,6 +82,9 @@ class OrderQueue:
         job = self.jobs[order_id]
         job.state = "WAITING_PICKUP" if status == "COMPLETED" else status
         job.reason, job.completed = reason, completed
+        job.review_required = status == "PAUSED" and reason.startswith("[REVIEW_REQUIRED]")
+        if job.review_required:
+            job.reason = "已装箱进度保留；请点击视觉复查后继续，或确认丢弃部分订单。原因：" + reason.removeprefix("[REVIEW_REQUIRED] ")
         if status != "PAUSED":
             self._finished_sequence += 1
             job.finished_sequence = self._finished_sequence

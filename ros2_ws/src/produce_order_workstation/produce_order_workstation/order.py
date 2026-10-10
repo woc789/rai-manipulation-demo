@@ -28,6 +28,11 @@ class OrderPaused(OrderError):
 class PerceptionMismatch(OrderError):
     """A visual candidate failed the simulator safety interlock before motion."""
 
+    def __init__(self, message: str, *, code="TARGET_UNCERTAIN", reobserve=True):
+        super().__init__(message)
+        self.code = code
+        self.reobserve = reobserve
+
 
 def readable_error(error: str) -> str:
     """Translate a known API failure without hiding the report's original error."""
@@ -159,9 +164,9 @@ def validate_order(order: Order, config: dict) -> None:
     if type(capacity) is not int or capacity < 1 or capacity > 4:
         raise ValueError("Bin capacity must be between 1 and 4 items")
     sku_bins = zone["sku_bins"]
-    if set(sku_bins) != set(config["aliases"]) or set(sku_bins.values()) != set(
+    if fulfillment_mode(config) == "classification" and (set(sku_bins) != set(config["aliases"]) or set(sku_bins.values()) != set(
         range(len(zone["slots"]))
-    ):
+    )):
         raise ValueError("Each SKU must map to exactly one distinct receiving bin")
     if fulfillment_mode(config) == "fulfillment" and order.total_items > capacity:
         raise ValueError(f"One order bin holds at most {capacity} items; selected {order.total_items}")
@@ -172,7 +177,7 @@ def validate_order(order: Order, config: dict) -> None:
                 f"{order.zone}{sku_bins[line.sku] + 1} capacity {capacity}"
             )
         stock = config.get("stock", {}).get("initial_counts", {})
-        if line.quantity > stock.get(line.sku, 0):
+        if fulfillment_mode(config) == "classification" and line.quantity > stock.get(line.sku, 0):
             raise ValueError(
                 f"Quantity for {line.sku} exceeds prepared scene stock "
                 f"{stock.get(line.sku, 0)}"

@@ -637,7 +637,7 @@ class OperatorPanel(QWidget):
         visible_orders = [job for job in orders if job["state"] not in ("CANCELED", "CANCELLED")
             and (job["order_id"] not in self._hidden_history or self._history_protected(job["order_id"], job["state"]))]
         pending_states = ("QUEUED", "WAITING_STOCK", "WAITING_BIN", "PAUSED")
-        waiting_jobs = sorted((job for job in orders if job["state"] in pending_states),
+        waiting_jobs = sorted((job for job in orders if job["state"] in pending_states and not job.get("review_required")),
                               key=lambda job: -job["priority"])
         ranks = {job["order_id"]: str(index + 1) for index, job in enumerate(waiting_jobs)}
         running_states = ("RUNNING", "DISPATCHING", "EXECUTION_UNCERTAIN")
@@ -652,7 +652,8 @@ class OperatorPanel(QWidget):
             if job.get("missing"):
                 reason += " · " + " / ".join(f"{NAMES.get(sku, sku)}缺少可用观测 {count}"
                                                 for sku, count in job["missing"].items())
-            values = [job["order_id"], job["priority"], names.get(job["state"], job["state"]),
+            state_name = "等待人工复查 · 保留进度" if job.get("review_required") else names.get(job["state"], job["state"])
+            values = [job["order_id"], job["priority"], state_name,
                       f"{job['completed']}/{job['total']}", reason,
                       ranks.get(job["order_id"], "—"),
                       " / ".join(f"{NAMES.get(line['sku'], line['sku'])}×{line['quantity']}" for line in job.get("lines", []))]

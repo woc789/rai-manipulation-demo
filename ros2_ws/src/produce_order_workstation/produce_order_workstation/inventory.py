@@ -58,7 +58,8 @@ class InventoryLedger:
                 matches = [item for item in self._items.values()
                            if item.sku == sku and item.frame_id == frame_id and item.item_id not in used
                            and item.state in ("AVAILABLE", "UNKNOWN", "RESERVED")
-                           and dist(item.position, point) <= self.radius]
+                           and dist(item.position[:2], point[:2]) <= self.radius
+                           and abs(item.position[2] - point[2]) <= self.radius]
                 item = min(matches, key=lambda item: dist(item.position, point)) if matches else None
                 if item is None:
                     self._serial += 1
@@ -76,11 +77,17 @@ class InventoryLedger:
                     # Retain history/ownership, but do not promise an old location
                     # alongside a new candidate that may be the same moved object.
                     item.state = "UNKNOWN"
-                if any(item.order_id for item in unmatched):
-                    # A new identity may be a moved reserved object. Do not hand
-                    # it to a different order until association is resolved.
+                uncertain_owned = [item for item in unmatched if item.order_id]
+                if uncertain_owned:
+                    # Quarantine local identity ambiguity, not unrelated stock
+                    # across the entire table. A fresh position beyond the
+                    # association gate is never silently transferred to an owner.
                     for identity in identities:
-                        if not self._items[identity].order_id:
+                        item = self._items[identity]
+                        if not item.order_id and any(
+                            dist(item.position[:2], old.position[:2]) <= 2 * self.radius
+                            for old in uncertain_owned
+                        ):
                             self._items[identity].state = "UNKNOWN"
             # An empty scan means uncertainty, not deletion or proven zero stock.
             return identities

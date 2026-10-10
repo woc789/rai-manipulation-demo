@@ -383,7 +383,7 @@ def test_new_perception_invalidates_old_ids_even_for_other_skus():
     assert second not in station._visual_candidates
 
 
-def test_fulfillment_filters_near_target_but_preserves_stock_and_replaces_reservation():
+def test_fulfillment_adjusts_destination_without_rejecting_valid_reserved_source():
     config = deepcopy(CONFIG)
     config["operation_mode"] = "fulfillment"
     station = Workstation(MagicMock(), config)
@@ -402,12 +402,14 @@ def test_fulfillment_filters_near_target_but_preserves_stock_and_replaces_reserv
     station.detect = MagicMock(return_value=[near, safe])
     station._source_entities = MagicMock(side_effect=AssertionError("no truth coordinates"))
     result = station.get_object_positions(order, "carrot")
-    assert [item["position_m"] for item in result["detections"]] == [list(safe)]
+    assert [item["position_m"] for item in result["detections"]] == [list(near)]
+    _, target = station._placement_target(order, "carrot", near)
+    assert hypot(target[0] - near[0], target[1] - near[1]) > station._source_target_clearance()
     items = {item["item_id"]: item for item in station.inventory.snapshot()["items"]}
-    assert items[ids[0]]["state"] == "AVAILABLE"
-    assert items[ids[0]]["order_id"] == ""
-    assert items[ids[1]]["state"] == "RESERVED"
-    assert items[ids[1]]["order_id"] == order.order_id
+    assert items[ids[0]]["state"] == "RESERVED"
+    assert items[ids[0]]["order_id"] == order.order_id
+    assert items[ids[1]]["state"] == "AVAILABLE"
+    assert items[ids[1]]["order_id"] == ""
     station._source_entities.assert_not_called()
 
 
@@ -418,10 +420,10 @@ def test_fresh_candidate_near_target_is_retryable_before_motion():
     station._allocated_bin_index = 0
     station._completed_by_sku = {"corn": 1}
     order = Order("moved-close", "A", (OrderLine("corn", 1), OrderLine("carrot", 1)))
-    station._visual_candidates = {"carrot-id": ("carrot", (0.43, -0.32, 0.04))}
-    station.detect = MagicMock(return_value=[(0.4327, -0.3479, 0.0422)])
+    station._visual_candidates = {"carrot-id": ("carrot", (0.50, -0.40, 0.04))}
+    station.detect = MagicMock(return_value=[(0.50, -0.44, 0.04)])
     station.move = MagicMock()
-    with pytest.raises(PerceptionMismatch, match="too close.*no motion executed"):
+    with pytest.raises(PerceptionMismatch, match="No unoccupied destination"):
         station.pick_and_place(order, "carrot-id")
     station.move.assert_not_called()
     assert not station.motion_attempted
@@ -523,7 +525,7 @@ def test_misclassified_visual_candidate_cannot_move_robot():
         )
     station.move.assert_not_called()
     assert station.motion_attempted is False
-    assert station._rejected_visual_positions["apple"] == [point]
+    assert station._candidate_rejections["visual_apple_1"]["code"] == "CLASS_CONFLICT"
     result = station.get_object_positions(
         Order("false-label", "A", (OrderLine("apple", 1),)), "apple"
     )

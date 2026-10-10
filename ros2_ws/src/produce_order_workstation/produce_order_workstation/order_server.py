@@ -78,6 +78,7 @@ class OrderActionServer(Node):
                (self._accept_timeout, self._feedback_timeout, self._result_timeout)):
             raise ValueError("Scheduler watchdog timeouts must be finite and positive")
         self._scan_requested = False
+        self._resume_review_after_scan = False
         self._inventory_ready = False
         self._order_contexts = {}
         self._lock = Lock()
@@ -191,7 +192,8 @@ class OrderActionServer(Node):
     def refresh_inventory_callback(self, _request, response):
         with self._lock:
             self._scan_requested = True
-        response.success, response.message = True, "已请求视觉复查，将在工作台空闲后进行"
+            self._resume_review_after_scan = True
+        response.success, response.message = True, "已请求视觉复查；成功后允许等待核对的安全暂停单继续"
         return response
 
     def cancel_active_callback(self, _request, response):
@@ -241,6 +243,13 @@ class OrderActionServer(Node):
         try:
             self.workstation.scan_inventory(list(self.config["aliases"]))
             self._inventory_ready = True
+            with self._lock:
+                if getattr(self, "_resume_review_after_scan", False):
+                    for job in self.queue.jobs.values():
+                        if job.review_required:
+                            job.review_required = False
+                            job.reason = "人工请求复查已完成，等待重新校验资源并恢复"
+                    self._resume_review_after_scan = False
             reason = "视觉库存复查完成；观测不足的订单等待复查或补货"
         except Exception as exc:
             self._inventory_ready = False
@@ -648,6 +657,7 @@ class OrderActionServer(Node):
             if context:
                 self.workstation._placed_entities = context["placed_entities"]
                 self.workstation._completed_by_sku = context["completed_by_sku"]
+                self.workstation._used_placement_targets = context.get("used_placement_targets", [])
                 self.workstation.motion_attempted = context["motion_attempted"]
                 self.workstation.events = context["events"] + self.workstation.events
                 self.workstation.synchronize_scene()
@@ -715,6 +725,7 @@ class OrderActionServer(Node):
                     self._order_contexts[order.order_id] = dict(
                         placed_entities=list(self.workstation._placed_entities),
                         completed_by_sku=dict(self.workstation._completed_by_sku),
+                        used_placement_targets=list(self.workstation._used_placement_targets),
                         motion_attempted=self.workstation.motion_attempted,
                         events=list(self.workstation.events))
                 self.bin_manager.finish(order.order_id, result["status"],

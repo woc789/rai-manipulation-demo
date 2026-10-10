@@ -58,6 +58,10 @@ perception:
   include_full_frame: true
   service_timeout_s: 20.0
   association_radius_m: 0.065
+  inventory_ttl_s: 60.0
+  visual_freshness_s: 8.0
+  rejection_radius_m: 0.02
+  rejection_cooldown_s: 20.0
 workspace:
   x: [0.20, 0.60]
   y: [-0.55, 0.55]
