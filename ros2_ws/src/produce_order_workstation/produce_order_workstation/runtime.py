@@ -15,6 +15,7 @@ from rclpy.action import ActionClient
 from rai_sim.o3de.o3de_bridge import O3DExROS2Bridge
 from rai_sim.simulation_bridge import SceneConfig
 from std_msgs.msg import String
+from std_srvs.srv import Trigger
 from tf2_ros import TransformException
 from produce_order_interfaces.action import ExecuteMotion
 
@@ -24,6 +25,7 @@ from .order import (
     OrderPaused,
     OrderError,
     PerceptionMismatch,
+    MotionPlanRejected,
     calibrated_grasp_point,
     choose_source,
     distance_xy,
@@ -75,6 +77,7 @@ class Workstation:
         self._candidate_rejections = {}
         self._visual_observed_at = 0.0
         self.physical_state_uncertain = False
+        self._needs_observation_motion = False
         self.motion_attempted = False
         self._motion_client = None
         self._active_order_id: str | None = None
@@ -148,6 +151,7 @@ class Workstation:
             pipeline.config.service_timeout = self.config.get("perception", {}).get("service_timeout_s", 20.0)
             pipeline.config.detection_roi = self.config.get("perception", {}).get("detection_roi")
             pipeline.config.include_full_frame = self.config.get("perception", {}).get("include_full_frame", False)
+            pipeline.config.max_rgb_depth_skew_s = self.config.get("perception", {}).get("max_rgb_depth_skew_s", 0.1)
         if self._motion_client is None:
             self._motion_client = ActionClient(
                 self.connector.node, ExecuteMotion, "/produce_orders/execute_motion"
@@ -218,6 +222,7 @@ class Workstation:
         self.physical_state_uncertain = False
         self.motion_attempted = False
         self._active_order_id = None
+        self._needs_observation_motion = True
         zone = self.config["zones"]["A"]
         inventory = {sku: 0 for sku in self.config["aliases"]}
         for entity, _ in self._source_entities(zone).values():
@@ -452,7 +457,38 @@ class Workstation:
         except Exception as exc:
             return {"diagnostic_image_error": str(exc)}
 
+    def _ensure_observation_posture(self):
+        """Return an empty, verified arm to its captured startup posture.
+
+        Existing reset_manipulator plans collision-checked joint motion. It does
+        not reset inventory, boxes, orders or the simulator scene.
+        """
+        if not self._needs_observation_motion or not self.config["motion"].get("return_to_observation", False):
+            return
+        if self.physical_state_uncertain or self.inventory.has_active_execution():
+            raise OrderError("Cannot change observation posture with uncertain/active grasp")
+        self.check_cancel()
+        client = self.connector.node.create_client(Trigger, "/reset_manipulator")
+        try:
+            if not client.wait_for_service(timeout_sec=3.0):
+                raise OrderError("Observation posture service unavailable")
+            self.event(self._active_order_id or "", "OBSERVATION_POSTURE", status="moving_empty_arm")
+            self.physical_state_uncertain = True
+            self.motion_attempted = True
+            response = get_future_result(client.call_async(Trigger.Request()), timeout_sec=self.config["motion"]["service_timeout_s"])
+            if response is None or not response.success:
+                raise OrderError("Observation posture motion failed/timed out; inspect physical state")
+            self.physical_state_uncertain = False
+            self._needs_observation_motion = False
+            self._visual_observed_at = 0.0
+            time.sleep(.2)
+            self.check_cancel()
+            self.event(self._active_order_id or "", "OBSERVATION_POSTURE", status="ready")
+        finally:
+            self.connector.node.destroy_client(client)
+
     def scan_inventory(self, skus, zone_name="A"):
+        self._ensure_observation_posture()
         """Idle-only caller: populate ledger from RGB-D, never simulator truth."""
         zone = self.config["zones"][zone_name]
         for sku in skus:
@@ -536,6 +572,7 @@ class Workstation:
 
     def get_object_positions(self, order: Order, sku: str) -> dict:
         """Agent-facing RGB-D perception; never reveal simulator entity labels."""
+        self._ensure_observation_posture()
         self.check_cancel()
         requested = {line.sku: line.quantity for line in order.lines}
         if sku not in requested:
@@ -590,12 +627,8 @@ class Workstation:
             if not self.inventory.selectable(item_id, order.order_id):
                 filtered["reservation"] += 1
                 continue
-            if self.require_order_reservation and not any(
-                item["item_id"] == item_id and item["order_id"] == order.order_id
-                for item in self.inventory.snapshot()["items"]
-            ):
-                filtered["reservation"] += 1
-                continue
+            # Free current-frame candidates are alternatives, not extra reserved
+            # quantity. Selection exchanges a reservation atomically before motion.
             detection_id = f"visual_{sku}_{self._perception_generation}_{index}"
             self._visual_candidates[detection_id] = (sku, point)
             self._inventory_candidates[detection_id] = item_id
@@ -712,6 +745,8 @@ class Workstation:
             raise OrderCancelled(f"Manipulator {step} canceled at a motion boundary")
         if wrapped.status != GoalStatus.STATUS_SUCCEEDED or not wrapped.result.success:
             reason = wrapped.result.error or f"Manipulator {step} motion failed"
+            if step == "grab" and wrapped.status == GoalStatus.STATUS_ABORTED and getattr(wrapped.result, "safe_to_reselect", False):
+                raise MotionPlanRejected(reason)
             raise OrderError(reason)
 
     def pick_and_place(self, order: Order, detection_id: str) -> dict:
@@ -787,6 +822,14 @@ class Workstation:
             if self.require_order_reservation:
                 raise PerceptionMismatch("Target is not part of this order reservation")
             item_id = self.inventory.observe(sku, self.config["camera"]["target_frame"], [source], complete_scan=False)[0]
+            self._inventory_candidates[detection_id] = item_id
+        if self.require_order_reservation:
+            try:
+                self.inventory.select_for_order(item_id, order)
+            except ValueError as exc:
+                self._visual_candidates.pop(detection_id, None)
+                raise PerceptionMismatch(str(exc), code="RESERVATION_CONFLICT",
+                                         reobserve=not bool(self._visual_candidates)) from exc
         self.inventory.reserve(item_id, order.order_id, refreshed_position=source)
         self.event(order.order_id, "INVENTORY_RESERVED", item_id=item_id, sku=sku)
         self.event(
@@ -795,9 +838,16 @@ class Workstation:
             position_source="rgbd_perception_with_workcell_calibration",
         )
         self.motion_attempted = True
+        self.inventory.begin_execution(item_id, order.order_id)
         self.physical_state_uncertain = True
         self._visual_observed_at = 0.0
-        self.move(grasp_source, step="grab")
+        try:
+            self.move(grasp_source, step="grab")
+        except MotionPlanRejected as exc:
+            self.physical_state_uncertain = False
+            self._reject_visual_candidate(order, detection_id, sku, source, "MOTION_PLAN_REJECTED", {})
+            raise PerceptionMismatch(str(exc), code="MOTION_PLAN_REJECTED",
+                                     reobserve=not bool(self._visual_candidates)) from exc
         self.event(order.order_id, "LIFTING", sku=sku, detection_id=detection_id)
         self.move(
             grasp_source, step="lift",
@@ -862,6 +912,7 @@ class Workstation:
         # A later perception failure must not erase that confirmed progress.
         self.physical_state_uncertain = False
         self._visual_candidates.clear()
+        self._needs_observation_motion = True
         completed = sum(self._completed_by_sku.values())
         self.event(
             order.order_id, "ITEM_COMPLETED", sku=sku, detection_id=detection_id,

@@ -37,7 +37,7 @@ def test_crate_proxy_matches_rotated_physical_collider_parts():
     obj = build_collision_objects(CONFIG, {}, [CRATE])[-1]
     floor = obj.primitives[0]
     assert floor.dimensions == pytest.approx([.03, .21, .21])
-    assert obj.primitive_poses[0].position.x == pytest.approx(.43)
+    assert obj.primitive_poses[0].position.x == pytest.approx(EXPECTED["position"][0])
     # A side wall is transformed into the upper horizontal wall of a side-laid crate.
     assert sorted(p.position.z for p in obj.primitive_poses) == pytest.approx([.02, .11, .11, .11, .20])
 

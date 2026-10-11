@@ -8,5 +8,7 @@ string step
 ---
 bool success
 string error
+# Grab planning rejection before transit/contact/closing; never execution failure.
+bool safe_to_reselect
 ---
 string stage

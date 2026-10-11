@@ -92,6 +92,7 @@ def test_scan_failure_has_error_state_and_keeps_waiting_order():
         _lock=RLock(), _inventory_ready=True, _busy=True, get_logger=MagicMock(),
         publish_status=MagicMock())
     server.queue.pending.return_value = [pending]
+    server.workstation.physical_state_uncertain = False
     server.workstation.scan_inventory.side_effect = TimeoutError("test vision timeout")
     OrderActionServer._scan_stock(server)
     assert server._state == "INVENTORY_ERROR"
@@ -402,7 +403,7 @@ def test_fulfillment_adjusts_destination_without_rejecting_valid_reserved_source
     station.detect = MagicMock(return_value=[near, safe])
     station._source_entities = MagicMock(side_effect=AssertionError("no truth coordinates"))
     result = station.get_object_positions(order, "carrot")
-    assert [item["position_m"] for item in result["detections"]] == [list(near)]
+    assert [item["position_m"] for item in result["detections"]] == [list(near), list(safe)]
     _, target = station._placement_target(order, "carrot", near)
     assert hypot(target[0] - near[0], target[1] - near[1]) > station._source_target_clearance()
     items = {item["item_id"]: item for item in station.inventory.snapshot()["items"]}

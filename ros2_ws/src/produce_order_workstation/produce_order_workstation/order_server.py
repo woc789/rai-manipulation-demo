@@ -41,16 +41,16 @@ def order_from_goal(goal: ExecuteOrder.Goal) -> Order:
     )
 
 
-def state_after_order(status: str, motion_attempted: bool) -> tuple[str, str, bool]:
-    """Only an untouched scene can immediately accept a new order."""
+def state_after_order(status: str, physical_uncertain: bool) -> tuple[str, str, bool]:
+    """Require recovery for uncertain physical state, not every attempted plan."""
     if status == "COMPLETED":
         return "READY", "上一单已配货完成，箱位保留待取货；桌面库存未自动补满", True
     if status == "PAUSED":
         return "READY", "当前单已在验证装箱并退出后暂停，保留箱位和进度", True
-    if motion_attempted:
+    if physical_uncertain:
         return (
             "RECOVERY_REQUIRED",
-            "订单中尝试过机械臂动作，现场状态可能改变；请点击“恢复工作台”重置场景",
+            "机械动作结果尚未确认，现场需要核对；请点击“恢复工作台”重置场景",
             False,
         )
     return "READY", "订单在机械臂动作前结束，库存未改变，可以重新提交", True
@@ -263,6 +263,9 @@ class OrderActionServer(Node):
                 self._busy = False
                 self._state = "READY" if self._inventory_ready else "INVENTORY_ERROR"
                 self._state_reason = reason
+                if getattr(self.workstation, "physical_state_uncertain", False):
+                    self._state, self._scene_ready = "RECOVERY_REQUIRED", False
+                    self._state_reason = "观察姿态运动结果不明确，请核对机械臂后恢复工作台；不能只重试检测"
             self.publish_status()
 
     def check_dispatch_timeout(self):
@@ -684,7 +687,8 @@ class OrderActionServer(Node):
         try:
             allocation = self.bin_manager.orders[order.order_id]
             scene_uncertain = False
-            if result["status"] not in ("COMPLETED", "PAUSED") and not self.workstation.motion_attempted:
+            physical_uncertain = getattr(self.workstation, "physical_state_uncertain", self.workstation.motion_attempted)
+            if result["status"] not in ("COMPLETED", "PAUSED") and not physical_uncertain:
                 try:
                     self.workstation.remove_order_bins(order, allocation.bin_indices)
                 except Exception as exc:
@@ -713,12 +717,12 @@ class OrderActionServer(Node):
             return response
         finally:
             state, reason, ready = state_after_order(
-                result["status"], self.workstation.motion_attempted or scene_uncertain
+                result["status"], physical_uncertain or scene_uncertain
             )
             if result["status"] not in ("COMPLETED", "PAUSED"):
                 self.workstation.inventory.finish_failed(order.order_id,
-                    self.workstation.motion_attempted or scene_uncertain)
-                if not self.workstation.motion_attempted and not scene_uncertain:
+                    physical_uncertain or scene_uncertain)
+                if not physical_uncertain and not scene_uncertain:
                     self.workstation.inventory.release_order(order.order_id)
             with self._lock:
                 if result["status"] == "PAUSED":
@@ -729,7 +733,7 @@ class OrderActionServer(Node):
                         motion_attempted=self.workstation.motion_attempted,
                         events=list(self.workstation.events))
                 self.bin_manager.finish(order.order_id, result["status"],
-                                        self.workstation.motion_attempted or scene_uncertain,
+                                        physical_uncertain or scene_uncertain,
                                         self.workstation._placed_entities)
                 self._state, self._state_reason, self._scene_ready = state, reason, ready
                 if getattr(self, "_dispatch_timed_out", False):

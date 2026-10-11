@@ -35,11 +35,13 @@ class InventoryLedger:
         self.epoch = 0
         self._serial = 0
         self._items = {}
+        self._executing = set()
         self._lock = RLock()
 
     def reset(self):
         with self._lock:
             self._items.clear()
+            self._executing.clear()
             self.epoch += 1
 
     def observe(self, sku, frame_id, points, *, complete_scan=True):
@@ -100,7 +102,7 @@ class InventoryLedger:
                 position = tuple(float(v) for v in refreshed_position)
                 if len(position) != 3 or not all(isfinite(v) for v in position):
                     raise ValueError("Invalid refreshed visual position")
-                if dist(item.position[:2], position[:2]) > 0.065:
+                if dist(item.position[:2], position[:2]) > self.radius:
                     raise ValueError("Refreshed candidate moved beyond association gate")
                 item.position = position
                 item.observed_unix_sec, item.seen_monotonic = self.wall_clock(), self.clock()
@@ -117,6 +119,38 @@ class InventoryLedger:
             item = self._items[item_id]
             return item.state == "AVAILABLE" or (item.state == "RESERVED" and item.order_id == order_id)
 
+    def select_for_order(self, item_id, order):
+        """Atomically exchange one untouched reservation for a visible alternative.
+
+        Never take another order's item, exceed demand, or release carried stock.
+        Alternatives are observations, not additional promises to this order.
+        """
+        with self._lock:
+            self._expire()
+            item = self._items[item_id]
+            demand = {line.sku: line.quantity for line in order.lines}
+            if item.sku not in demand or not self.selectable(item_id, order.order_id):
+                raise ValueError("Candidate is not available for this order")
+            if item_id in self._executing:
+                raise ValueError("Candidate already has a physical action in flight")
+            if item.order_id == order.order_id:
+                return
+            if any(other.item_id != item_id and other.order_id
+                   and other.state in ("RESERVED", "CARRYING", "UNKNOWN")
+                   and dist(other.position[:2], item.position[:2]) < self.radius
+                   for other in self._items.values()):
+                raise ValueError("Candidate overlaps another locked physical identity")
+            owned = [other for other in self._items.values()
+                     if other.sku == item.sku and other.order_id == order.order_id
+                     and other.state in ("RESERVED", "CARRYING", "PLACED", "UNKNOWN")]
+            if len(owned) >= demand[item.sku]:
+                replaceable = next((other for other in owned if other.state == "RESERVED"
+                                    and other.item_id not in self._executing), None)
+                if replaceable is None:
+                    raise ValueError("Order has no untouched reservation to exchange")
+                replaceable.state, replaceable.order_id = "AVAILABLE", ""
+            item.state, item.order_id = "RESERVED", order.order_id
+
     def reject_candidate(self, item_id, order_id):
         """A pre-motion safety rejection invalidates a candidate, not consumed stock."""
         with self._lock:
@@ -124,6 +158,7 @@ class InventoryLedger:
             if item.state not in ("AVAILABLE", "RESERVED") or item.order_id not in ("", order_id):
                 raise ValueError("Cannot invalidate another order's or a carried item")
             item.state, item.order_id = "UNKNOWN", ""
+            self._executing.discard(item_id)
 
     def reserve_order(self, order, *, excluded_item_ids=()):
         """All-or-nothing reservation. Missing observations are not proven shortages."""
@@ -134,7 +169,7 @@ class InventoryLedger:
             # Release only this order's untouched candidates, never another
             # order's reservation or an object already being carried/placed.
             for item in self._items.values():
-                if item.item_id in excluded and item.order_id == order.order_id and item.state == "RESERVED":
+                if item.item_id in excluded and item.order_id == order.order_id and item.state == "RESERVED" and item.item_id not in self._executing:
                     item.state, item.order_id = "AVAILABLE", ""
             selected, missing = [], {}
             blocked = [item.position for item in self._items.values()
@@ -150,7 +185,7 @@ class InventoryLedger:
                 chosen = []
                 for item in candidates:
                     # Cross-SKU false labels must not promise the same spatial candidate twice.
-                    if any(dist(item.position, point) < self.radius for point in blocked):
+                    if any(dist(item.position[:2], point[:2]) < self.radius for point in blocked):
                         continue
                     if len(chosen) >= needed:
                         break
@@ -171,7 +206,7 @@ class InventoryLedger:
         with self._lock:
             self._expire()
             for item in self._items.values():
-                if item.order_id == order_id and item.state == "RESERVED":
+                if item.order_id == order_id and item.state == "RESERVED" and item.item_id not in self._executing:
                     item.state, item.order_id = "AVAILABLE", ""
                 elif item.order_id == order_id and item.state == "UNKNOWN":
                     # Caller guarantees the queued dispatch never started. Do not
@@ -203,10 +238,31 @@ class InventoryLedger:
             if state not in allowed.get(item.state, set()):
                 raise ValueError(f"Invalid inventory transition {item.state} -> {state}")
             item.state = state
+            if state == "PLACED":
+                self._executing.discard(item_id)
+
+    def begin_execution(self, item_id, order_id):
+        """Lock a validated reservation while the physical action is in flight.
+
+        TTL still applies to untouched table observations, not an active grasp.
+        CARRYING is only recorded after lift verification, never in advance.
+        """
+        with self._lock:
+            self._expire()
+            item = self._items[item_id]
+            if item.state != "RESERVED" or item.order_id != order_id:
+                raise ValueError("Execution requires a fresh owned reservation")
+            self._executing.add(item_id)
+
+    def has_active_execution(self):
+        with self._lock:
+            return bool(self._executing)
 
     def finish_failed(self, order_id, motion_attempted):
         with self._lock:
             for item in self._items.values():
+                if item.order_id == order_id:
+                    self._executing.discard(item.item_id)
                 if item.order_id == order_id and item.state in ("RESERVED", "CARRYING"):
                     item.state = "UNKNOWN" if motion_attempted else "AVAILABLE"
                     if not motion_attempted:
@@ -220,7 +276,7 @@ class InventoryLedger:
 
     def _expire(self):
         for item in self._items.values():
-            if item.state in ("AVAILABLE", "RESERVED") and self.clock() - item.seen_monotonic > self.ttl:
+            if item.item_id not in self._executing and item.state in ("AVAILABLE", "RESERVED") and self.clock() - item.seen_monotonic > self.ttl:
                 item.state = "UNKNOWN"
 
     def snapshot(self):

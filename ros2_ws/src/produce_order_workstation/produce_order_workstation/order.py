@@ -17,6 +17,10 @@ class OrderError(RuntimeError):
     """An order cannot safely continue."""
 
 
+class MotionPlanRejected(OrderError):
+    """Server confirms no grasp transit/contact/closing was executed."""
+
+
 class OrderCancelled(OrderError):
     """Cancellation was accepted at a safe item boundary."""
 

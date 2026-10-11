@@ -59,6 +59,7 @@ perception:
   service_timeout_s: 20.0
   association_radius_m: 0.065
   inventory_ttl_s: 60.0
+  max_rgb_depth_skew_s: 0.1
   visual_freshness_s: 8.0
   rejection_radius_m: 0.02
   rejection_cooldown_s: 20.0
@@ -90,7 +91,7 @@ planning_scene:
     prefab_name: toy_box
     entities: [packing_return_crate]
     expected_pose:
-      position: [0.43, 0.0, 0.11]
+      position: [0.26, 0.0, 0.11]
       orientation: [0.0, 0.7071067811865476, 0.0, 0.7071067811865476]
     collider_parts:
       - {center: [0.0, 0.0, 0.0], size: [0.20, 0.20, 0.02]}
@@ -103,6 +104,7 @@ planning_scene:
     orientation_tolerance_rad: 0.15
     spawn_settle_time_s: 2.0
 motion:
+  return_to_observation: true
   grasp_z_offset_m: 0.10
   # Measured RGB-D centroid bias for the narrow carrot prefab in this O3DE camera.
   # These offsets adjust the visual grasp target; simulator poses are only a safety check.

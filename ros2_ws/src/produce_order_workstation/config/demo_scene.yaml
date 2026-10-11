@@ -24,7 +24,7 @@ entities:
   - name: packing_return_crate
     prefab_name: toy_box
     pose:
-      translation: {x: 0.43, y: 0.0, z: 0.115}
+      translation: {x: 0.26, y: 0.0, z: 0.115}
       rotation: {x: 0.0, y: 0.7071067811865476, z: 0.0, w: 0.7071067811865476}
   # Sixteen mixed objects exist before the Agent sees the order. Names are stable
   # entity IDs; TF positions are measured again before each pick.

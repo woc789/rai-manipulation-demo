@@ -262,7 +262,9 @@ void RaiManipulationInterfaceNode::ExecuteAction(
   BusyReset reset{m_motionBusy};
   auto result = std::make_shared<ExecuteMotion::Result>();
   const auto goal = goal_handle->get_goal();
-  auto feedback = [goal_handle, goal](const std::string & stage) {
+  std::string last_stage;
+  auto feedback = [goal_handle, goal, &last_stage](const std::string & stage) {
+      last_stage = stage;
       auto message = std::make_shared<ExecuteMotion::Feedback>();
       message->stage = goal->step + ":" + stage;
       goal_handle->publish_feedback(message);
@@ -281,6 +283,8 @@ void RaiManipulationInterfaceNode::ExecuteAction(
   } else if (result->success) {
     goal_handle->succeed(result);
   } else {
+    result->safe_to_reselect = goal->step == "grab" && last_stage == "PLANNING_TRANSIT" &&
+      result->error.rfind("MoveIt transit/approach planning failed:", 0) == 0;
     goal_handle->abort(result);
   }
 }

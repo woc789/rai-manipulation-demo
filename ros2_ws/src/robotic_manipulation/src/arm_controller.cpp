@@ -194,14 +194,16 @@ bool ArmController::PlanTransitWithApproach(const geometry_msgs::msg::Pose & abo
   bool saved_descent_diagnosis = false;
   for (int attempt = 0; attempt < attempts; ++attempt) {
     if (std::chrono::steady_clock::now() >= search_deadline) break;
-    const bool forward_seed = has_approach && allow_axial_rotation && attempt < 16;
+    // Interleave hover-first and contact-first search. Grouping all hover
+    // attempts first exhausted the time budget before any reverse candidate.
+    const bool forward_seed = has_approach && allow_axial_rotation && attempt % 2 == 0;
     auto selected_contact = contact;
     auto selected_above = above;
     if (allow_axial_rotation) {
       const auto requested = contact.orientation;
       const auto actual = GetEffectorOrientation();
       constexpr double offsets[] = {0., 0.25, -0.25, 0.5, -0.5, 0.75, -0.75, 1.};
-      const double offset = offsets[attempt % 8] * std::numbers::pi;
+      const double offset = offsets[(has_approach ? attempt / 2 : attempt) % 8] * std::numbers::pi;
       const auto q = motion_preferences::AlignAxialYaw(
         {requested.x, requested.y, requested.z, requested.w},
         {actual.x, actual.y, actual.z, actual.w}, offset);
@@ -210,12 +212,10 @@ bool ArmController::PlanTransitWithApproach(const geometry_msgs::msg::Pose & abo
       selected_above.orientation = selected_contact.orientation;
     }
     auto seed = *start;
-    if (allow_axial_rotation && attempt >= 8 && attempt < 16) {
+    if (allow_axial_rotation && attempt >= 16) {
       // A small elbow perturbation kept converging to the same near-limit
       // hover branch, whose descent collides link1 with link5. Diversify all
       // arm joints before IK; every result still passes collision/limit checks.
-      seed.setToRandomPositions(seed.getJointModelGroup("panda_arm"));
-    } else if (allow_axial_rotation && attempt >= 24) {
       seed.setToRandomPositions(seed.getJointModelGroup("panda_arm"));
     } else if (!allow_axial_rotation && (attempt == 1 || attempt == 2)) {
       seed.setVariablePosition("panda_joint3", seed.getVariablePosition("panda_joint3") +

@@ -43,6 +43,7 @@ class FakeStation:
         self._scene_prepared = True
         self._completed_by_sku = {}
         self._placed_entities = []
+        self._used_placement_targets = []
         self.events = []
         self.event_sink = None
         self.cancel_requested = lambda: False
