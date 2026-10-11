@@ -11,44 +11,6 @@ from pathlib import Path
 from .order import OrderError, PerceptionMismatch
 
 
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_object_positions",
-            "description": "Use the RGB-D camera, detection and segmentation services to recognize one requested SKU and calculate its grasp coordinates in the robot base frame. Call before each pick.",
-            "parameters": {
-                "type": "object",
-                "properties": {"sku": {"type": "string"}},
-                "required": ["sku"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "pick_and_place",
-            "description": "Pick one visual detection by detection_id, refresh it with RGB-D if stale, and put it in the receiving bin assigned by the workstation. The tool owns bin selection, motion and verification.",
-            "parameters": {
-                "type": "object",
-                "properties": {"detection_id": {"type": "string"}},
-                "required": ["detection_id"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "finish_order",
-            "description": "Audit all placed objects and finish only when every requested quantity is met.",
-            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
-        },
-    },
-]
-
-
 def _key_from_private_file() -> str | None:
     """Read the existing user-local key file without executing shell code."""
     path = Path.home() / ".config/rai/bailian.env"
@@ -91,17 +53,12 @@ class ProduceAgent:
         self.model_name = os.getenv("PRODUCE_AGENT_MODEL", self.config["model"])
 
     def _invoke_tool(self, name: str, arguments: dict) -> dict:
-        if name == "get_object_positions" and set(arguments) == {"sku"}:
-            return self.workstation.get_object_positions(self.order, arguments["sku"])
-        if name == "pick_and_place" and set(arguments) == {"detection_id"}:
-            return self.workstation.pick_and_place(self.order, arguments["detection_id"])
-        if name == "finish_order" and not arguments:
-            return self.workstation.finish_order(self.order)
-        raise OrderError(f"Unknown tool or invalid tool arguments: {name}")
+        return self.tool_client.call(name, arguments)
 
     def _remaining(self) -> dict[str, int]:
+        completed = self.tool_client.context()["completed"]
         return {
-            line.sku: line.quantity - self.workstation._completed_by_sku.get(line.sku, 0)
+            line.sku: line.quantity - completed.get(line.sku, 0)
             for line in self.order.lines
         }
 
@@ -109,7 +66,23 @@ class ProduceAgent:
         return next((sku for sku, count in self._remaining().items() if count), None)
 
     def run(self) -> None:
+        # The host still owns order admission/logging/cancellation. Tool dispatch
+        # and read-only execution context now cross a real MCP HTTP boundary.
+        from .mcp_client import WorkstationMCPClient
+        from .mcp_server import WorkstationMCPServer
+
+        with WorkstationMCPServer(self.workstation, self.order) as server:
+            timeout = self.workstation.config.get("scheduler", {}).get("result_timeout_s", 900)
+            with WorkstationMCPClient(server.url, server.token, timeout_s=timeout) as client:
+                self.tool_client = client
+                self.workstation.event(self.order.order_id, "MCP_CONNECTED",
+                    transport="streamable-http", endpoint=server.url,
+                    tools=[tool["function"]["name"] for tool in client.tools])
+                self._run_loop()
+
+    def _run_loop(self) -> None:
         goal = {line.sku: line.quantity for line in self.order.lines}
+        context = self.tool_client.context()
         messages = [
             {
                 "role": "system",
@@ -130,8 +103,8 @@ class ProduceAgent:
             {
                 "role": "user",
                 "content": json.dumps(
-                    {"goal": "Collect the requested produce from mixed table stock into workstation-assigned bins", "mode": self.workstation.config.get("operation_mode", "classification"), "zone": self.order.zone, "requested": goal,
-                     "completed": dict(self.workstation._completed_by_sku), "remaining": self._remaining()},
+                    {"goal": "Collect the requested produce from mixed table stock into workstation-assigned bins", "mode": context["mode"], "zone": self.order.zone, "requested": goal,
+                     "completed": context["completed"], "remaining": self._remaining()},
                     ensure_ascii=False,
                 ),
             },
@@ -145,7 +118,7 @@ class ProduceAgent:
             response = self.model.chat.completions.create(
                 model=self.model_name,
                 messages=messages,
-                tools=TOOLS,
+                tools=self.tool_client.tools,
                 tool_choice="auto",
                 temperature=0,
             )
@@ -218,7 +191,7 @@ class ProduceAgent:
                             f"Candidate validation stopped after {candidate_rejections} rejections; "
                             f"last reason {exc.code}: {exc}. Inspect candidate diagnostics before retrying"
                         ) from exc
-                    remaining_ids = list(self.workstation._visual_candidates) if not exc.reobserve else []
+                    remaining_ids = self.tool_client.context()["candidate_ids"] if not exc.reobserve else []
                     if not remaining_ids:
                         perceived_sku = None
                     result = {"ok": False, "error": str(exc), "retryable": True,

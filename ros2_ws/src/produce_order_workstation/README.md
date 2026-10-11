@@ -17,7 +17,9 @@ one-by-one in response to order lines.
 | `config/workstation.yaml` | Operation mode, initial stock, Agent endpoint/model, legacy SKU-bin mapping and motion limits. |
 | `fulfillment.py` | In-memory bin ownership, allocation, waiting-for-pickup and collection lifecycle. |
 | `order.py` | Validate order and bin capacity, parse 3D perception results, determine drop offsets and verify placement. |
-| `agent.py` | Bounded OpenAI-compatible tool-calling loop; goal prompt and three tool schemas. |
+| `agent.py` | Bounded model/tool loop; discovers tool schemas and calls tools through MCP. |
+| `mcp_client.py` | Official MCP ClientSession: initialize, discover tools, invoke tools and read order context over loopback HTTP. |
+| `mcp_server.py` | Order-scoped MCP facade for three workstation tools and one read-only resource; token guard, serial execution and safe shutdown. |
 | `runtime.py` | RGB-D perception adapter, visual-candidate registry, validated pick/place tool, ROS motion Action client and final audit. |
 | `order_server.py` | Persistent ROS Action server, one order at a time, cancellation and JSON reports. |
 | `debug_panel.py` | Temporary PyQt debug UI: enter counts, watch Agent calls and ROS feedback, retry or recover the workcell. |
@@ -36,12 +38,26 @@ Accept order: allocate A1–A4 location → spawn this order's box → sync Move
 Agent: get_object_positions(SKU) → choose pick_and_place(detection_id)
        → re-perceive after each pick → finish_order
                            ↓
+MCP Client → Streamable HTTP → order-bound MCP Server
+                           ↓
 ROS tool: RGB-D re-localization → safety checks → grasp → allocated bin → verify
    ↓
 Action feedback + /produce_orders/events + JSON report
    ↓
 WAITING_PICKUP → human confirmation → remove this order's goods AND box → free location
 ```
+
+## MCP tool boundary (2026-10-11)
+
+The default Agent path now uses real MCP Streamable HTTP, not direct Python tool
+dispatch. Bailian still selects tools via its model API. The host starts a local,
+order-bound MCP server, the client discovers schemas with `tools/list`, and
+`tools/call` invokes workstation capabilities. No public port or API key is exposed.
+The server is embedded for lifecycle management; Agent host orchestration and
+workstation execution are not yet deployed as separate processes. ROS interfaces,
+inventory rules, physical safety checks and simulator-based audits are unchanged.
+See [MCP_INTEGRATION.md](../../../docs/MCP_INTEGRATION.md) for the boundaries,
+classes, inputs/outputs, dependencies, tests and current limitations.
 
 ## Fulfillment phase 0–1 (2026-10-08)
 

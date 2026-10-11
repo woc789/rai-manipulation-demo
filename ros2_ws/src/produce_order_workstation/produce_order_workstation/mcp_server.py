@@ -1,0 +1,158 @@
+"""Order-scoped MCP facade. ROS execution and resource ownership stay in Workstation."""
+
+import asyncio
+import json
+import secrets
+import socket
+import threading
+import time
+
+from mcp.server.fastmcp import FastMCP
+import uvicorn
+
+from .order import OrderError, PerceptionMismatch
+
+
+class _LocalTokenGuard:
+    """Ephemeral local capability, not a public OAuth authorization service."""
+
+    def __init__(self, app, token):
+        self.app = app
+        self.expected = f"Bearer {token}".encode()
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            headers = dict(scope.get("headers", []))
+            if not secrets.compare_digest(headers.get(b"authorization", b""), self.expected):
+                await send({"type": "http.response.start", "status": 401,
+                            "headers": [(b"content-type", b"text/plain")]})
+                await send({"type": "http.response.body", "body": b"Unauthorized"})
+                return
+        await self.app(scope, receive, send)
+
+
+class WorkstationMCPServer:
+    """One admitted order, one serial tool lease, loopback-only HTTP endpoint.
+
+    The token and order are supplied by the host, never by the LLM. Blocking ROS
+    operations run off the HTTP loop. Shutdown drains them: an HTTP timeout is
+    NOT proof that a physical operation stopped. No automatic motion retries.
+    """
+
+    def __init__(self, workstation, order):
+        self.workstation = workstation
+        self.order = order
+        self.token = secrets.token_urlsafe(32)
+        self._lease = threading.Lock()
+        self._accepting = True
+        self._perceived = False
+        self._thread = None
+        self._socket = None
+        self.mcp = FastMCP("Produce Workstation", json_response=True,
+                           stateless_http=True, log_level="WARNING")
+
+        @self.mcp.tool()
+        async def get_object_positions(sku: str) -> dict:
+            """Recognize a requested SKU with RGB-D and return detection IDs and 3D grasp positions. Call before each pick."""
+            return await asyncio.to_thread(self._execute, "get_object_positions", {"sku": sku})
+
+        @self.mcp.tool()
+        async def pick_and_place(detection_id: str) -> dict:
+            """Pick one returned visual detection into this order's assigned bin. Workstation owns coordinates, motion and verification."""
+            return await asyncio.to_thread(self._execute, "pick_and_place", {"detection_id": detection_id})
+
+        @self.mcp.tool()
+        async def finish_order() -> dict:
+            """Audit placed objects and finish only when every requested quantity is met."""
+            return await asyncio.to_thread(self._execute, "finish_order", {})
+
+        @self.mcp.resource("workstation://order/context")
+        def order_context() -> str:
+            """Read-only context for the order bound by the host, not a model-selected order."""
+            return json.dumps({
+                "order_id": order.order_id,
+                "mode": workstation.config.get("operation_mode", "classification"),
+                "completed": dict(workstation._completed_by_sku),
+                "candidate_ids": list(workstation._visual_candidates),
+            })
+
+    def _execute(self, name, arguments):
+        if not self._lease.acquire(blocking=False):
+            return {"error": {"kind": "OrderError", "message": "Another workstation tool is in flight"}}
+        try:
+            if not self._accepting:
+                raise OrderError("MCP order session is closed")
+            self.workstation.check_cancel()
+            self.workstation.event(self.order.order_id, "MCP_TOOL_CALL", tool=name)
+            if name == "get_object_positions":
+                self._perceived = False
+                sku = arguments["sku"]
+                remaining = {line.sku: line.quantity - self.workstation._completed_by_sku.get(line.sku, 0)
+                             for line in self.order.lines}
+                if remaining.get(sku, 0) <= 0:
+                    raise OrderError("SKU is not needed by the bound order")
+                result = self.workstation.get_object_positions(self.order, sku)
+                self._perceived = bool(result.get("detections"))
+            elif name == "pick_and_place":
+                if not self._perceived:
+                    raise OrderError("Call get_object_positions before moving; previous detections are stale")
+                result = self.workstation.pick_and_place(self.order, arguments["detection_id"])
+                if result.get("placed"):
+                    self._perceived = False
+            elif name == "finish_order":
+                result = self.workstation.finish_order(self.order)
+            else:
+                raise OrderError("Unknown workstation tool")
+            self.workstation.event(self.order.order_id, "MCP_TOOL_RESULT", tool=name, ok=True)
+            return {"result": result}
+        except OrderError as exc:
+            error = {"kind": type(exc).__name__, "message": str(exc)}
+            if isinstance(exc, PerceptionMismatch):
+                error.update(code=exc.code, reobserve=exc.reobserve)
+                if exc.reobserve:
+                    self._perceived = False
+            self.workstation.event(self.order.order_id, "MCP_TOOL_RESULT", tool=name,
+                                   ok=False, reason=str(exc))
+            return {"error": error}
+        except Exception as exc:
+            # Keep the underlying failure in the existing event/report path;
+            # FastMCP's generic tool-error flag alone would hide this diagnosis.
+            self.workstation.event(self.order.order_id, "MCP_TOOL_RESULT", tool=name,
+                                   ok=False, reason=str(exc), error_type=type(exc).__name__)
+            return {"error": {"kind": "OrderError", "message": str(exc)}}
+        finally:
+            self._lease.release()
+
+    def __enter__(self):
+        self._socket = socket.socket()
+        self._socket.bind(("127.0.0.1", 0))
+        self._socket.listen(16)
+        port = self._socket.getsockname()[1]
+        self.url = f"http://127.0.0.1:{port}/mcp"
+        app = _LocalTokenGuard(self.mcp.streamable_http_app(), self.token)
+        self._server = uvicorn.Server(uvicorn.Config(app, access_log=False,
+            log_level="warning", lifespan="on", timeout_graceful_shutdown=None))
+        self._thread = threading.Thread(target=self._server.run,
+            kwargs={"sockets": [self._socket]}, name="workstation-mcp-server", daemon=True)
+        self._thread.start()
+        deadline = time.monotonic() + 10
+        while not self._server.started:
+            if not self._thread.is_alive() or time.monotonic() >= deadline:
+                self.close()
+                raise OrderError("Workstation MCP server failed to start")
+            time.sleep(.01)
+        return self
+
+    def close(self):
+        self._accepting = False
+        # Do not release the workstation to another order while a tool is moving it.
+        with self._lease:
+            pass
+        if self._thread is not None:
+            self._server.should_exit = True
+            self._thread.join()
+        if self._socket is not None:
+            self._socket.close()
+
+    def __exit__(self, *_):
+        self.close()

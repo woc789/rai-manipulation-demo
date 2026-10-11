@@ -14,7 +14,7 @@ setup(
         (f"share/{package_name}/config", glob("config/*.yaml")),
         (f"share/{package_name}/launch", glob("launch/*.launch.py")),
     ],
-    install_requires=["setuptools", "PyYAML", "openai>=1.0"],
+    install_requires=["setuptools", "PyYAML", "openai>=1.0", "mcp==1.30.0"],
     scripts=["scripts/run_order", "scripts/order_server", "scripts/debug_panel"],
     zip_safe=True,
     maintainer="wang",

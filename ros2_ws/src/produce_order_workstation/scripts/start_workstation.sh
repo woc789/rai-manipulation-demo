@@ -25,4 +25,10 @@ export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 unset ALL_PROXY all_proxy
 
+# Fail before spawning the heavy simulator if the tool gateway dependency is absent.
+python -c 'from mcp import ClientSession; from mcp.server.fastmcp import FastMCP' || {
+  echo '缺少 MCP SDK：请在 rai-jazzy 环境运行 python -m pip install mcp==1.30.0' >&2
+  exit 1
+}
+
 exec ros2 launch produce_order_workstation workstation.launch.py
