@@ -18,6 +18,8 @@ one-by-one in response to order lines.
 | `fulfillment.py` | In-memory bin ownership, allocation, waiting-for-pickup and collection lifecycle. |
 | `order.py` | Validate order and bin capacity, parse 3D perception results, determine drop offsets and verify placement. |
 | `agent.py` | Bounded model/tool loop; discovers tool schemas and calls tools through MCP. |
+| `agent_service.py` | Launch-started independent ROS Agent runtime, serial task admission, model client reuse and per-task decision context. |
+| `agent_dispatch.py` | ExecuteAgent Action client: readiness, feedback, cancellation and results; no model logic. |
 | `mcp_client.py` | Official MCP ClientSession: initialize, discover tools, invoke tools and read order context over loopback HTTP. |
 | `mcp_server.py` | Order-scoped MCP facade for three workstation tools and one read-only resource; token guard, serial execution and safe shutdown. |
 | `runtime.py` | RGB-D perception adapter, visual-candidate registry, validated pick/place tool, ROS motion Action client and final audit. |
@@ -53,13 +55,14 @@ The default Agent path now uses real MCP Streamable HTTP, not direct Python tool
 dispatch. Bailian still selects tools via its model API. The host starts a local,
 order-bound MCP server, the client discovers schemas with `tools/list`, and
 `tools/call` invokes workstation capabilities. No public port or API key is exposed.
-The host in `Workstation.run` manages both endpoint lifetimes and injects a client,
-Agent config, event sink and cancellation signal into `ProduceAgent`. The Agent
-has no Workstation member and starts no server. The server is still embedded;
-Agent host orchestration and workstation execution are not yet deployed as separate processes. ROS interfaces,
-inventory rules, physical safety checks and simulator-based audits are unchanged.
-See [MCP_INTEGRATION.md](../../../docs/MCP_INTEGRATION.md) for the boundaries,
-classes, inputs/outputs, dependencies, tests and current limitations.
+ROS launch now starts an independent `agent_server` process and `order_server`'s
+persistent MCP gateway. `Workstation.run` binds an admitted order and sends an
+ExecuteAgent Action; it neither constructs an Agent nor accesses the model.
+The Agent service waits idle, reuses its model API client and creates isolated
+decision/context and MCP client sessions per task. Existing order/motion Actions,
+inventory checks and physical audits remain. See
+[AGENT_RUNTIME.md](../../../docs/AGENT_RUNTIME.md) for current operation and
+[MCP_INTEGRATION.md](../../../docs/MCP_INTEGRATION.md) for earlier migration history.
 
 ## Fulfillment phase 0–1 (2026-10-08)
 

@@ -167,3 +167,31 @@ def test_http_timeout_never_retries_motion_or_releases_backend_early(station):
                     release.set()
                 future.result(timeout=5)
             station.pick_and_place.assert_called_once()
+
+
+def test_persistent_gateway_is_idle_until_order_and_revokes_old_capability(station):
+    from produce_order_workstation.mcp_server import _request_capability
+    first = Order("first", "A", (OrderLine("corn", 1),))
+    second = Order("second", "A", (OrderLine("corn", 1),))
+    with WorkstationMCPServer(station) as server:
+        endpoint = server.url
+        with WorkstationMCPClient(endpoint, server.token) as idle:
+            with pytest.raises(OrderError, match="No admitted"):
+                idle.call("get_object_positions", {"sku": "corn"})
+        with server.order_session(first):
+            old_token = server.token
+            with WorkstationMCPClient(endpoint, old_token) as client:
+                assert client.context()["order_id"] == "first"
+                client.call("get_object_positions", {"sku": "corn"})
+        assert server.order is None and server.token != old_token
+        with server.order_session(second):
+            assert server.url == endpoint
+            # A request authenticated before rotation must not act on a new order.
+            marker = _request_capability.set(old_token)
+            try:
+                assert "error" in server._execute("get_object_positions", {"sku": "corn"})
+            finally:
+                _request_capability.reset(marker)
+            with WorkstationMCPClient(endpoint, server.token) as client:
+                assert client.context()["order_id"] == "second"
+            station.get_object_positions.assert_called_once()

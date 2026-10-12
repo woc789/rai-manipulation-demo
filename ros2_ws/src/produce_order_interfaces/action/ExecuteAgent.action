@@ -1,0 +1,12 @@
+# The host supplies the order-bound capability; never put it in prompts/logs.
+string order_id
+string zone
+produce_order_interfaces/OrderLine[] lines
+string mcp_url
+string mcp_token
+---
+string status
+string error
+---
+string stage
+string detail_json

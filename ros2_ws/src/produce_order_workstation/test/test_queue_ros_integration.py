@@ -129,6 +129,8 @@ def test_service_queue_action_feedback_priority_resume_and_pickup(monkeypatch, t
     rclpy.init()
     package = Path(__file__).parents[1]
     server = order_server.OrderActionServer(package / "config/workstation.yaml", package / "config/demo_scene.yaml")
+    # This regression intentionally substitutes the entire Agent/robot capability.
+    server._agent_dispatcher.ready = lambda: True
     client = Node("isolated_queue_test_client")
     executor = MultiThreadedExecutor(num_threads=8)
     executor.add_node(server)

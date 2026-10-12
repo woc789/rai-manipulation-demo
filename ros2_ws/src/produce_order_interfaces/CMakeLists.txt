@@ -15,6 +15,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/CancelQueuedOrder.srv"
   "action/ExecuteOrder.action"
   "action/ExecuteMotion.action"
+  "action/ExecuteAgent.action"
   DEPENDENCIES geometry_msgs std_msgs
 )
 

@@ -48,6 +48,11 @@ def generate_launch_description():
             ),
             Node(
                 package="produce_order_workstation",
+                executable="agent_server",
+                output="screen",
+            ),
+            Node(
+                package="produce_order_workstation",
                 executable="order_server",
                 output="screen",
             ),

@@ -1,6 +1,8 @@
 """Order-scoped MCP facade. ROS execution and resource ownership stay in Workstation."""
 
 import asyncio
+from contextlib import contextmanager
+from contextvars import ContextVar
 import json
 import secrets
 import socket
@@ -13,21 +15,31 @@ import uvicorn
 from .order import OrderError, PerceptionMismatch
 
 
+_request_capability = ContextVar("workstation_mcp_capability", default=None)
+
+
 class _LocalTokenGuard:
     """Ephemeral local capability, not a public OAuth authorization service."""
 
     def __init__(self, app, token):
         self.app = app
-        self.expected = f"Bearer {token}".encode()
+        self.token = token
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http":
             headers = dict(scope.get("headers", []))
-            if not secrets.compare_digest(headers.get(b"authorization", b""), self.expected):
+            expected = f"Bearer {self.token()}".encode()
+            if not secrets.compare_digest(headers.get(b"authorization", b""), expected):
                 await send({"type": "http.response.start", "status": 401,
                             "headers": [(b"content-type", b"text/plain")]})
                 await send({"type": "http.response.body", "body": b"Unauthorized"})
                 return
+            marker = _request_capability.set(headers[b"authorization"].decode()[7:])
+            try:
+                await self.app(scope, receive, send)
+            finally:
+                _request_capability.reset(marker)
+            return
         await self.app(scope, receive, send)
 
 
@@ -39,7 +51,7 @@ class WorkstationMCPServer:
     NOT proof that a physical operation stopped. No automatic motion retries.
     """
 
-    def __init__(self, workstation, order):
+    def __init__(self, workstation, order=None):
         self.workstation = workstation
         self.order = order
         self.token = secrets.token_urlsafe(32)
@@ -69,8 +81,12 @@ class WorkstationMCPServer:
         @self.mcp.resource("workstation://order/context")
         def order_context() -> str:
             """Read-only context for the order bound by the host, not a model-selected order."""
+            if self.order is None or _request_capability.get() != self.token:
+                raise OrderError("No admitted order is bound to this MCP server")
             return json.dumps({
-                "order_id": order.order_id,
+                "order_id": self.order.order_id,
+                "zone": self.order.zone,
+                "requested": {line.sku: line.quantity for line in self.order.lines},
                 "mode": workstation.config.get("operation_mode", "classification"),
                 "completed": dict(workstation._completed_by_sku),
                 "candidate_ids": list(workstation._visual_candidates),
@@ -80,6 +96,8 @@ class WorkstationMCPServer:
         if not self._lease.acquire(blocking=False):
             return {"error": {"kind": "OrderError", "message": "Another workstation tool is in flight"}}
         try:
+            if self.order is None or _request_capability.get() != self.token:
+                return {"error": {"kind": "OrderError", "message": "No admitted order is bound"}}
             if not self._accepting:
                 raise OrderError("MCP order session is closed")
             self.workstation.check_cancel()
@@ -129,7 +147,7 @@ class WorkstationMCPServer:
         self._socket.listen(16)
         port = self._socket.getsockname()[1]
         self.url = f"http://127.0.0.1:{port}/mcp"
-        app = _LocalTokenGuard(self.mcp.streamable_http_app(), self.token)
+        app = _LocalTokenGuard(self.mcp.streamable_http_app(), lambda: self.token)
         self._server = uvicorn.Server(uvicorn.Config(app, access_log=False,
             log_level="warning", lifespan="on", timeout_graceful_shutdown=None))
         self._thread = threading.Thread(target=self._server.run,
@@ -142,6 +160,24 @@ class WorkstationMCPServer:
                 raise OrderError("Workstation MCP server failed to start")
             time.sleep(.01)
         return self
+
+    @contextmanager
+    def order_session(self, order):
+        """Keep HTTP alive, rotate capability at each admitted task boundary."""
+        with self._lease:
+            if self.order is not None or not self._accepting:
+                raise OrderError("Workstation MCP has an active order or is closed")
+            self.order = order
+            self.token = secrets.token_urlsafe(32)
+            self._perceived = False
+        try:
+            yield self
+        finally:
+            # Drain late physical calls before admitting another order.
+            with self._lease:
+                self.order = None
+                self.token = secrets.token_urlsafe(32)
+                self._perceived = False
 
     def close(self):
         self._accepting = False

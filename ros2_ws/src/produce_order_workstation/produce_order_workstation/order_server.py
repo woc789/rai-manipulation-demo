@@ -116,6 +116,13 @@ class OrderActionServer(Node):
             "produce_order_runtime", executor_type="single_threaded"
         )
         self.workstation = Workstation(self.connector, self.config)
+        from .mcp_server import WorkstationMCPServer
+        from .agent_dispatch import AgentDispatcher
+        self._mcp_gateway = WorkstationMCPServer(self.workstation).__enter__()
+        self.workstation._mcp_server = self._mcp_gateway
+        self._agent_dispatcher = AgentDispatcher(self, self.config,
+            self.workstation.event, lambda: self.workstation.cancel_requested())
+        self.workstation._agent_dispatcher = self._agent_dispatcher
         self._server = ActionServer(
             self,
             ExecuteOrder,
@@ -218,6 +225,11 @@ class OrderActionServer(Node):
                 Thread(target=self._scan_stock, daemon=True).start()
                 return
             if not self._inventory_ready:
+                return
+            if hasattr(self, "_agent_dispatcher") and not self._agent_dispatcher.ready():
+                for waiting in self.queue.pending():
+                    waiting.reason = ("等待 Agent 服务就绪；请检查 agent_server 与 /produce_agent/status "
+                                      + self._agent_dispatcher.error)
                 return
             job = self.queue.select(self.bin_manager, self.workstation.inventory)
             if job is None:
@@ -754,6 +766,8 @@ class OrderActionServer(Node):
         }
 
     def close(self) -> None:
+        self._mcp_gateway.close()
+        self._agent_dispatcher.close()
         self._dispatch_client.destroy()
         self._server.destroy()
         self.connector.shutdown()

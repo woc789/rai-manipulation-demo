@@ -147,6 +147,20 @@ def server_stub():
         report_path=lambda _: Path("/nonexistent-unit-report"), publish_status=MagicMock())
 
 
+def test_offline_agent_keeps_order_queued_without_reserving_stock():
+    server = server_stub()
+    server._busy = False
+    server._inventory_ready = True
+    server._agent_dispatcher = SimpleNamespace(ready=lambda: False, error="model key missing")
+    current = order("waiting-agent")
+    server.queue.submit(current)
+    OrderActionServer.dispatch_pending(server)
+    assert server._dispatch_order_id is None
+    assert server.queue.jobs[current.order_id].state == "QUEUED"
+    assert "model key missing" in server.queue.jobs[current.order_id].reason
+    assert not server.bin_manager.orders
+
+
 def test_moved_candidate_does_not_double_available_stock():
     book = InventoryLedger()
     old = book.observe("corn", "base", [(.3, .1, .04)])[0]

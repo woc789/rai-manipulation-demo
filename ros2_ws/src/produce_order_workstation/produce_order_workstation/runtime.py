@@ -34,7 +34,6 @@ from .order import (
     plan_placements,
     verify_bin_placement,
 )
-from .agent import ProduceAgent
 from .planning_scene import PlanningSceneSync
 from .inventory import InventoryLedger
 from .stock_layout import validate_stock_layout
@@ -85,6 +84,8 @@ class Workstation:
         self.yield_requested = lambda: False
         self.event_sink = event_sink
         self.cancel_requested = cancel_requested or (lambda: False)
+        self._mcp_server = None
+        self._agent_dispatcher = None
 
     def event(self, order_id: str, stage: str, **details) -> None:
         entry = {
@@ -962,7 +963,7 @@ class Workstation:
         self.physical_state_uncertain = False
         return {"status": "verified", "completed": len(self._placed_entities)}
 
-    def run(self, order: Order, *, model=None) -> dict:
+    def run(self, order: Order, *, agent_executor=None) -> dict:
         """Ask the model to solve a goal with tools, preserving a failure report."""
         failure = None
         self.event(order.order_id, "ORDER_STARTED", total=order.total_items)
@@ -970,21 +971,14 @@ class Workstation:
             if not self._scene_prepared:
                 raise OrderError("Agent execution requires prepare_scene=true")
             self.check_cancel()
-            # This execution entry is the host/composition root, not the Agent.
-            # Only the server gets Workstation; the decision loop gets contracts.
-            from .mcp_client import WorkstationMCPClient
-            from .mcp_server import WorkstationMCPServer
-
-            with WorkstationMCPServer(self, order) as server:
-                timeout = self.config.get("scheduler", {}).get("result_timeout_s", 900)
-                with WorkstationMCPClient(server.url, server.token, timeout_s=timeout) as client:
-                    self.event(order.order_id, "MCP_CONNECTED",
-                        transport="streamable-http", endpoint=server.url,
-                        tools=[tool["function"]["name"] for tool in client.tools])
-                    ProduceAgent(
-                        order, self.config["agent"], client, model=model,
-                        event_sink=self.event, cancel_requested=self.cancel_requested,
-                    ).run()
+            if agent_executor is not None:
+                # Explicit test dependency injection; no in-process production fallback.
+                agent_executor(order)
+            else:
+                if self._mcp_server is None or self._agent_dispatcher is None:
+                    raise OrderError("Persistent MCP gateway and Agent dispatcher are not configured")
+                with self._mcp_server.order_session(order) as server:
+                    self._agent_dispatcher.execute(order, server.url, server.token)
         except OrderPaused as exc:
             failure = str(exc)
             self.event(order.order_id, "ORDER_PAUSED", reason=failure)

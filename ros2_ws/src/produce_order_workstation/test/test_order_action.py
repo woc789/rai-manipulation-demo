@@ -551,6 +551,19 @@ class FakeModel:
         return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
 
+def run_agent(station, order, model):
+    """Explicit test host; production dispatches to the launch-started ROS service."""
+    from produce_order_workstation.agent import ProduceAgent
+    from produce_order_workstation.mcp_client import WorkstationMCPClient
+    from produce_order_workstation.mcp_server import WorkstationMCPServer
+    def execute(admitted):
+        with WorkstationMCPServer(station, admitted) as server:
+            with WorkstationMCPClient(server.url, server.token) as client:
+                ProduceAgent(admitted, station.config["agent"], client, model=model,
+                    event_sink=station.event, cancel_requested=station.cancel_requested).run()
+    return station.run(order, agent_executor=execute)
+
+
 def test_agent_loop_uses_model_chosen_perception_and_motion_tools():
     station = Workstation(MagicMock(), CONFIG)
     station._scene_prepared = True
@@ -561,7 +574,7 @@ def test_agent_loop_uses_model_chosen_perception_and_motion_tools():
     station.pick_and_place = MagicMock(side_effect=pick)
     station.finish_order = MagicMock(return_value={"status": "verified"})
     model = FakeModel([("get_object_positions", {"sku": "corn"}), ("pick_and_place", {"detection_id": "visual_corn_2"}), ("finish_order", {})])
-    result = station.run(Order("agent", "A", (OrderLine("corn", 1),)), model=model)
+    result = run_agent(station, Order("agent", "A", (OrderLine("corn", 1),)), model)
     assert result["status"] == "COMPLETED"
     station.get_object_positions.assert_called_once()
     assert station.pick_and_place.call_args.args[1] == "visual_corn_2"
@@ -583,7 +596,7 @@ def test_agent_rejects_pick_without_perception_and_allows_recovery():
         ("pick_and_place", {"detection_id": "visual_corn_1"}),
         ("finish_order", {}),
     ])
-    result = station.run(Order("no-inspection", "A", (OrderLine("corn", 1),)), model=model)
+    result = run_agent(station, Order("no-inspection", "A", (OrderLine("corn", 1),)), model)
     assert result["status"] == "COMPLETED"
     rejected = [event for event in result["events"] if event["stage"] == "AGENT_TOOL_RESULT" and event["result"].get("retryable")]
     assert len(rejected) == 1
@@ -613,7 +626,7 @@ def test_agent_reperceives_after_clearance_rejection_then_finishes():
         ("pick_and_place", {"detection_id": "safe"}),
         ("finish_order", {}),
     ])
-    result = station.run(Order("replace-near", "A", (OrderLine("corn", 1),)), model=model)
+    result = run_agent(station, Order("replace-near", "A", (OrderLine("corn", 1),)), model)
     assert result["status"] == "COMPLETED"
     assert [c.args[1] for c in station.pick_and_place.call_args_list] == ["near", "safe"]
     rejected = [e["result"] for e in result["events"]
@@ -639,7 +652,7 @@ def test_agent_retries_after_successful_pick_without_reperception():
         ("pick_and_place", {"detection_id": "visual_corn_1"}),
         ("finish_order", {}),
     ])
-    result = station.run(Order("stale-after-pick", "A", (OrderLine("corn", 2),)), model=model)
+    result = run_agent(station, Order("stale-after-pick", "A", (OrderLine("corn", 2),)), model)
     assert result["status"] == "COMPLETED"
     assert station.pick_and_place.call_count == 2
     assert station.get_object_positions.call_count == 2
@@ -674,7 +687,7 @@ def test_agent_finishes_both_corn_before_switching_sku_and_recovers_bad_steps():
         ("finish_order", {}),
     ])
     order = Order("ordered", "A", (OrderLine("corn", 2), OrderLine("carrot", 1)))
-    assert station.run(order, model=model)["status"] == "COMPLETED"
+    assert run_agent(station, order, model)["status"] == "COMPLETED"
     assert [call.args[1] for call in station.get_object_positions.call_args_list] == [
         "corn", "corn", "carrot"
     ]
@@ -695,7 +708,7 @@ def test_agent_stops_after_five_empty_visual_attempts():
     model = FakeModel([("get_object_positions", {"sku": "tomato"})] * 5)
     order = Order("missing-tomato", "A", (OrderLine("tomato", 4),))
 
-    result = station.run(order, model=model)
+    result = run_agent(station, order, model)
 
     assert result["status"] == "FAILED"
     assert "No tomato detected after 5 consecutive visual attempts" in result["error"]

@@ -237,8 +237,8 @@ def test_safe_partial_failure_preserves_progress_for_manual_review(monkeypatch):
     work.physical_state_uncertain = False
     fake = MagicMock()
     fake.run.side_effect = OrderError("No carrot detected after 5 attempts")
-    monkeypatch.setattr(runtime, "ProduceAgent", lambda *args, **kwargs: fake)
-    result = work.run(Order("partial", "A", (OrderLine("corn", 1), OrderLine("carrot", 1))))
+    result = work.run(Order("partial", "A", (OrderLine("corn", 1), OrderLine("carrot", 1))),
+                      agent_executor=lambda _: fake.run())
     assert result["status"] == "PAUSED" and result["completed"] == 1
     assert result["error"].startswith("[REVIEW_REQUIRED]")
 
@@ -250,8 +250,8 @@ def test_uncertain_motion_failure_cannot_become_safe_pause(monkeypatch):
     work.physical_state_uncertain = True
     fake = MagicMock()
     fake.run.side_effect = OrderError("motion timeout")
-    monkeypatch.setattr(runtime, "ProduceAgent", lambda *args, **kwargs: fake)
-    assert work.run(Order("uncertain", "A", (OrderLine("corn", 2),)))["status"] == "FAILED"
+    assert work.run(Order("uncertain", "A", (OrderLine("corn", 2),)),
+                    agent_executor=lambda _: fake.run())["status"] == "FAILED"
 
 
 def test_review_pause_never_automatically_restarts():
