@@ -53,8 +53,10 @@ The default Agent path now uses real MCP Streamable HTTP, not direct Python tool
 dispatch. Bailian still selects tools via its model API. The host starts a local,
 order-bound MCP server, the client discovers schemas with `tools/list`, and
 `tools/call` invokes workstation capabilities. No public port or API key is exposed.
-The server is embedded for lifecycle management; Agent host orchestration and
-workstation execution are not yet deployed as separate processes. ROS interfaces,
+The host in `Workstation.run` manages both endpoint lifetimes and injects a client,
+Agent config, event sink and cancellation signal into `ProduceAgent`. The Agent
+has no Workstation member and starts no server. The server is still embedded;
+Agent host orchestration and workstation execution are not yet deployed as separate processes. ROS interfaces,
 inventory rules, physical safety checks and simulator-based audits are unchanged.
 See [MCP_INTEGRATION.md](../../../docs/MCP_INTEGRATION.md) for the boundaries,
 classes, inputs/outputs, dependencies, tests and current limitations.

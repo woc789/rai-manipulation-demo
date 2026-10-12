@@ -969,7 +969,22 @@ class Workstation:
         try:
             if not self._scene_prepared:
                 raise OrderError("Agent execution requires prepare_scene=true")
-            ProduceAgent(self, order, model=model).run()
+            self.check_cancel()
+            # This execution entry is the host/composition root, not the Agent.
+            # Only the server gets Workstation; the decision loop gets contracts.
+            from .mcp_client import WorkstationMCPClient
+            from .mcp_server import WorkstationMCPServer
+
+            with WorkstationMCPServer(self, order) as server:
+                timeout = self.config.get("scheduler", {}).get("result_timeout_s", 900)
+                with WorkstationMCPClient(server.url, server.token, timeout_s=timeout) as client:
+                    self.event(order.order_id, "MCP_CONNECTED",
+                        transport="streamable-http", endpoint=server.url,
+                        tools=[tool["function"]["name"] for tool in client.tools])
+                    ProduceAgent(
+                        order, self.config["agent"], client, model=model,
+                        event_sink=self.event, cancel_requested=self.cancel_requested,
+                    ).run()
         except OrderPaused as exc:
             failure = str(exc)
             self.event(order.order_id, "ORDER_PAUSED", reason=failure)

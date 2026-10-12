@@ -7,8 +7,19 @@ bin assignment, completion and safety checks remain deterministic tools.
 import json
 import os
 from pathlib import Path
+from typing import Callable, Protocol
 
-from .order import OrderError, PerceptionMismatch
+from .order import Order, OrderCancelled, OrderError, PerceptionMismatch
+
+
+class AgentToolClient(Protocol):
+    """Capabilities the decision loop needs, not a concrete Workstation or SDK."""
+
+    tools: list[dict]
+
+    def call(self, name: str, arguments: dict) -> dict: ...
+
+    def context(self) -> dict: ...
 
 
 def _key_from_private_file() -> str | None:
@@ -23,11 +34,10 @@ def _key_from_private_file() -> str | None:
     return None
 
 
-def create_model(config: dict):
+def create_model(agent_config: dict):
     """Use OpenAI-compatible tool calling, defaulting to the user's Bailian key."""
     from openai import OpenAI
 
-    agent_config = config["agent"]
     key = os.getenv("DASHSCOPE_API_KEY") or _key_from_private_file()
     if not key:
         raise OrderError(
@@ -45,12 +55,26 @@ def create_model(config: dict):
 class ProduceAgent:
     """One bounded model/tool loop; there is no scripted picking fallback."""
 
-    def __init__(self, workstation, order, model=None):
-        self.workstation = workstation
+    def __init__(
+        self, order: Order, config: dict, tool_client: AgentToolClient, *,
+        model=None, event_sink: Callable[..., None] | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
+    ):
         self.order = order
-        self.config = workstation.config["agent"]
-        self.model = model if model is not None else create_model(workstation.config)
+        self.config = dict(config)
+        self.tool_client = tool_client
+        self._event_sink = event_sink
+        self._cancel_requested = cancel_requested or (lambda: False)
+        self.model = model if model is not None else create_model(self.config)
         self.model_name = os.getenv("PRODUCE_AGENT_MODEL", self.config["model"])
+
+    def _event(self, stage: str, **details) -> None:
+        if self._event_sink is not None:
+            self._event_sink(self.order.order_id, stage, **details)
+
+    def _check_cancel(self) -> None:
+        if self._cancel_requested():
+            raise OrderCancelled("Cancellation accepted before the next Agent decision")
 
     def _invoke_tool(self, name: str, arguments: dict) -> dict:
         return self.tool_client.call(name, arguments)
@@ -66,19 +90,9 @@ class ProduceAgent:
         return next((sku for sku, count in self._remaining().items() if count), None)
 
     def run(self) -> None:
-        # The host still owns order admission/logging/cancellation. Tool dispatch
-        # and read-only execution context now cross a real MCP HTTP boundary.
-        from .mcp_client import WorkstationMCPClient
-        from .mcp_server import WorkstationMCPServer
-
-        with WorkstationMCPServer(self.workstation, self.order) as server:
-            timeout = self.workstation.config.get("scheduler", {}).get("result_timeout_s", 900)
-            with WorkstationMCPClient(server.url, server.token, timeout_s=timeout) as client:
-                self.tool_client = client
-                self.workstation.event(self.order.order_id, "MCP_CONNECTED",
-                    transport="streamable-http", endpoint=server.url,
-                    tools=[tool["function"]["name"] for tool in client.tools])
-                self._run_loop()
+        """Run decisions using an already connected client; host owns its lifetime."""
+        self._check_cancel()
+        self._run_loop()
 
     def _run_loop(self) -> None:
         goal = {line.sku: line.quantity for line in self.order.lines}
@@ -114,7 +128,7 @@ class ProduceAgent:
         candidate_rejections = 0
         max_calls = self.config["max_tool_calls_per_item"] * self.order.total_items + 6
         for _ in range(max_calls):
-            self.workstation.check_cancel()
+            self._check_cancel()
             response = self.model.chat.completions.create(
                 model=self.model_name,
                 messages=messages,
@@ -122,11 +136,12 @@ class ProduceAgent:
                 tool_choice="auto",
                 temperature=0,
             )
+            self._check_cancel()
             message = response.choices[0].message
             calls = message.tool_calls or []
             if len(calls) != 1:
-                self.workstation.event(
-                    self.order.order_id, "AGENT_RETRY",
+                self._event(
+                    "AGENT_RETRY",
                     reason="Expected exactly one tool call", received=len(calls),
                     remaining=self._remaining(), required_sku=self._next_sku(),
                 )
@@ -157,8 +172,8 @@ class ProduceAgent:
                 raise OrderError("Agent returned invalid tool JSON") from exc
             if not isinstance(arguments, dict):
                 raise OrderError("Agent tool arguments must be an object")
-            self.workstation.event(
-                self.order.order_id, "AGENT_TOOL_CALL", tool=name, arguments=arguments
+            self._event(
+                "AGENT_TOOL_CALL", tool=name, arguments=arguments
             )
             required_sku = self._next_sku()
             if name == "finish_order" and required_sku is not None:
@@ -198,8 +213,8 @@ class ProduceAgent:
                               "reason_code": exc.code,
                               "required_tool": "pick_and_place" if remaining_ids else "get_object_positions",
                               "alternative_detection_ids": remaining_ids, "required_sku": required_sku}
-            self.workstation.event(
-                self.order.order_id, "AGENT_TOOL_RESULT", tool=name, result=result
+            self._event(
+                "AGENT_TOOL_RESULT", tool=name, result=result
             )
             if name == "get_object_positions" and "detections" in result:
                 if result["detections"]:
@@ -209,14 +224,14 @@ class ProduceAgent:
                     perceived_sku = None
                     empty_perceptions += 1
                     limit = self.config["max_consecutive_empty_perceptions"]
-                    self.workstation.event(
-                        self.order.order_id, "PERCEPTION_EMPTY",
+                    self._event(
+                        "PERCEPTION_EMPTY",
                         sku=arguments["sku"], attempts=empty_perceptions,
                         limit=limit, remaining=self._remaining(),
                     )
                     if empty_perceptions >= limit:
-                        self.workstation.event(
-                            self.order.order_id, "PERCEPTION_EXHAUSTED",
+                        self._event(
+                            "PERCEPTION_EXHAUSTED",
                             sku=arguments["sku"], attempts=empty_perceptions,
                             remaining=self._remaining(),
                         )

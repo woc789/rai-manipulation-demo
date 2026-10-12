@@ -1,4 +1,4 @@
-# MCP 接入：工作站工具边界（2026-10-11）
+# MCP 接入：工作站工具边界（2026-10-11；2026-10-12 更新宿主职责）
 
 ## 1. 本次范围
 
@@ -12,6 +12,7 @@ MoveIt 规划、ExecuteOrder / ExecuteMotion Action 均未因本次改动而替�
 
 ```mermaid
 flowchart TD
+    Host["Workstation.run：宿主/组装入口，启动连接并注入依赖"]
     Model["百炼模型：选择工具与参数"]
     Agent["ProduceAgent：对话、数量约束、有界重试"]
     Client["WorkstationMCPClient：发现、调用、读取 Resource"]
@@ -20,6 +21,9 @@ flowchart TD
     Vision["ROS 视觉服务：检测、分割、深度与 TF"]
     Motion["ExecuteMotion Action → C++ 服务端 → MoveIt"]
     Model <--> |"模型 API / Function Calling"| Agent
+    Host --> |"订单、配置、客户端、日志和取消接口"| Agent
+    Host --> |"启动并管理生命周期"| Client
+    Host --> |"绑定工作站与当前订单"| Server
     Agent <--> Client
     Client <--> |"MCP Streamable HTTP"| Server
     Server --> Station
@@ -34,11 +38,16 @@ flowchart TD
 ### ProduceAgent（原有类，修改 agent.py）
 
 - 上游：当前获准执行的订单及百炼的 `tool_calls`。
-- 新成员 `tool_client`：当前订单的 MCP 客户端。
+- 构造输入：Order、Agent 配置、已连接的 `tool_client`、可注入的模型、
+  可选 `event_sink` 和 `cancel_requested`。没有 Workstation 参数或成员。
+- 新增 `AgentToolClient` Protocol：只声明 tools、call、context 三个能力，
+  不要求客户端继承某个具体类；真实 MCP 客户端与测试替身均可满足它。
 - 删除 Agent 中手写的 `TOOLS` 常量；`tools/list` 返回的描述与 JSON Schema
   转换为模型 API 的 function tools。模型仍通过 Function Calling 选择工具。
-- `run()`：宿主创建订单作用域服务端和客户端，记录 `MCP_CONNECTED`，
-  运行原有循环；退出时先关闭客户端，再关闭服务端。
+- `run()`：检查取消并运行决策循环，不创建或关闭 MCP 服务。
+- `_event()`：通过宿主提供的日志回调输出事件；不访问工作站对象。
+- `_check_cancel()`：通过取消信号停止后续决策，在模型调用前后均检查。
+  模型返回期间已取消的订单，不执行迟到的工具选择。
 - `_run_loop()`：原有对话循环，数量约束、五次空检测停止、候选拒绝和
   重新感知策略保留；不是行为树，也不是新增的业务 Agent。
 - `_invoke_tool(name, arguments)`：只调用客户端，不再硬编码工作站方法。
@@ -46,8 +55,17 @@ flowchart TD
   ID 同样从 Resource 读取，不再直接读取工作站私有候选表。
 - 下游：MCP 客户端；执行结果再作为 `role=tool` 反馈给百炼。
 
-注意：本次只是工具/状态读取边界解耦，宿主仍持有 Workstation 来管理
-配置、日志、取消和服务生命周期，不能称为完全独立的 Agent 进程。
+### 宿主：Workstation.run（runtime.py 中原有执行入口）
+
+2026-10-12 将服务端/客户端创建和关闭从 ProduceAgent.run 移到此处。
+宿主先检查现场与取消状态，再创建订单绑定的 MCP Server 与 MCP Client，
+记录 MCP_CONNECTED，注入 Agent 配置、客户端、事件回调和取消信号。
+服务生命周期由外层 with 管理，Agent 失败也会清理连接并排空服务端操作。
+原有成功、失败、暂停、取消和报告处理仍在此处。
+
+Agent 不再依赖工作站类，但宿主在本次部署中仍使用工作站的事件方法作为
+日志回调。回调不是机器人能力接口，不通过它感知/运动/读取执行状态。
+这是依赖注入，不是将进程拆开：当前仍同进程部署，HTTP 工具边界不变。
 
 ### WorkstationMCPClient（新增 mcp_client.py）
 
@@ -163,3 +181,31 @@ RunFulfillment，导致加载当前消息时出现 undefined symbol。旧接口 
 备份分支继续保留，未恢复其功能；原有布局与 launch 两项未提交更改也保留。
 
 官方参考：https://github.com/modelcontextprotocol/python-sdk/tree/v1.30.0 。
+
+## 7. Agent 到底由谁启动？ProduceAgent 是否标准组件？
+
+启动脚本 → ROS launch → order_server.main 创建 OrderActionServer 和 Workstation。
+这只是启动订单服务和仿真，不会立即启动一次订单的模型决策循环。
+
+提交订单 → 注册到队列 → dispatch_pending 选择可执行订单 → 发送 ExecuteOrder
+Action → execute_callback 准备/恢复订单上下文 → Workstation.run 创建 MCP
+连接 → 构造 ProduceAgent 并调用 run → 模型/工具有界循环。
+订单暂停后恢复执行，会按此入口创建新的 Agent 实例；不是一个永久 Agent 节点。
+
+ProduceAgent 是本项目自定义的“受约束工具调用执行器”，不是 MCP/ROS 标准类。
+它维护对话、调用百炼 API、解析 tool_calls、检查调用顺序与剩余数量、
+通过工具客户端执行、将结果反馈给模型，并限制空检测/拒绝/总调用次数。
+它不排订单、不分配箱子、不规划机械臂轨迹，也不承载模型权重。
+
+名为 ProduceAgent 的对象不是通用 Agent 的必要组件。必要的是有人负责
+“模型决策 → 工具执行 → 结果反馈 → 下一轮/停止”这类控制逻辑；可以放在
+一个类、一组函数或框架执行器中。当前将它封装成类便于保存对话与配置、
+隔离每份订单的执行逻辑和独立测试。MCP Client 只负责协议，不能替代该循环。
+
+新增 test_agent_boundary.py 验证：没有工作站也能运行、通过注入接口记录事件、
+取消阻止模型/迟到调用、断线不回退、模型工厂只接收 Agent 配置，且 Agent
+源码没有工作站访问或 MCP 服务启动依赖。
+
+2026-10-12 本次验证：187 项非 GUI 测试通过（新增 6 项边界检查），
+2 项隔离 ROS/MCP 集成通过；工作站包重建成功。未增加依赖、未调用付费模型、
+未启动或提交真实仿真订单。原有两项布局/launch 更改和第 4～7 步备份未动。
