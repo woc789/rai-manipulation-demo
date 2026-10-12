@@ -31,4 +31,4 @@ python -c 'from mcp import ClientSession; from mcp.server.fastmcp import FastMCP
   exit 1
 }
 
-exec ros2 launch produce_order_workstation workstation.launch.py
+exec ros2 launch produce_order_workstation workstation.launch.py "$@"
