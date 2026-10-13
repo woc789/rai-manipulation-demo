@@ -12,7 +12,9 @@ from launch_ros.substitutions import FindPackageShare
 def generate_launch_description():
     return LaunchDescription(
         [
-            SetEnvironmentVariable("RAI_GDINO_TILE_CLASSES", "corn cob,ear of corn,corn"),
+            # Use the original detector; layout, not repeated tiled inference,
+            # is the default way to keep this learning scene usable.
+            SetEnvironmentVariable("RAI_GDINO_TILE_CLASSES", ""),
             DeclareLaunchArgument(
                 "enable_perception",
                 default_value="true",
