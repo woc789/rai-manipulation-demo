@@ -1,0 +1,13 @@
+<root BTCPP_format="4" main_tree_to_execute="Item">
+  <BehaviorTree ID="Item">
+    <RetryUntilSuccessful num_attempts="{attempts}">
+      <Sequence>
+        <Capability command="select" />
+        <Capability command="pick" />
+      </Sequence>
+    </RetryUntilSuccessful>
+  </BehaviorTree>
+  <BehaviorTree ID="Audit">
+    <Capability command="audit" />
+  </BehaviorTree>
+</root>

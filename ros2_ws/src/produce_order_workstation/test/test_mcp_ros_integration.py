@@ -40,12 +40,21 @@ def child_agent_runtime(config, stop, ready, count, model_gate):
     choices = [("get_object_positions", {"sku": "corn"}),
                ("pick_and_place", {"detection_id": "isolated_visual"}), ("finish_order", {})]
     index = [0]
-    def response(**_):
+    def response(**kwargs):
         with count.get_lock():
             count.value += 1
         assert model_gate.wait(10)
-        name, arguments = choices[index[0] % len(choices)]
-        index[0] += 1
+        names = [tool["function"]["name"] for tool in kwargs["tools"]]
+        if "query_orders" in names:
+            if kwargs["messages"][-1]["role"] == "tool":
+                return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+                    content="已查询订单真实状态；不会擅自改变订单。", tool_calls=[]))])
+            name, arguments = "query_orders", {}
+        elif names == ["select_candidate"]:
+            name, arguments = "select_candidate", {"detection_id": "isolated_visual"}
+        else:
+            name, arguments = choices[index[0] % len(choices)]
+            index[0] += 1
         tool = SimpleNamespace(id=str(index[0]), function=SimpleNamespace(
             name=name, arguments=json.dumps(arguments)))
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
@@ -109,7 +118,7 @@ def test_model_mcp_service_and_real_motion_action_chain():
         point = station._visual_candidates[detection_id][1]
         for step in ("grab", "lift", "place", "retreat"):
             station.move(point, step=step)
-        station._completed_by_sku["corn"] = 1
+        station._completed_by_sku["corn"] = station._completed_by_sku.get("corn", 0) + 1
         station._placed_entities.append(("corn", None, 0, point))
         return {"placed": detection_id}
 
@@ -148,9 +157,60 @@ def test_model_mcp_service_and_real_motion_action_chain():
         result = station.run(second)
         assert result["status"] == "COMPLETED", result["error"]
         assert steps == ["grab", "lift", "place", "retreat"] * 2
+        # New production boundaries: real compiled BT → Agent Action → MCP
+        # perception → guarded skill → real ROS motion Action transport.
+        import subprocess
+        from threading import Lock
+        from produce_order_workstation.execution_bridge import ExecutionBridge
+        from produce_order_workstation.persistence import WorkcellStore
+        from produce_order_workstation.business import BusinessCoordinator
+        from produce_order_workstation.business_mcp import BusinessMCPServer
+        from produce_order_workstation.fulfillment import BinManager
+        from produce_order_workstation.scheduling import OrderQueue
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix="phase47-isolated-") as directory:
+            host.workstation = station
+            host.store = WorkcellStore(Path(directory)/"state.db")
+            host.persist_state = lambda: host.store.save({"completed": dict(station._completed_by_sku)})
+            bridge = ExecutionBridge(host)
+            binary = Path(__file__).parents[3]/"install/produce_order_bt/lib/produce_order_bt/fulfillment_tree"
+            tree = subprocess.Popen([str(binary)], stdout=subprocess.DEVNULL)
+            try:
+                assert bridge._client.wait_for_server(timeout_sec=8)
+                station.execution_runner = bridge.run
+                station._completed_by_sku, station._placed_entities = {}, []
+                result = station.run(Order("isolated-bt", "A", (OrderLine("corn", 2),)))
+                assert result["status"] == "COMPLETED", result["error"]
+                assert result["completed"] == 2
+                assert steps == ["grab", "lift", "place", "retreat"] * 4
+                assert [row["state"] for row in host.store.operations()] == ["VERIFIED", "VERIFIED"]
+                assert gateway.order is None and process.is_alive()
+                host.config, host._lock = config, Lock()
+                host.queue, host.bin_manager = OrderQueue(), BinManager(config)
+                host._state, host._state_reason = "READY", "isolated"
+                host._busy, host._dispatch_order_id, host._startup_review = False, None, False
+                host._persist_locked = lambda **kwargs: host.store.save({"orders": host.queue.snapshot()}, **kwargs)
+                coordinator = BusinessCoordinator(host)
+                business_gateway = BusinessMCPServer(coordinator).__enter__()
+                host._business_gateway = business_gateway
+                try:
+                    answer = coordinator.ask("查询当前排队订单")
+                    assert answer["tools"][0]["tool"] == "explain_task_status"
+                    assert any(row["tool"] == "query_orders" for row in answer["tools"])
+                    assert "已查询" in answer["answer"]
+                finally:
+                    if hasattr(coordinator, "_agent_client"):
+                        coordinator._agent_client.destroy()
+                    business_gateway.close()
+            finally:
+                station.execution_runner = None
+                bridge.close()
+                tree.terminate()
+                tree.wait(timeout=5)
+                host.store.close()
         assert process.is_alive()
         assert gateway.order is None
-        assert count.value == 6
+        assert count.value == 10  # 6 legacy + 2 candidate selections + 2 business turns.
         # Hold the model response to exercise real busy rejection and cancellation.
         station._completed_by_sku = {}
         model_gate.clear()
@@ -162,9 +222,9 @@ def test_model_mcp_service_and_real_motion_action_chain():
             handle = get_future_result(station._agent_dispatcher.client.send_goal_async(goal), timeout_sec=5)
             assert handle is not None and handle.accepted
             deadline = time.monotonic() + 5
-            while count.value != 7 and time.monotonic() < deadline:
+            while count.value != 11 and time.monotonic() < deadline:
                 time.sleep(.02)
-            assert count.value == 7
+            assert count.value == 11
             busy = get_future_result(station._agent_dispatcher.client.send_goal_async(goal), timeout_sec=5)
             assert busy is not None and not busy.accepted
             cancellation = get_future_result(handle.cancel_goal_async(), timeout_sec=5)
@@ -173,8 +233,8 @@ def test_model_mcp_service_and_real_motion_action_chain():
             result = get_future_result(handle.get_result_async(), timeout_sec=5)
             assert result is not None and result.status == GoalStatus.STATUS_CANCELED
             assert result.result.status == "CANCELLED"
-        assert steps == ["grab", "lift", "place", "retreat"] * 2
     finally:
+        assert steps == ["grab", "lift", "place", "retreat"] * 4
         executor.shutdown(timeout_sec=5)
         thread.join(timeout=5)
         action.destroy()

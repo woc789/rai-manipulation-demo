@@ -94,6 +94,45 @@ class ProduceAgent:
         self._check_cancel()
         self._run_loop()
 
+    def select_candidate(self) -> str:
+        """BT owns execution; this Agent selects one actually perceived ID only."""
+        self._check_cancel()
+        sku = self._next_sku()
+        if sku is None:
+            return ""
+        result = self._invoke_tool("get_object_positions", {"sku": sku})
+        detections = result.get("detections", [])
+        self._event("AGENT_TOOL_RESULT", tool="get_object_positions", result=result)
+        if not detections:
+            return ""
+        identifiers = [row["detection_id"] for row in detections]
+        tool = {"type": "function", "function": {
+            "name": "select_candidate", "description": "Select one observed candidate; this does not move the arm.",
+            "parameters": {"type": "object", "properties": {
+                "detection_id": {"type": "string", "enum": identifiers}},
+                "required": ["detection_id"], "additionalProperties": False}}}
+        messages = [{"role": "system", "content":
+            "Choose one returned visual detection for the current requested SKU. Never invent IDs. "
+            "The behavior tree, not your text, will execute and verify the operation."},
+            {"role": "user", "content": json.dumps({"sku": sku, "remaining": self._remaining(),
+                "detections": detections}, ensure_ascii=False)}]
+        for _ in range(3):
+            self._check_cancel()
+            reply = self.model.chat.completions.create(model=self.model_name, messages=messages,
+                tools=[tool], tool_choice={"type": "function", "function": {"name": "select_candidate"}}, temperature=0)
+            self._check_cancel()
+            calls = reply.choices[0].message.tool_calls or []
+            if len(calls) == 1 and calls[0].function.name == "select_candidate":
+                try:
+                    args = json.loads(calls[0].function.arguments)
+                    if set(args) == {"detection_id"} and args["detection_id"] in identifiers:
+                        self._event("AGENT_CANDIDATE_SELECTED", sku=sku, detection_id=args["detection_id"])
+                        return args["detection_id"]
+                except (ValueError, TypeError):
+                    pass
+            messages.append({"role": "user", "content": "Return exactly one select_candidate call with an observed ID."})
+        raise OrderError("Agent candidate selection exceeded bounded attempts")
+
     def _run_loop(self) -> None:
         goal = {line.sku: line.quantity for line in self.order.lines}
         context = self.tool_client.context()

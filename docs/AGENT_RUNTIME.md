@@ -1,5 +1,7 @@
 # 常驻 Agent 服务与任务执行（2026-10-12）
 
+> 2026-10-13更新：默认配货由行为树请求Agent的mode=select候选选择；业务问答走独立MCP与ExecuteBusiness。下文保留常驻Agent基线，当前调用链以 [第4～7步交付](PHASE47_MCP_DELIVERY.md) 为准。
+
 ## 当前运行方式
 
 项目 launch 同时启动 `agent_server` 和 `order_server`，前者创建独立进程的

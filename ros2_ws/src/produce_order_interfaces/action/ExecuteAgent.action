@@ -4,9 +4,12 @@ string zone
 produce_order_interfaces/OrderLine[] lines
 string mcp_url
 string mcp_token
+# Empty/run: legacy full decision loop. select: perceive and select one item only.
+string mode
 ---
 string status
 string error
+string detection_id
 ---
 string stage
 string detail_json

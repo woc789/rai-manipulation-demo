@@ -278,12 +278,16 @@ def test_late_rejection_releases_only_confirmed_unstarted_order():
 
 def test_ros_registration_accepts_while_busy_without_allocating_a_box():
     server = server_stub()
+    server._persist_locked = lambda: None
     request = SubmitOrder.Request(order_id="unit", zone="A", priority=3,
                                   lines=[LineMessage(sku="corn", quantity=1)])
     result = OrderActionServer.submit_callback(server, request, SubmitOrder.Response())
     assert result.success and result.state == "QUEUED"
     assert server.bin_manager.orders == {}
     assert server._scan_requested
+    result = OrderActionServer.submit_callback(server, request, SubmitOrder.Response())
+    assert result.success and len(server.queue.jobs) == 1
+    request.lines = [LineMessage(sku="corn", quantity=2)]
     result = OrderActionServer.submit_callback(server, request, SubmitOrder.Response())
     assert not result.success
     result = OrderActionServer.cancel_queued_callback(server,
@@ -512,3 +516,13 @@ def test_actual_tool_yields_only_after_retreat_and_verified_inventory_commit(mon
     else:
         station.yield_requested.assert_not_called()
         assert not station._completed_by_sku
+
+
+def test_collected_snapshot_cannot_retain_waiting_pickup_reason():
+    queue = OrderQueue()
+    job = queue.submit(Order("picked-up", "A", (OrderLine("corn", 1),)))
+    job.state, job.reason = "COLLECTED", "配货完成，等待取货"
+    row = queue.snapshot()[0]
+    assert row["state"] == "COLLECTED"
+    assert "已经确认取货" in row["state_label"]
+    assert "等待取货" not in row["reason"]

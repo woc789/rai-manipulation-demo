@@ -78,6 +78,8 @@ class OperatorPanel(QWidget):
             self.worker.operation_finished.connect(self._on_operation_finished)
         if hasattr(self.worker, "camera_diagnostic"):
             self.worker.camera_diagnostic.connect(self._on_camera_diagnostic)
+        if hasattr(self.worker, "business_result"):
+            self.worker.business_result.connect(self._on_business_result)
         self._new_id()
         self._refresh_history()
         self._restore_last_task()
@@ -380,11 +382,83 @@ class OperatorPanel(QWidget):
         queue_layout.addLayout(actions)
         # Queue is always visible next to the draft, not hidden in a log tab.
         right.insertWidget(1, self.queue_card)
+        business_page = QWidget()
+        business_layout = QVBoxLayout(business_page)
+        query_row = QHBoxLayout()
+        self.business_question = QLineEdit()
+        self.business_question.setPlaceholderText("询问订单状态、等待原因或申请修改订单")
+        self.business_ask = QPushButton("询问 Agent")
+        self.business_ask.clicked.connect(lambda: self._send_business("ask", {"question": self.business_question.text()}))
+        query_row.addWidget(self.business_question, 1)
+        query_row.addWidget(self.business_ask)
+        business_layout.addLayout(query_row)
+        self.business_output = QPlainTextEdit()
+        self.business_output.setReadOnly(True)
+        self.business_output.setMaximumHeight(130)
+        business_layout.addWidget(self.business_output)
+        self.business_requests = QTableWidget(0, 3)
+        self.business_requests.setHorizontalHeaderLabels(["请求", "类型", "状态"])
+        self.business_requests.setSelectionBehavior(QTableWidget.SelectRows)
+        self.business_requests.setSelectionMode(QTableWidget.SingleSelection)
+        self.business_requests.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.business_requests.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        business_layout.addWidget(self.business_requests)
+        buttons = QHBoxLayout()
+        for text, callback in (("查询实际状态", lambda: self._send_business("explain_task_status", {})),
+                               ("确认选中请求", lambda: self._resolve_business(True)),
+                               ("拒绝选中请求", lambda: self._resolve_business(False)),
+                               ("重启现场核对…", self._request_scene_review)):
+            button = QPushButton(text)
+            button.clicked.connect(callback)
+            button.setEnabled(hasattr(self.worker, "business_command"))
+            buttons.addWidget(button)
+        business_layout.addLayout(buttons)
+        self.business_ask.setEnabled(hasattr(self.worker, "business_command"))
+        self.tabs.addTab(business_page, "业务协作")
         records.box.addWidget(self.tabs)
         page.addWidget(records)
         page.addStretch()
         scroll.setWidget(content)
         root.addWidget(scroll, 1)
+
+    def _send_business(self, command, args):
+        if not hasattr(self.worker, "business_command"):
+            return
+        self.business_output.setPlainText("请求已发送，等待业务服务回复…")
+        self.business_ask.setEnabled(False)
+        self.worker.business_command(command, args)
+
+    def _on_business_result(self, payload):
+        self.business_ask.setEnabled(True)
+        try:
+            reply = json.loads(payload)
+            result = reply.get("result", {})
+            self.business_output.setPlainText(result.get("answer") or json.dumps(reply, ensure_ascii=False, indent=2))
+        except (ValueError, TypeError):
+            self.business_output.setPlainText(payload)
+
+    def _resolve_business(self, approve):
+        row = self.business_requests.currentRow()
+        cell = self.business_requests.item(row, 0) if row >= 0 else None
+        if cell is None:
+            self.business_output.setPlainText("请先选中一个待确认请求。")
+            return
+        identifier, body = cell.data(Qt.UserRole)
+        if body.get("state") != "PENDING":
+            self.business_output.setPlainText("该请求已处理，不能重复确认。")
+            return
+        args = {"request_id": identifier}
+        if approve:
+            description = "确认丢弃重启前未核对的旧现场并重建？旧订单保留历史进度并结束，不会记为已交付。" if body["kind"] == "request_scene_reset" else json.dumps(body, ensure_ascii=False, indent=2)
+            if QMessageBox.question(self, "确认业务操作", description,
+                                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                return
+            if body["kind"] == "request_scene_reset":
+                args["confirmation"] = "RESET_SCENE"
+        self._send_business("approve_request" if approve else "reject_request", args)
+
+    def _request_scene_review(self):
+        self._send_business("request_scene_reset", {})
 
     def _navigate(self, name, index):
         for button in self.nav_buttons:
@@ -596,6 +670,23 @@ class OperatorPanel(QWidget):
             return
         self._last_status = monotonic()
         self._bins = status.get("bins", [])
+        selected_row = self.business_requests.currentRow()
+        selected_item = self.business_requests.item(selected_row, 0) if selected_row >= 0 else None
+        selected_request = selected_item.data(Qt.UserRole)[0] if selected_item else None
+        self.business_requests.setRowCount(0)
+        for body in status.get("approval_requests", []):
+            row = self.business_requests.rowCount()
+            self.business_requests.insertRow(row)
+            kinds = {"request_order_change": "修改订单", "request_replenishment": "补货准备", "request_scene_reset": "核对并重建旧现场"}
+            states = {"PENDING": "待确认", "APPROVED": "已确认", "REJECTED": "已拒绝"}
+            for column, value in enumerate((body["request_id"][:10], kinds.get(body["kind"],body["kind"]), states.get(body["state"],body["state"]))):
+                cell = QTableWidgetItem(str(value))
+                cell.setToolTip(json.dumps(body, ensure_ascii=False, indent=2))
+                if column == 0:
+                    cell.setData(Qt.UserRole, (body["request_id"], body))
+                self.business_requests.setItem(row, column, cell)
+            if body["request_id"] == selected_request:
+                self.business_requests.selectRow(row)
         self._queue_enabled = bool(status.get("queue_enabled"))
         self._can_register = bool(status.get("can_register"))
         if self._registration_pending and self._registration_reconcile_allowed and any(job.get("order_id") == self._registration_order_id

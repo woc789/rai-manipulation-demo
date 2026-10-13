@@ -4,6 +4,11 @@ from dataclasses import dataclass, field
 
 from .order import Order
 
+STATE_LABELS = {"QUEUED": "排队", "WAITING_STOCK": "等待有效库存观测或补货",
+    "WAITING_BIN": "等待空闲箱位", "DISPATCHING": "正在派发", "RUNNING": "执行中",
+    "PAUSED": "暂停", "WAITING_PICKUP": "配货完成，尚未取货", "COLLECTED": "已经确认取货，箱位已释放",
+    "RECOVERY_REQUIRED": "需要现场核对", "FAILED": "失败", "CANCELED": "已取消", "CANCELLED": "已取消"}
+
 
 @dataclass
 class QueuedOrder:
@@ -69,7 +74,9 @@ class OrderQueue:
 
     def snapshot(self):
         return [dict(order_id=job.order.order_id, priority=job.priority, state=job.state,
-                     reason=job.reason, missing=job.missing, completed=job.completed,
+                     state_label=STATE_LABELS.get(job.state, job.state),
+                     reason="已经确认取货，箱位已释放" if job.state == "COLLECTED" else job.reason,
+                     missing=job.missing, completed=job.completed,
                      review_required=job.review_required,
                      total=job.total, finished_sequence=job.finished_sequence,
                      lines=[dict(sku=line.sku, quantity=line.quantity)

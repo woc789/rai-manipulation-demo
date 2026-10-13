@@ -2,6 +2,8 @@
 
 ## 本地配货工作台
 
+2026-10-13：在常驻Agent/MCP边界上加入业务协作、C++行为树、SQLite保守恢复。当前架构、运行入口、验证结果和限制见 [第4～7步实施说明](docs/PHASE47_MCP_DELIVERY.md)。
+
 原生 Qt 订单界面已重构为下单、任务进度、箱位与记录四个区域。设计与模块说明见 [界面重构记录](docs/ORDER_UI_REDESIGN.md)。未实现的扩展页面明确标为规划中。
 
 新增 [接近运动碰撞修复与实测记录](docs/CARTESIAN_APPROACH_FIX.md) 和 [视觉候选库存台账模块说明](docs/VISUAL_INVENTORY_LEDGER.md)。侧栏“视觉库存”显示观测、单件预留与搬运状态，不代表已经清点确认的实际库存。

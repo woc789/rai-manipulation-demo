@@ -36,12 +36,12 @@ class AgentDispatcher:
     def ready(self):
         return self.client.server_is_ready() and self.state not in ("MODEL_UNAVAILABLE", "BUSY")
 
-    def execute(self, order, endpoint, token):
+    def execute(self, order, endpoint, token, *, mode="run"):
         if not self.client.wait_for_server(timeout_sec=5):
             raise OrderError("Agent service unavailable; check produce_agent_service startup")
         goal = ExecuteAgent.Goal(order_id=order.order_id, zone=order.zone,
             lines=[OrderLine(sku=line.sku, quantity=line.quantity) for line in order.lines],
-            mcp_url=endpoint, mcp_token=token)
+            mcp_url=endpoint, mcp_token=token, mode=mode)
 
         def feedback(message):
             details = json.loads(message.feedback.detail_json)
@@ -72,6 +72,7 @@ class AgentDispatcher:
             raise OrderCancelled(wrapped.result.error)
         if wrapped.status != GoalStatus.STATUS_SUCCEEDED or wrapped.result.status != "COMPLETED":
             raise OrderError(wrapped.result.error or "Agent Action failed")
+        return wrapped.result.detection_id
 
     def close(self):
         self.client.destroy()

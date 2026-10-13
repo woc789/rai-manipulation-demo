@@ -3,8 +3,9 @@
 import argparse
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
-from threading import Lock, Thread
+from threading import Event, Lock, Thread
 import time
 from math import isfinite
 
@@ -26,11 +27,16 @@ from produce_order_interfaces.action import ExecuteOrder
 from produce_order_interfaces.srv import ConfirmPickup, SubmitOrder, CancelQueuedOrder
 from produce_order_interfaces.msg import InventoryItem, InventorySnapshot
 from geometry_msgs.msg import Point
+from rosgraph_msgs.msg import Clock
 
 from .fulfillment import BinManager
 from .order import Order, OrderCancelled, OrderLine, fulfillment_mode, validate_order
 from .runtime import Workstation
 from .scheduling import OrderQueue
+from .scheduling import QueuedOrder
+from .fulfillment import OrderAllocation
+from .persistence import WorkcellStore
+from .business import BusinessCoordinator
 
 
 def order_from_goal(goal: ExecuteOrder.Goal) -> Order:
@@ -82,10 +88,14 @@ class OrderActionServer(Node):
         self._inventory_ready = False
         self._order_contexts = {}
         self._lock = Lock()
+        self._stopping = Event()
         self._busy = False
         self._scene_ready = False
         self._state = "INITIALIZING"
         self._state_reason = "正在启动感知服务并准备桌面库存"
+        self._sim_seen = None
+        self._clock_subscription = self.create_subscription(Clock, "/clock", self._sim_clock, 1)
+        self._health_timer = self.create_timer(1.0, self._check_simulator)
         self._status_publisher = self.create_publisher(
             String, "/produce_orders/workcell_status",
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
@@ -116,6 +126,27 @@ class OrderActionServer(Node):
             "produce_order_runtime", executor_type="single_threaded"
         )
         self.workstation = Workstation(self.connector, self.config)
+        self.store = None
+        self._startup_review = False
+        self._execution_bridge = None
+        self._business_service = None
+        self._business_gateway = None
+        if self.config.get("persistence", {}).get("enabled", False):
+            self.store = WorkcellStore(os.getenv("PRODUCE_STATE_DB", self.config["persistence"]["path"]))
+            self._restore_business_state()
+            self.workstation.durable_event_sink = self.store.event
+            self.business = BusinessCoordinator(self)
+            from .business_mcp import BusinessMCPServer
+            self._business_gateway = BusinessMCPServer(self.business).__enter__()
+            from produce_order_interfaces.srv import BusinessCommand
+            self._business_service = self.create_service(BusinessCommand, "/produce_orders/business",
+                self.business_callback, callback_group=ReentrantCallbackGroup())
+        if self.config.get("execution", {}).get("backend") == "behavior_tree":
+            if self.store is None:
+                raise ValueError("Behavior-tree execution requires durable operation records")
+            from .execution_bridge import ExecutionBridge
+            self._execution_bridge = ExecutionBridge(self)
+            self.workstation.execution_runner = self._execution_bridge.run
         from .mcp_server import WorkstationMCPServer
         from .agent_dispatch import AgentDispatcher
         self._mcp_gateway = WorkstationMCPServer(self.workstation).__enter__()
@@ -145,13 +176,121 @@ class OrderActionServer(Node):
             order = order_from_goal(request)
             validate_order(order, self.config)
             with self._lock:
+                existing = self.queue.jobs.get(order.order_id)
+                if existing is not None:
+                    if existing.order != order or existing.priority != int(request.priority):
+                        raise ValueError("订单号已有不同需求或优先级，不能覆盖")
+                    response.success, response.state, response.message = True, existing.state, "相同订单已登记；返回原状态，不重复排队"
+                    return response
                 if order.order_id in self.bin_manager.orders or self.report_path(order.order_id).exists():
                     raise ValueError("订单号已执行或已有报告")
                 job = self.queue.submit(order, int(request.priority))
                 self._scan_requested = True
+                self._persist_locked()
             response.success, response.state, response.message = True, job.state, "已登记，等待库存与箱位检查"
         except ValueError as exc:
             response.success, response.state, response.message = False, "REJECTED", str(exc)
+        self.publish_status()
+        return response
+
+    def _sim_clock(self, _message):
+        self._sim_seen = time.monotonic()
+
+    def _check_simulator(self):
+        if self._sim_seen is None or time.monotonic()-self._sim_seen < 15:
+            return
+        with self._lock:
+            if self._state not in ("READY", "RUNNING", "SCANNING"):
+                return
+            identifier = self._dispatch_order_id
+            self._scene_ready = False
+            self._state = "SCENE_OFFLINE"
+            self._state_reason = "仿真时间流已中断；禁止继续运动。请重启完整仿真，历史物理订单将在业务协作页要求核对。"
+        if identifier:
+            self._quarantine_dispatch("仿真时间流已中断，运动结果需要核对", identifier)
+        self.publish_status()
+
+    def _restore_business_state(self):
+        snapshot = self.store.load()
+        if not snapshot:
+            return
+        for row in snapshot.get("orders", []):
+            order = Order(row["order_id"], row.get("zone", "A"),
+                          tuple(OrderLine(line["sku"], line["quantity"]) for line in row["lines"]))
+            self.queue._sequence += 1
+            job = QueuedOrder(order, row["priority"], self.queue._sequence, total=order.total_items)
+            self.queue.jobs[order.order_id] = job
+            job.state, job.reason, job.completed = row["state"], row["reason"], row["completed"]
+            if job.state == "COLLECTED":
+                job.reason = "已确认取货，箱位已释放"
+            checkpoint = snapshot.get("checkpoint", {})
+            if checkpoint.get("order_id") == order.order_id:
+                job.completed = max(job.completed, sum(checkpoint.get("completed_by_sku", {}).values()))
+            job.review_required = row.get("review_required", False)
+            job.finished_sequence = row.get("finished_sequence", 0)
+            if job.state in ("DISPATCHING", "RUNNING", "PAUSED", "WAITING_PICKUP", "RECOVERY_REQUIRED"):
+                job.state, job.review_required = "RECOVERY_REQUIRED", True
+                job.reason = "重启前存在已分配或部分执行的物理任务；旧进度保留，须核对现场，不能自动重放"
+                self._startup_review = True
+        self.queue._finished_sequence = max((j.finished_sequence for j in self.queue.jobs.values()), default=0)
+        for row in snapshot.get("allocations", []):
+            job = self.queue.jobs.get(row["order_id"])
+            if job is None and row.get("lines") and row["state"] in ("ALLOCATED", "PAUSED", "WAITING_PICKUP", "RECOVERY_REQUIRED"):
+                job = self.queue.submit(Order(row["order_id"], row["zone"],
+                    tuple(OrderLine(line["sku"], line["quantity"]) for line in row["lines"])))
+                job.state, job.review_required = "RECOVERY_REQUIRED", True
+                job.reason = "历史直接执行订单待核对，禁止重放"
+                self._startup_review = True
+            if job is not None and row["state"] in ("ALLOCATED", "PAUSED", "WAITING_PICKUP", "RECOVERY_REQUIRED"):
+                job.state, job.review_required = "RECOVERY_REQUIRED", True
+                job.reason = "历史箱位或物理执行状态需核对；不能因订单已失败就释放现场"
+                self._startup_review = True
+            if job and job.state == "RECOVERY_REQUIRED":
+                allocation = OrderAllocation(job.order, tuple(row["bin_indices"]), state="RECOVERY_REQUIRED")
+                self.bin_manager.orders[job.order.order_id] = allocation
+                for index in allocation.bin_indices:
+                    resource = self.bin_manager.bins[f"{job.order.zone}{index+1}"]
+                    resource.state, resource.order_id = "RECOVERY_REQUIRED", job.order.order_id
+        if any(row["state"] in ("INTENT", "UNCERTAIN") for row in self.store.operations()
+               if self.queue.jobs.get(row["order_id"]) and self.queue.jobs[row["order_id"]].state not in ("COLLECTED", "FAILED", "CANCELED", "CANCELLED")):
+            self._startup_review = True
+        # Never restore old visual coordinates as AVAILABLE or RESERVED.
+        if self._startup_review:
+            self._state = "RECOVERY_REQUIRED"
+            self._state_reason = "检测到历史订单现场未核对；请在业务协作页确认旧现场处理后再恢复"
+
+    def _persist_locked(self, *, resolution=None):
+        store = getattr(self, "store", None)
+        if not isinstance(store, WorkcellStore):
+            return
+        orders = self.queue.snapshot()
+        for row in orders:
+            row["zone"] = self.queue.jobs[row["order_id"]].order.zone
+        store.save(dict(schema=1, orders=orders, bins=self.bin_manager.snapshot(),
+            allocations=[dict(order_id=key, zone=value.order.zone,
+                lines=[dict(sku=line.sku, quantity=line.quantity) for line in value.order.lines],
+                bin_indices=list(value.bin_indices), state=value.state,
+                entities=[dict(sku=sku, name=entity.name, bin_index=index, source=list(source))
+                          for sku, entity, index, source in value.entities])
+                         for key, value in self.bin_manager.orders.items()],
+            inventory=self.workstation.inventory.snapshot(),
+            checkpoint=dict(order_id=getattr(self.workstation, "_active_order_id", None),
+                completed_by_sku=dict(getattr(self.workstation, "_completed_by_sku", {})),
+                entities=[dict(sku=sku, name=entity.name, bin_index=index, source=list(source))
+                          for sku, entity, index, source in getattr(self.workstation, "_placed_entities", [])],
+                physical_uncertain=bool(getattr(self.workstation, "physical_state_uncertain", False))),
+            state=self._state, startup_review=self._startup_review), resolution=resolution)
+
+    def persist_state(self):
+        with self._lock:
+            self._persist_locked()
+
+    def business_callback(self, request, response):
+        try:
+            result = self.business.call(request.command, json.loads(request.arguments_json or "{}"))
+            response.success, response.result_json = True, json.dumps(result, ensure_ascii=False)
+        except Exception as exc:
+            response.success, response.result_json = False, json.dumps(dict(error=str(exc)), ensure_ascii=False)
         self.publish_status()
         return response
 
@@ -438,11 +577,12 @@ class OrderActionServer(Node):
 
     def publish_status(self) -> None:
         with self._lock:
+            self._persist_locked()
             status = {
                 "state": self._state,
                 "reason": self._state_reason,
                 "can_submit": self._scene_ready and self._inventory_ready and not self._busy and self.bin_manager.can_allocate("A"),
-                "can_recover": not self._busy and not self._dispatch_order_id and self._state not in (
+                "can_recover": not getattr(self, "_startup_review", False) and not self._busy and not self._dispatch_order_id and self._state not in (
                     "INITIALIZING", "REPLENISHING", "RECOVERING"
                 ) and self.bin_manager.can_reset(),
                 "can_pickup": not self._busy,
@@ -452,6 +592,10 @@ class OrderActionServer(Node):
                 "can_register": len(self.queue.pending()) < self.queue.max_pending,
                 "orders": self.queue.snapshot(),
                 "inventory_summary": self.workstation.inventory.summary() if hasattr(self, "workstation") else {},
+                "execution_backend": self.config.get("execution", {}).get("backend", "legacy_agent"),
+                "business_enabled": isinstance(getattr(self, "store", None), WorkcellStore),
+                "startup_review": bool(getattr(self, "_startup_review", False)),
+                "approval_requests": self.store.requests() if isinstance(getattr(self, "store", None), WorkcellStore) else [],
             }
         self._status_publisher.publish(String(data=json.dumps(status, ensure_ascii=False)))
         self.publish_inventory()
@@ -485,6 +629,9 @@ class OrderActionServer(Node):
 
     def _prepare_initial_stock(self) -> None:
         """Make inventory visible before a customer submits an order."""
+        if getattr(self, "_startup_review", False):
+            self._set_state("RECOVERY_REQUIRED", "历史物理任务待核对；业务协作页可明确确认丢弃旧现场并重建")
+            return
         try:
             self.workstation.wait_until_ready(with_scene=True)
             self.workstation.prepare_scene(self.scene_path)
@@ -524,6 +671,7 @@ class OrderActionServer(Node):
                 self._scan_requested = True
                 if request.order_id in self.queue.jobs:
                     self.queue.jobs[request.order_id].state = "COLLECTED"
+                    self.queue.jobs[request.order_id].reason = "已确认取货，箱位已释放"
             response.success = True
             response.message = f"订单 {request.order_id} 已取货，箱位释放；桌面库存保持不变"
         except Exception as exc:
@@ -538,6 +686,9 @@ class OrderActionServer(Node):
 
     def recover_callback(self, _request, response):
         with self._lock:
+            if getattr(self, "_startup_review", False):
+                response.success, response.message = False, "请先在业务协作页确认旧现场处理；重启不等于旧订单已交付"
+                return response
             if self._busy or self._dispatch_order_id or self._state in ("INITIALIZING", "REPLENISHING", "RECOVERING"):
                 response.success = False
                 response.message = "工作台正在执行或准备中，暂不能重置场景"
@@ -662,7 +813,8 @@ class OrderActionServer(Node):
         self.workstation.event_sink = lambda entry: self._publish_feedback(
             goal_handle, entry
         )
-        self.workstation.cancel_requested = lambda: goal_handle.is_cancel_requested
+        self.workstation.cancel_requested = lambda: goal_handle.is_cancel_requested or (
+            getattr(self, "_stopping", None) is not None and self._stopping.is_set())
         try:
             allocation = self.bin_manager.orders[order.order_id]
             self.workstation.begin_order(order, bin_index=allocation.bin_indices[0])
@@ -766,8 +918,17 @@ class OrderActionServer(Node):
         }
 
     def close(self) -> None:
+        self.persist_state()
+        if self._execution_bridge is not None:
+            self._execution_bridge.close()
+        if self._business_gateway is not None:
+            self._business_gateway.close()
+        if hasattr(self, "business") and hasattr(self.business, "_agent_client"):
+            self.business._agent_client.destroy()
         self._mcp_gateway.close()
         self._agent_dispatcher.close()
+        if self.store is not None:
+            self.store.close()
         self._dispatch_client.destroy()
         self._server.destroy()
         self.connector.shutdown()
@@ -789,6 +950,7 @@ def main() -> None:
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
+        server._stopping.set()
         executor.shutdown()
         server.close()
         rclpy.try_shutdown()

@@ -128,7 +128,13 @@ def test_service_queue_action_feedback_priority_resume_and_pickup(monkeypatch, t
                         staticmethod(lambda identifier: tmp_path / f"{identifier}.json"))
     rclpy.init()
     package = Path(__file__).parents[1]
-    server = order_server.OrderActionServer(package / "config/workstation.yaml", package / "config/demo_scene.yaml")
+    import yaml
+    config = yaml.safe_load((package / "config/workstation.yaml").read_text())
+    config["execution"] = {"backend": "legacy_agent"}
+    config["persistence"] = {"enabled": False}
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump(config))
+    server = order_server.OrderActionServer(config_path, package / "config/demo_scene.yaml")
     # This regression intentionally substitutes the entire Agent/robot capability.
     server._agent_dispatcher.ready = lambda: True
     client = Node("isolated_queue_test_client")

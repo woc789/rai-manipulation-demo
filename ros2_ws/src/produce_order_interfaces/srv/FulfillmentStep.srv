@@ -1,0 +1,10 @@
+# Internal capability gateway. Session is granted only by the admitted order executor.
+string session_id
+uint64 sequence
+string command
+string detection_id
+---
+string status
+string detection_id
+uint32 remaining
+string reason

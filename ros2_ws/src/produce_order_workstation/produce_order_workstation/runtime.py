@@ -86,6 +86,8 @@ class Workstation:
         self.cancel_requested = cancel_requested or (lambda: False)
         self._mcp_server = None
         self._agent_dispatcher = None
+        self.execution_runner = None
+        self.durable_event_sink = None
 
     def event(self, order_id: str, stage: str, **details) -> None:
         entry = {
@@ -95,6 +97,8 @@ class Workstation:
             **details,
         }
         self.events.append(entry)
+        if self.durable_event_sink is not None:
+            self.durable_event_sink(entry)
         encoded = json.dumps(entry, ensure_ascii=False)
         self.publisher.publish(String(data=encoded))
         print(encoded, flush=True)
@@ -978,7 +982,10 @@ class Workstation:
                 if self._mcp_server is None or self._agent_dispatcher is None:
                     raise OrderError("Persistent MCP gateway and Agent dispatcher are not configured")
                 with self._mcp_server.order_session(order) as server:
-                    self._agent_dispatcher.execute(order, server.url, server.token)
+                    if self.execution_runner is not None:
+                        self.execution_runner(order)
+                    else:
+                        self._agent_dispatcher.execute(order, server.url, server.token)
         except OrderPaused as exc:
             failure = str(exc)
             self.event(order.order_id, "ORDER_PAUSED", reason=failure)

@@ -16,6 +16,10 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "action/ExecuteOrder.action"
   "action/ExecuteMotion.action"
   "action/ExecuteAgent.action"
+  "action/RunFulfillment.action"
+  "action/ExecuteBusiness.action"
+  "srv/BusinessCommand.srv"
+  "srv/FulfillmentStep.srv"
   DEPENDENCIES geometry_msgs std_msgs
 )
 

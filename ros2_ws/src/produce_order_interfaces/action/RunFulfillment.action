@@ -1,0 +1,8 @@
+# Internal behavior-tree session; not an independent business admission endpoint.
+string session_id
+uint32 max_attempts
+---
+string status
+string error
+---
+string stage

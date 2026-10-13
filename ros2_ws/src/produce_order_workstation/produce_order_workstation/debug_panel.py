@@ -21,7 +21,7 @@ from std_srvs.srv import Trigger
 from produce_order_interfaces.action import ExecuteOrder
 from produce_order_interfaces.msg import OrderLine
 from produce_order_interfaces.msg import InventorySnapshot
-from produce_order_interfaces.srv import ConfirmPickup, SubmitOrder, CancelQueuedOrder
+from produce_order_interfaces.srv import ConfirmPickup, SubmitOrder, CancelQueuedOrder, BusinessCommand
 from .operator_panel import OperatorPanel
 
 
@@ -40,6 +40,7 @@ class RosWorker(QThread):
     queue_cleared = pyqtSignal(int, int)
     operation_finished = pyqtSignal(str, bool, str)
     camera_diagnostic = pyqtSignal(str)
+    business_result = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
@@ -54,6 +55,10 @@ class RosWorker(QThread):
         self._service_waits = {}
         self._registration_waits = {}
         self._camera_probe = None
+        self._business_waits = {}
+
+    def business_command(self, command, arguments):
+        self._commands.put(("business", command, arguments))
 
     def submit(self, order_id: str, quantities: dict[str, int], prepare: bool, priority=0) -> None:
         self._commands.put(("submit", order_id, quantities, prepare, priority))
@@ -97,6 +102,7 @@ class RosWorker(QThread):
         active_cancel = node.create_client(Trigger, "/produce_orders/cancel_active")
         refresh = node.create_client(Trigger, "/produce_orders/refresh_inventory")
         replenish = node.create_client(Trigger, "/produce_orders/replenish")
+        business = node.create_client(BusinessCommand, "/produce_orders/business")
         node.create_subscription(String, "/produce_orders/events", self._on_event, 10)
         node.create_subscription(
             String, "/produce_orders/workcell_status", self._on_workcell_status,
@@ -139,6 +145,8 @@ class RosWorker(QThread):
                             self._trigger(replenish)
                         elif command[0] == "check_camera":
                             self._start_camera_check(node, command[1])
+                        elif command[0] == "business":
+                            self._business_call(business, command[1], command[2])
                 except Empty:
                     pass
                 if not running:
@@ -147,6 +155,11 @@ class RosWorker(QThread):
                 self._check_clear_queue_timeout()
                 self._check_service_timeouts()
                 self._poll_camera_check(node)
+                for future, deadline in tuple(self._business_waits.items()):
+                    if time.monotonic() > deadline:
+                        self._business_waits.pop(future, None)
+                        business.remove_pending_request(future)
+                        self.business_result.emit(json.dumps(dict(success=False, error="请求超时，结果未确认；请查看待确认列表，勿重复提交"), ensure_ascii=False))
                 now = node.get_clock().now().nanoseconds / 1e9
                 if now - last_check >= 1.0:
                     online = client.server_is_ready()
@@ -158,11 +171,29 @@ class RosWorker(QThread):
             client.destroy()
             node.destroy_client(recovery)
             node.destroy_client(pickup)
+            node.destroy_client(business)
             for service in (registration, queue_cancel, active_cancel, refresh, replenish):
                 node.destroy_client(service)
             node.destroy_node()
             if rclpy.ok():
                 rclpy.shutdown()
+
+    def _business_call(self, client, command, arguments):
+        if not client.service_is_ready():
+            self.business_result.emit(json.dumps(dict(success=False, error="业务服务未上线"), ensure_ascii=False))
+            return
+        future = client.call_async(BusinessCommand.Request(command=command, arguments_json=json.dumps(arguments, ensure_ascii=False)))
+        self._business_waits[future] = time.monotonic()+210
+        def received(reply):
+            if self._business_waits.pop(reply, None) is None:
+                return
+            try:
+                result = reply.result()
+                self.business_result.emit(json.dumps(dict(success=result.success, command=command,
+                    result=json.loads(result.result_json)), ensure_ascii=False))
+            except Exception as exc:
+                self.business_result.emit(json.dumps(dict(success=False, error=str(exc)), ensure_ascii=False))
+        future.add_done_callback(received)
 
     def _start_camera_check(self, node, camera):
         if self._camera_probe is not None:

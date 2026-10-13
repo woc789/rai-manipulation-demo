@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>produce_order_bt</name><version>0.1.0</version>
+  <description>Asynchronous admitted-session fulfillment behavior tree.</description>
+  <maintainer email="wang@example.com">wang</maintainer><license>Apache-2.0</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>rclcpp</depend><depend>rclcpp_action</depend>
+  <depend>ament_index_cpp</depend><depend>behaviortree_cpp</depend>
+  <depend>produce_order_interfaces</depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

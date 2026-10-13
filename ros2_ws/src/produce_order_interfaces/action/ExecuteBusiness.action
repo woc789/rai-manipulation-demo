@@ -1,0 +1,9 @@
+string question
+string mcp_url
+string mcp_token
+---
+string status
+string result_json
+---
+string stage
+string detail_json

@@ -70,6 +70,24 @@ def test_agent_runs_from_injected_contracts_without_workstation():
     assert events.call_args.args[:2] == (order().order_id, "AGENT_TOOL_RESULT")
 
 
+def test_bt_selection_reads_mcp_but_never_moves():
+    client = MemoryToolClient()
+    runner = ProduceAgent(order(), CONFIG, client,
+        model=model_for([("select_candidate", {"detection_id": "visual_corn"})]))
+    assert runner.select_candidate() == "visual_corn"
+    assert client.calls == [("get_object_positions", {"sku": "corn"})]
+    assert client.completed == {}
+
+
+def test_bt_selection_rejects_invented_ids():
+    client = MemoryToolClient()
+    runner = ProduceAgent(order(), CONFIG, client,
+        model=model_for([("select_candidate", {"detection_id": "invented"})] * 3))
+    with pytest.raises(OrderError, match="bounded"):
+        runner.select_candidate()
+    assert len(client.calls) == 1 and client.completed == {}
+
+
 def test_agent_cancellation_before_start_never_queries_or_calls_model():
     client, model = MagicMock(), model_for([])
     runner = ProduceAgent(order(), CONFIG, client, model=model, cancel_requested=lambda: True)

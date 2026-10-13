@@ -54,6 +54,11 @@ def generate_launch_description():
                 output="screen",
             ),
             Node(
+                package="produce_order_bt",
+                executable="fulfillment_tree",
+                output="screen",
+            ),
+            Node(
                 package="produce_order_workstation",
                 executable="order_server",
                 output="screen",

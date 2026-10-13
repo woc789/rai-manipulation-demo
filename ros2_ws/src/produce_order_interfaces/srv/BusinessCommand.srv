@@ -1,0 +1,6 @@
+# Versioned business command. Model suggestions require explicit operator approval.
+string command
+string arguments_json
+---
+bool success
+string result_json

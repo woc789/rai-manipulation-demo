@@ -9,6 +9,8 @@ cd "$workstation_root"
 unset AMENT_PREFIX_PATH COLCON_PREFIX_PATH CMAKE_PREFIX_PATH LD_LIBRARY_PATH PYTHONPATH ROS_DISTRO
 export PATH=/usr/local/bin:/usr/bin:/bin
 source /opt/ros/jazzy/setup.bash
+bt_prefix=/home/wang/.local/share/rai-deps/behaviortree-jazzy/prefix/opt/ros/jazzy
+export LD_LIBRARY_PATH="$bt_prefix/lib:${LD_LIBRARY_PATH:-}"
 source /home/wang/miniconda3/etc/profile.d/conda.sh
 conda activate rai-jazzy
 source install/setup.bash

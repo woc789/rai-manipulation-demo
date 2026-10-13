@@ -15,7 +15,7 @@ setup(
         (f"share/{package_name}/launch", glob("launch/*.launch.py")),
     ],
     install_requires=["setuptools", "PyYAML", "openai>=1.0", "mcp==1.30.0"],
-    scripts=["scripts/run_order", "scripts/order_server", "scripts/debug_panel", "scripts/agent_server"],
+    scripts=["scripts/run_order", "scripts/order_server", "scripts/debug_panel", "scripts/agent_server", "scripts/business_cli"],
     zip_safe=True,
     maintainer="wang",
     maintainer_email="wang@example.com",

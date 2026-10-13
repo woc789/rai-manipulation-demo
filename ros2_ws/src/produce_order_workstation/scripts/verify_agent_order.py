@@ -19,7 +19,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sku", choices=("corn", "carrot", "apple", "tomato"), default="carrot")
     parser.add_argument("--timeout", type=float, default=300)
+    parser.add_argument("--quantity", type=int, default=1)
     args = parser.parse_args()
+    if not 1 <= args.quantity <= 4:
+        parser.error("quantity must be 1–4 for the current test bin")
     identifier = datetime.now().strftime("agent-live-%Y%m%d-%H%M%S-%f")
     report = Path.home() / ".local/share/produce_order_workstation/reports" / f"{identifier}.json"
     rclpy.init()
@@ -48,7 +51,7 @@ def main():
         if not submit.wait_for_service(timeout_sec=5):
             raise RuntimeError("Order service unavailable")
         future = submit.call_async(SubmitOrder.Request(order_id=identifier, zone="A", priority=0,
-            lines=[OrderLine(sku=args.sku, quantity=1)]))
+            lines=[OrderLine(sku=args.sku, quantity=args.quantity)]))
         rclpy.spin_until_future_complete(node, future, timeout_sec=15)
         if not future.done():
             raise RuntimeError(f"Registration timed out; inspect {identifier}, do not repeat automatically")
@@ -68,7 +71,7 @@ def main():
                 summary = {key: data[key] for key in ("order_id", "status", "completed", "requested", "error")}
                 summary["report"] = str(report)
                 print(json.dumps(summary, ensure_ascii=False, indent=2), flush=True)
-                if data["status"] != "COMPLETED" or data["completed"] != 1:
+                if data["status"] != "COMPLETED" or data["completed"] != args.quantity:
                     raise SystemExit(1)
                 return
         raise RuntimeError(f"Timed out observing {identifier}; inspect active task before any retry")

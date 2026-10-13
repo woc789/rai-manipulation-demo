@@ -151,7 +151,7 @@ class OperatorPanelTests(unittest.TestCase):
         self.assertEqual(self.panel.queue_table.item(1, 5).text(), "1")
         self.assertEqual(self.panel.queue_table.item(1, 6).text(), "玉米×1")
         self.assertIn("等待 2", self.panel.queue_summary.text())
-        self.assertEqual(self.panel.tabs.count(), 4)
+        self.assertEqual(self.panel.tabs.count(), 5)
         self.panel._submit()
         identifier = self.panel.worker.submission[0]
         self.panel._on_registered(True, identifier, "已登记")
@@ -554,6 +554,18 @@ class OperatorPanelTests(unittest.TestCase):
         self.assertEqual(self.panel.history.item(0, 4).text(), "已丢弃")
         self.panel._restore_last_task()
         self.assertEqual(self.panel.task_status.text(), "已取消")
+
+
+    def test_business_request_selection_survives_status_refresh(self):
+        request = dict(request_id="req-123", kind="request_order_change", state="PENDING", arguments={})
+        payload = json.dumps({"bins": self.bins, "orders": [], "approval_requests": [request]})
+        self.panel._set_resources(payload)
+        self.panel.business_requests.selectRow(0)
+        self.panel._set_resources(payload)
+        self.assertEqual(self.panel.business_requests.currentRow(), 0)
+        self.assertEqual(self.panel.business_requests.item(0, 1).text(), "修改订单")
+        self.panel._on_business_result(json.dumps({"success": True, "result": {"answer": "等待复查"}}))
+        self.assertEqual(self.panel.business_output.toPlainText(), "等待复查")
 
 
 if __name__ == "__main__":
