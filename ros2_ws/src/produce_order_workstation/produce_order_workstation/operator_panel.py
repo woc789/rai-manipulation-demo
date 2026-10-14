@@ -444,7 +444,8 @@ class OperatorPanel(QWidget):
             self.business_output.setPlainText("请先选中一个待确认请求。")
             return
         identifier, body = cell.data(Qt.UserRole)
-        if body.get("state") != "PENDING":
+        retryable = approve and body.get("state") == "APPROVED" and body.get("execution_state") == "REJECTED"
+        if body.get("state") != "PENDING" and not retryable:
             self.business_output.setPlainText("该请求已处理，不能重复确认。")
             return
         args = {"request_id": identifier}
@@ -679,7 +680,11 @@ class OperatorPanel(QWidget):
             self.business_requests.insertRow(row)
             kinds = {"request_order_change": "修改订单", "request_replenishment": "补货准备", "request_scene_reset": "核对并重建旧现场"}
             states = {"PENDING": "待确认", "APPROVED": "已确认", "REJECTED": "已拒绝"}
-            for column, value in enumerate((body["request_id"][:10], kinds.get(body["kind"],body["kind"]), states.get(body["state"],body["state"]))):
+            execution = {"ADMITTING": "准入中", "RUNNING": "执行中", "SUCCEEDED": "已完成", "REJECTED": "未启动，可重试", "FAILED": "执行失败，需核对", "UNKNOWN": "结果未知，需核对"}
+            label = states.get(body["state"], body["state"])
+            if body.get("execution_state"):
+                label += " · " + execution.get(body["execution_state"], body["execution_state"])
+            for column, value in enumerate((body["request_id"][:10], kinds.get(body["kind"],body["kind"]), label)):
                 cell = QTableWidgetItem(str(value))
                 cell.setToolTip(json.dumps(body, ensure_ascii=False, indent=2))
                 if column == 0:

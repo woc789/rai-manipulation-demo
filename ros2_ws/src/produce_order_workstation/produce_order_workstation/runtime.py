@@ -36,6 +36,7 @@ from .order import (
 )
 from .planning_scene import PlanningSceneSync
 from .inventory import InventoryLedger
+from .execution_gate import serialized_skill
 from .stock_layout import validate_stock_layout
 
 
@@ -575,6 +576,7 @@ class Workstation:
         raise PerceptionMismatch("No unoccupied destination offset has safe source clearance; choose another candidate",
                                  code="DESTINATION_CONFLICT", reobserve=False)
 
+    @serialized_skill
     def get_object_positions(self, order: Order, sku: str) -> dict:
         """Agent-facing RGB-D perception; never reveal simulator entity labels."""
         self._ensure_observation_posture()
@@ -668,6 +670,7 @@ class Workstation:
     def observe_after_place(self, sku: str, entity):
         return [self.entity_position(entity)]
 
+    @serialized_skill
     def move(
         self,
         point: tuple[float, float, float],
@@ -754,6 +757,7 @@ class Workstation:
                 raise MotionPlanRejected(reason)
             raise OrderError(reason)
 
+    @serialized_skill
     def pick_and_place(self, order: Order, detection_id: str) -> dict:
         """Re-localize a visual candidate, then execute validated ROS motion."""
         self.check_cancel()
@@ -940,6 +944,7 @@ class Workstation:
             "next": "Call get_object_positions again before another pick",
         }
 
+    @serialized_skill
     def finish_order(self, order: Order) -> dict:
         """The Agent can request completion, but cannot declare success itself."""
         self.check_cancel()
@@ -981,7 +986,7 @@ class Workstation:
             else:
                 if self._mcp_server is None or self._agent_dispatcher is None:
                     raise OrderError("Persistent MCP gateway and Agent dispatcher are not configured")
-                with self._mcp_server.order_session(order) as server:
+                with self._mcp_server.order_session(order, allow_motion=self.execution_runner is None) as server:
                     if self.execution_runner is not None:
                         self.execution_runner(order)
                     else:

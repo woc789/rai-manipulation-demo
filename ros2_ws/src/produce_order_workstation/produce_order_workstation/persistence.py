@@ -79,6 +79,64 @@ class WorkcellStore:
             return [dict(operation_id=r[0], order_id=r[1], phase=r[2], state=r[3])
                     for r in self.db.execute("SELECT operation_id,order_id,phase,state FROM operations")]
 
+    def operation(self, identifier):
+        with self._lock:
+            row = self.db.execute("SELECT order_id,phase,state,result FROM operations WHERE operation_id=?", (identifier,)).fetchone()
+            return dict(order_id=row[0], phase=row[1], state=row[2],
+                        result=json.loads(row[3]) if row[3] else None) if row else None
+
+    def verified_progress(self, order_id):
+        with self._lock:
+            progress = {}
+            for (encoded,) in self.db.execute("SELECT result FROM operations WHERE order_id=? AND state='VERIFIED'", (order_id,)):
+                result = json.loads(encoded) if encoded else {}
+                for sku, count in result.get("completed_by_sku", {}).items():
+                    if type(count) is int and count >= 0:
+                        progress[sku] = max(progress.get(sku, 0), count)
+            return progress
+
+    def request(self, identifier):
+        with self._lock:
+            row = self.db.execute("SELECT body,state FROM requests WHERE request_id=?", (identifier,)).fetchone()
+            return dict(json.loads(row[0]), state=row[1]) if row else None
+
+    def quarantine_interrupted_maintenance(self):
+        with self._lock, self.db:
+            interrupted = False
+            rows = list(self.db.execute("SELECT request_id,body FROM requests WHERE state='APPROVED'"))
+            for identifier, encoded in rows:
+                body = json.loads(encoded)
+                if body.get("execution_state") in ("ADMITTING", "RUNNING"):
+                    interrupted = True
+                    body.update(execution_state="UNKNOWN", execution_error="Process restarted before maintenance result; reconcile scene")
+                    self.db.execute("UPDATE requests SET body=? WHERE request_id=?", (json.dumps(body), identifier))
+            return interrupted
+
+    def admit_maintenance(self, identifier):
+        """Durably admit once; only a definite pre-execution rejection is retryable."""
+        with self._lock, self.db:
+            request = self.request(identifier)
+            if not request or not (request["state"] == "PENDING" or (
+                request["state"] == "APPROVED" and request.get("execution_state") == "REJECTED")):
+                raise ValueError("Maintenance already admitted or result unknown; do not repeat")
+            request.pop("state")
+            request.update(execution_state="ADMITTING", execution_error="")
+            self.db.execute("UPDATE requests SET state='APPROVED',body=? WHERE request_id=?",
+                            (json.dumps(request, ensure_ascii=False), identifier))
+
+    def execution_result(self, identifier, state, error="", *, expected=("ADMITTING", "RUNNING")):
+        if state not in ("REJECTED", "RUNNING", "SUCCEEDED", "FAILED", "UNKNOWN"):
+            raise ValueError("Invalid maintenance execution state")
+        with self._lock, self.db:
+            request = self.request(identifier)
+            if not request or request.get("execution_state") not in expected:
+                return False
+            request.pop("state")
+            request.update(execution_state=state, execution_error=error)
+            self.db.execute("UPDATE requests SET body=? WHERE request_id=?",
+                            (json.dumps(request, ensure_ascii=False), identifier))
+            return True
+
     def create_request(self, body):
         identifier = uuid.uuid4().hex
         with self._lock, self.db:

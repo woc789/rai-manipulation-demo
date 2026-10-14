@@ -15,6 +15,7 @@ from produce_order_interfaces.action import RunFulfillment
 from produce_order_interfaces.srv import FulfillmentStep
 
 from .order import OrderError, OrderCancelled, OrderPaused, PerceptionMismatch
+from .execution_gate import execution_gate
 
 
 class ExecutionBridge:
@@ -82,6 +83,22 @@ class ExecutionBridge:
             self.station.cancel_requested = original_cancel
 
     def step(self, request, response):
+        if request.command in ("pick", "audit"):
+            try:
+                with execution_gate(self.station).hold():
+                    return self._step(request, response)
+            except OrderError as exc:
+                response.status, response.reason = "FAILED", str(exc)
+                return response
+        return self._step(request, response)
+
+    @staticmethod
+    def _remember(session, key, response):
+        session["sequence"] = max(session["sequence"], key[0] + 1)
+        session["cache"][key] = {name: getattr(response, name)
+            for name in ("status", "reason", "remaining", "detection_id")}
+
+    def _step(self, request, response):
         with self._lock:
             session = self._active
             if session is None or request.session_id != session["token"]:
@@ -92,10 +109,26 @@ class ExecutionBridge:
                 for name, value in session["cache"][key].items():
                     setattr(response, name, value)
                 return response
+            order = session["order"]
+            if request.command == "pick":
+                saved = self.server.store.operation(f"{session['token']}:{request.sequence}")
+                if saved is not None:
+                    result = saved.get("result") or {}
+                    fields = ("status", "reason", "remaining", "detection_id")
+                    if (saved["order_id"] == order.order_id and saved["state"] in ("VERIFIED", "NO_EFFECT")
+                        and result.get("request_detection_id") == request.detection_id and all(k in result for k in fields)):
+                        for name in fields:
+                            setattr(response, name, result[name])
+                        self._remember(session, key, response)
+                        if response.status in ("FAILED", "CANCELLED", "PAUSED"):
+                            session["terminal"] = True
+                        return response
+                    response.status, response.reason = "FAILED", "Existing operation requires reconciliation; never replay motion"
+                    session["terminal"] = True
+                    return response
             if request.sequence != session["sequence"] or session["terminal"]:
                 response.status, response.reason = "FAILED", "Out-of-order or terminal execution request"
                 return response
-            order = session["order"]
             operation = None
             before_completed = sum(self.station._completed_by_sku.values())
             started = time.monotonic()
@@ -155,14 +188,22 @@ class ExecutionBridge:
                 if operation:
                     state = "VERIFIED" if sum(self.station._completed_by_sku.values()) > before_completed and not self.station.physical_state_uncertain else (
                         "UNCERTAIN" if self.station.physical_state_uncertain else "NO_EFFECT")
-                    self.server.store.finish_operation(operation, state, dict(status=response.status, reason=response.reason))
+                    result = {name: getattr(response, name) for name in ("status", "reason", "remaining", "detection_id")}
+                    result.update(request_detection_id=request.detection_id,
+                                  completed_by_sku=dict(self.station._completed_by_sku))
+                    try:
+                        self.server.store.finish_operation(operation, state, result)
+                    except Exception as exc:
+                        self.station.physical_state_uncertain = True
+                        session["terminal"] = True
+                        raise OrderError("Operation journal failed; reconcile before retrying") from exc
+                # Cache before snapshot/event IO: an IO failure cannot erase the
+                # confirmed result or turn a repeated request into another pick.
+                self._remember(session, key, response)
                 self.station.event(order.order_id, "BT_STEP", command=request.command,
                                    status=response.status, reason=response.reason,
                                    duration_s=round(time.monotonic()-started, 3), operation_id=operation)
                 self.server.persist_state()
-            session["sequence"] += 1
-            session["cache"][key] = {name: getattr(response, name)
-                                     for name in ("status", "reason", "remaining", "detection_id")}
             return response
 
     def close(self):

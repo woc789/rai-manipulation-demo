@@ -5,6 +5,8 @@ same-SKU spatial association; all motion safety checks remain in Workstation.
 """
 
 from dataclasses import dataclass, asdict
+from contextlib import contextmanager
+from copy import deepcopy
 from math import dist, isfinite
 from threading import RLock
 import time
@@ -43,6 +45,17 @@ class InventoryLedger:
             self._items.clear()
             self._executing.clear()
             self.epoch += 1
+
+    @contextmanager
+    def transaction(self):
+        """Keep observers out; roll back reservations if a business commit fails."""
+        with self._lock:
+            before = (deepcopy(self._items), set(self._executing), self.epoch, self._serial)
+            try:
+                yield
+            except BaseException:
+                self._items, self._executing, self.epoch, self._serial = before
+                raise
 
     def observe(self, sku, frame_id, points, *, complete_scan=True):
         if not sku or not frame_id:

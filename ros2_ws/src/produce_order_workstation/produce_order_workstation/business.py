@@ -27,6 +27,9 @@ class BusinessCoordinator:
     def __init__(self, server):
         self.server = server
         self.boot_id = __import__("uuid").uuid4().hex
+        if server.store.quarantine_interrupted_maintenance():
+            server._startup_review = True
+            server._state, server._state_reason = "RECOVERY_REQUIRED", "上次维护结果未知；请核对现场，不能自动重复维护"
 
     def call(self, command, args):
         s = self.server
@@ -74,8 +77,11 @@ class BusinessCoordinator:
                     raise ValueError("Scene-reset reconciliation is only for a restored unverified scene")
                 return dict(request=s.store.create_request(body), applied=False)
             if command in ("approve_request", "reject_request"):
-                request = next((row for row in s.store.requests() if row["request_id"] == args.get("request_id")), None)
-                if not request or request["state"] != "PENDING" or request["expires"] < time.time() or request["boot_id"] != self.boot_id:
+                request = s.store.request(args.get("request_id", ""))
+                retryable = bool(request and request["state"] == "APPROVED"
+                    and request.get("execution_state") == "REJECTED")
+                if (not request or request["expires"] < time.time() or request["boot_id"] != self.boot_id
+                    or (request["state"] != "PENDING" and not (command == "approve_request" and retryable))):
                     raise ValueError("Request missing, expired, already handled, or from another process")
                 if command == "reject_request":
                     s.store.resolve_request(request["request_id"], "REJECTED")
@@ -87,11 +93,19 @@ class BusinessCoordinator:
                     quantities = request["arguments"]["quantities"]
                     changed = Order(job.order.order_id, job.order.zone, tuple(OrderLine(k, n) for k, n in quantities.items() if n))
                     validate_order(changed, s.config)
-                    s.workstation.inventory.release_order(job.order.order_id)
-                    job.order, job.total = changed, changed.total_items
-                    job.state, job.reason, job.missing = "QUEUED", "操作员已确认修改，重新检查资源", {}
-                    s._scan_requested = True
-                    s._persist_locked(resolution=(request["request_id"], "APPROVED"))
+                    before = (job.order, job.total, job.state, job.reason, job.missing, s._scan_requested)
+                    # Both manager and ledger locks remain held. A failed SQLite
+                    # commit rolls back all in-memory changes before observers run.
+                    with s.workstation.inventory.transaction():
+                        try:
+                            s.workstation.inventory.release_order(job.order.order_id)
+                            job.order, job.total = changed, changed.total_items
+                            job.state, job.reason, job.missing = "QUEUED", "操作员已确认修改，重新检查资源", {}
+                            s._scan_requested = True
+                            s._persist_locked(resolution=(request["request_id"], "APPROVED"))
+                        except BaseException:
+                            job.order, job.total, job.state, job.reason, job.missing, s._scan_requested = before
+                            raise
                     return dict(applied=True, state="QUEUED")
                 if s._busy or s._dispatch_order_id:
                     raise ValueError("Wait for the current operation before approving scene maintenance")
@@ -100,31 +114,37 @@ class BusinessCoordinator:
                         raise ValueError("Explicit confirmation RESET_SCENE required; old physical bins will be discarded")
                     if not s._startup_review:
                         raise ValueError("Scene review was already resolved")
-                    # Recovery is explicit. Never silently declare a previous
-                    # waiting-pickup order delivered after a simulator restart.
-                    for job in s.queue.jobs.values():
-                        if job.state == "RECOVERY_REQUIRED":
-                            job.state, job.reason = "FAILED", "操作员确认旧现场丢弃；历史进度保留，不算已交付"
-                    s._startup_review = False
-                    s._persist_locked(resolution=(request["request_id"], "APPROVED"))
                     maintenance = "recover"
-                else:
+                elif request["kind"] == "request_replenishment":
                     if s._startup_review:
                         raise ValueError("Resolve restored scene before replenishment")
-                    s.store.resolve_request(request["request_id"], "APPROVED")
                     maintenance = "replenish"
+                else:
+                    raise ValueError("Unknown maintenance kind")
+                identifier = request["request_id"]
+                s.store.admit_maintenance(identifier)
             else:
                 raise ValueError("Unknown business command")
-        # Existing callbacks own maintenance admission, threading and safety.
         from std_srvs.srv import Trigger
         response = Trigger.Response()
-        if maintenance == "recover":
-            s.recover_callback(Trigger.Request(), response)
-        else:
-            s.replenish_callback(Trigger.Request(), response)
+        try:
+            if hasattr(s, "start_maintenance"):
+                s.start_maintenance(maintenance, identifier, response)
+            elif maintenance == "recover":
+                s.recover_callback(Trigger.Request(), response)
+            else:
+                s.replenish_callback(Trigger.Request(), response)
+        except Exception as exc:
+            s.store.execution_result(identifier, "UNKNOWN", str(exc))
+            raise
         if not response.success:
-            return dict(applied=False, error=response.message, state="MAINTENANCE_REJECTED")
-        return dict(applied=True, message=response.message)
+            s.store.execution_result(identifier, "REJECTED", response.message, expected=("ADMITTING",))
+            return dict(applied=False, error=response.message, state="MAINTENANCE_REJECTED",
+                        execution_state="REJECTED", retryable=True)
+        # A fast worker may already have finished; never downgrade SUCCEEDED.
+        s.store.execution_result(identifier, "RUNNING", expected=("ADMITTING",))
+        current = s.store.request(identifier)
+        return dict(applied=True, message=response.message, execution_state=current.get("execution_state"))
 
     def ask(self, question):
         """Dispatch business reasoning to the independent Agent, never call a model here."""

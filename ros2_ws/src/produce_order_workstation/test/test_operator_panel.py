@@ -80,6 +80,25 @@ class OperatorPanelTests(unittest.TestCase):
         for button in (self.panel.submit_button, self.panel.pickup_button, self.panel.recover_button):
             self.assertFalse(button.isEnabled())
 
+    def test_rejected_maintenance_can_be_confirmed_again_with_visible_state(self):
+        from PyQt5.QtWidgets import QMessageBox
+        body = dict(request_id="retry", kind="request_replenishment", state="APPROVED", execution_state="REJECTED")
+        self.panel._set_resources(json.dumps({"bins": self.bins, "approval_requests": [body]}))
+        self.assertIn("可重试", self.panel.business_requests.item(0, 2).text())
+        self.panel.business_requests.selectRow(0)
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.Yes), patch.object(self.panel, "_send_business") as send:
+            self.panel._resolve_business(True)
+            send.assert_called_once_with("approve_request", {"request_id": "retry"})
+
+    def test_running_maintenance_cannot_be_confirmed_twice(self):
+        body = dict(request_id="busy", kind="request_replenishment", state="APPROVED", execution_state="RUNNING")
+        self.panel._set_resources(json.dumps({"bins": self.bins, "approval_requests": [body]}))
+        self.assertIn("执行中", self.panel.business_requests.item(0, 2).text())
+        self.panel.business_requests.selectRow(0)
+        with patch.object(self.panel, "_send_business") as send:
+            self.panel._resolve_business(True)
+            send.assert_not_called()
+
     def test_capacity_is_inline_and_does_not_change_task(self):
         self.ready()
         self.panel._on_result("COMPLETED", 4, 4, "", "")

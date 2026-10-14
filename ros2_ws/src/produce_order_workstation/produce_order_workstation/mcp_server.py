@@ -13,6 +13,7 @@ from mcp.server.fastmcp import FastMCP
 import uvicorn
 
 from .order import OrderError, PerceptionMismatch
+from .execution_gate import execution_gate
 
 
 _request_capability = ContextVar("workstation_mcp_capability", default=None)
@@ -58,6 +59,8 @@ class WorkstationMCPServer:
         self._lease = threading.Lock()
         self._accepting = True
         self._perceived = False
+        self._motion_allowed = True
+        self._execution_gate = execution_gate(workstation)
         self._thread = None
         self._socket = None
         self.mcp = FastMCP("Produce Workstation", json_response=True,
@@ -100,6 +103,17 @@ class WorkstationMCPServer:
                 return {"error": {"kind": "OrderError", "message": "No admitted order is bound"}}
             if not self._accepting:
                 raise OrderError("MCP order session is closed")
+            if name in ("pick_and_place", "finish_order") and not self._motion_allowed:
+                raise OrderError("Behavior-tree session permits MCP perception only; physical skills belong to the tree")
+            with self._execution_gate.hold():
+                return self._execute_admitted(name, arguments)
+        except OrderError as exc:
+            return {"error": {"kind": type(exc).__name__, "message": str(exc)}}
+        finally:
+            self._lease.release()
+
+    def _execute_admitted(self, name, arguments):
+        try:
             self.workstation.check_cancel()
             self.workstation.event(self.order.order_id, "MCP_TOOL_CALL", tool=name)
             if name == "get_object_positions":
@@ -138,8 +152,6 @@ class WorkstationMCPServer:
             self.workstation.event(self.order.order_id, "MCP_TOOL_RESULT", tool=name,
                                    ok=False, reason=str(exc), error_type=type(exc).__name__)
             return {"error": {"kind": "OrderError", "message": str(exc)}}
-        finally:
-            self._lease.release()
 
     def __enter__(self):
         self._socket = socket.socket()
@@ -162,7 +174,7 @@ class WorkstationMCPServer:
         return self
 
     @contextmanager
-    def order_session(self, order):
+    def order_session(self, order, *, allow_motion=True):
         """Keep HTTP alive, rotate capability at each admitted task boundary."""
         with self._lease:
             if self.order is not None or not self._accepting:
@@ -170,6 +182,7 @@ class WorkstationMCPServer:
             self.order = order
             self.token = secrets.token_urlsafe(32)
             self._perceived = False
+            self._motion_allowed = allow_motion
         try:
             yield self
         finally:
@@ -178,6 +191,7 @@ class WorkstationMCPServer:
                 self.order = None
                 self.token = secrets.token_urlsafe(32)
                 self._perceived = False
+                self._motion_allowed = False
 
     def close(self):
         self._accepting = False

@@ -16,7 +16,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.utilities import remove_ros_args
 from rai.communication.ros2.connectors import ROS2Connector
 import yaml
@@ -37,6 +37,8 @@ from .scheduling import QueuedOrder
 from .fulfillment import OrderAllocation
 from .persistence import WorkcellStore
 from .business import BusinessCoordinator
+
+CLOCK_QOS = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
 
 
 def order_from_goal(goal: ExecuteOrder.Goal) -> Order:
@@ -94,7 +96,10 @@ class OrderActionServer(Node):
         self._state = "INITIALIZING"
         self._state_reason = "正在启动感知服务并准备桌面库存"
         self._sim_seen = None
-        self._clock_subscription = self.create_subscription(Clock, "/clock", self._sim_clock, 1)
+        self._clock_started = time.monotonic()
+        self._sim_progress_seen = None
+        self._sim_clock_value = None
+        self._clock_subscription = self.create_subscription(Clock, "/clock", self._sim_clock, CLOCK_QOS)
         self._health_timer = self.create_timer(1.0, self._check_simulator)
         self._status_publisher = self.create_publisher(
             String, "/produce_orders/workcell_status",
@@ -195,17 +200,35 @@ class OrderActionServer(Node):
 
     def _sim_clock(self, _message):
         self._sim_seen = time.monotonic()
+        value = (_message.clock.sec, _message.clock.nanosec)
+        if value != self._sim_clock_value:
+            self._sim_progress_seen = self._sim_seen
+            self._sim_clock_value = value
+
+    def _clock_problem(self):
+        now = time.monotonic()
+        if self._sim_seen is None:
+            if now - getattr(self, "_clock_started", now) < float(self.config.get("clock_health", {}).get("startup_grace_s", 240)):
+                return None
+            return "从未收到仿真时钟"
+        if now - self._sim_seen >= 15:
+            return "仿真时间流已中断"
+        progress = getattr(self, "_sim_progress_seen", self._sim_seen)
+        if progress is not None and now - progress >= 15:
+            return "仿真时钟停止推进（仿真可能已暂停）"
+        return None
 
     def _check_simulator(self):
-        if self._sim_seen is None or time.monotonic()-self._sim_seen < 15:
+        problem = self._clock_problem()
+        if problem is None:
             return
         with self._lock:
-            if self._state not in ("READY", "RUNNING", "SCANNING"):
+            if self._state not in ("INITIALIZING", "READY", "RUNNING", "SCANNING"):
                 return
             identifier = self._dispatch_order_id
             self._scene_ready = False
             self._state = "SCENE_OFFLINE"
-            self._state_reason = "仿真时间流已中断；禁止继续运动。请重启完整仿真，历史物理订单将在业务协作页要求核对。"
+            self._state_reason = problem + "；禁止继续运动。请重启完整仿真，历史物理订单将在业务协作页要求核对。"
         if identifier:
             self._quarantine_dispatch("仿真时间流已中断，运动结果需要核对", identifier)
         self.publish_status()
@@ -226,6 +249,9 @@ class OrderActionServer(Node):
             checkpoint = snapshot.get("checkpoint", {})
             if checkpoint.get("order_id") == order.order_id:
                 job.completed = max(job.completed, sum(checkpoint.get("completed_by_sku", {}).values()))
+            verified = self.store.verified_progress(order.order_id)
+            confirmed = sum(min(line.quantity, verified.get(line.sku, 0)) for line in order.lines)
+            job.completed = max(job.completed, confirmed)
             job.review_required = row.get("review_required", False)
             job.finished_sequence = row.get("finished_sequence", 0)
             if job.state in ("DISPATCHING", "RUNNING", "PAUSED", "WAITING_PICKUP", "RECOVERY_REQUIRED"):
@@ -549,30 +575,43 @@ class OrderActionServer(Node):
             self._quarantine_dispatch("执行结果异常：" + str(exc), identifier)
         self.publish_status()
 
-    def replenish_callback(self, _request, response):
+    def start_maintenance(self, kind, identifier, response):
+        request = self.store.request(identifier)
+        expected = "request_scene_reset" if kind == "recover" else "request_replenishment"
+        if not request or request["state"] != "APPROVED" or request.get("execution_state") != "ADMITTING" or request["kind"] != expected:
+            raise ValueError("Maintenance has no valid durable admission")
+        callback = self.recover_callback if kind == "recover" else self.replenish_callback
+        return callback(Trigger.Request(), response, request_id=identifier)
+
+    def replenish_callback(self, _request, response, *, request_id=None):
         with self._lock:
             if self._busy or not self._scene_ready or self._dispatch_order_id:
                 response.success, response.message = False, "只有现场就绪且无执行订单时才能补货"
                 return response
             self._busy, self._scene_ready = True, False
             self._state, self._state_reason = "REPLENISHING", "只替换桌面剩余货源，保留已完成订单箱"
-        Thread(target=self._replenish_stock, daemon=True).start()
+        Thread(target=self._replenish_stock, args=(request_id,), daemon=True).start()
         response.success, response.message = True, "补货准备已启动，等待 READY 和视觉复查"
         self.publish_status()
         return response
 
-    def _replenish_stock(self):
+    def _replenish_stock(self, request_id=None):
+        success, error = False, ""
         try:
             self.workstation.replenish_source(self.scene_path)
         except Exception as exc:
+            error = str(exc)
             self._set_state("RECOVERY_REQUIRED", f"补货未完整成功，需检查现场：{exc}")
         else:
+            success = True
             with self._lock:
                 self._scan_requested = True
             self._set_state("READY", "桌面已补货，等待视觉复查", ready=True)
         finally:
             with self._lock:
                 self._busy = False
+            if request_id:
+                self.store.execution_result(request_id, "SUCCEEDED" if success else "FAILED", error)
             self.publish_status()
 
     def publish_status(self) -> None:
@@ -621,6 +660,10 @@ class OrderActionServer(Node):
         self._inventory_publisher.publish(message)
 
     def _set_state(self, state: str, reason: str, *, ready: bool = False) -> None:
+        if ready and hasattr(self, "_clock_started"):
+            problem = self._clock_problem()
+            if problem:
+                state, reason, ready = "SCENE_OFFLINE", problem + "；请恢复仿真后核对现场", False
         with self._lock:
             self._state = state
             self._state_reason = reason
@@ -684,9 +727,9 @@ class OrderActionServer(Node):
             self.publish_status()
         return response
 
-    def recover_callback(self, _request, response):
+    def recover_callback(self, _request, response, *, request_id=None):
         with self._lock:
-            if getattr(self, "_startup_review", False):
+            if getattr(self, "_startup_review", False) and request_id is None:
                 response.success, response.message = False, "请先在业务协作页确认旧现场处理；重启不等于旧订单已交付"
                 return response
             if self._busy or self._dispatch_order_id or self._state in ("INITIALIZING", "REPLENISHING", "RECOVERING"):
@@ -702,28 +745,39 @@ class OrderActionServer(Node):
             self._state = "RECOVERING"
             self._state_reason = "正在清理并重新生成库存与分箱"
         self.publish_status()
-        Thread(target=self._recover_scene, daemon=True).start()
+        Thread(target=self._recover_scene, args=(request_id,), daemon=True).start()
         response.success = True
         response.message = "已开始重置场景；等待状态变为 READY 后再提交订单"
         return response
 
-    def _recover_scene(self) -> None:
+    def _recover_scene(self, request_id=None) -> None:
+        success, error = False, ""
         try:
             self.workstation.wait_until_ready(with_scene=True)
             self.workstation.prepare_scene(self.scene_path)
         except Exception as exc:
+            error = str(exc)
             self.get_logger().error(f"Workcell recovery failed: {exc}")
             self._set_state("RECOVERY_REQUIRED", f"场景恢复失败：{exc}")
         else:
             with self._lock:
+                if request_id and getattr(self, "_startup_review", False):
+                    for job in self.queue.jobs.values():
+                        if job.state == "RECOVERY_REQUIRED":
+                            job.state, job.review_required = "FAILED", False
+                            job.reason = "操作员确认重建旧现场；保留历史进度，不记为已交付"
+                    self._startup_review = False
                 self.bin_manager.reset()
                 self._dispatch_timed_out = False
                 self._inventory_ready = False
                 self._scan_requested = True
+            success = True
             self._set_state("READY", "场景已重置，库存已就绪", ready=True)
         finally:
             with self._lock:
                 self._busy = False
+            if request_id:
+                self.store.execution_result(request_id, "SUCCEEDED" if success else "FAILED", error)
             self.publish_status()
 
     @staticmethod
