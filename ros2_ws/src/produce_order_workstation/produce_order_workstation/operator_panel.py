@@ -8,7 +8,7 @@ from time import monotonic
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLineEdit, QMenu, QToolButton,
-    QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea,
+    QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
     QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 import yaml
@@ -69,7 +69,7 @@ class OperatorPanel(QWidget):
         self.setWindowTitle("生鲜配货 · ROS 2 工作台")
         self.setObjectName("operatorPanel")
         self.resize(1280, 900)
-        self.setMinimumSize(1000, 700)
+        self.setMinimumSize(1080, 900)
         self.setStyleSheet(STYLE)
         self._build_ui()
         if hasattr(self.worker, "queue_cleared"):
@@ -115,15 +115,9 @@ class OperatorPanel(QWidget):
         self.recover_button = QPushButton("恢复工作台", self)
         self.recover_button.hide()
         self.recover_button.clicked.connect(self._recover)
-        scroll = QScrollArea()
-        self.scroll = scroll
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.NoFrame)
-        content = QWidget()
-        content.setObjectName("operatorPanel")
-        page = QVBoxLayout(content)
-        page.setContentsMargins(24, 22, 24, 22)
-        page.setSpacing(16)
+        page = QVBoxLayout()
+        page.setContentsMargins(20, 16, 20, 16)
+        page.setSpacing(10)
         header = QHBoxLayout()
         heading = QVBoxLayout()
         heading.addWidget(label("生鲜配货工作台", "pageTitle"))
@@ -190,9 +184,9 @@ class OperatorPanel(QWidget):
         self.incident_card.box.addLayout(actions)
         self.incident_card.hide()
         main = QHBoxLayout()
-        main.setSpacing(16)
+        main.setSpacing(12)
         form = Card()
-        form.setFixedWidth(304)
+        form.setFixedWidth(288)
         form.box.addWidget(label("新建订单", "sectionTitle"))
         self.order_id = QLineEdit()
         self.order_id.setPlaceholderText("订单编号")
@@ -288,11 +282,11 @@ class OperatorPanel(QWidget):
         pickup_row.addWidget(self.pickup_orders, 1)
         pickup_row.addWidget(self.pickup_button)
         boxes.box.addLayout(pickup_row)
-        right.addWidget(boxes)
         main.addLayout(right, 1)
-        page.addLayout(main)
+        page.addLayout(main, 1)
         records = Card()
         self.records = records
+        records.setMaximumHeight(180)
         self.tabs = QTabWidget()
         self.clear_logs_button = QPushButton("清空日志")
         self.clear_logs_button.setToolTip("仅清空事件和技术日志显示，保留订单报告及系统日志")
@@ -308,15 +302,13 @@ class OperatorPanel(QWidget):
         self.history.verticalHeader().setDefaultSectionSize(40)
         self.history.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.history.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.history.setMinimumHeight(140)
-        self.history.setMaximumHeight(180)
+        self.history.setMinimumHeight(65)
         self.events = QPlainTextEdit()
         self.technical = QPlainTextEdit()
         for log in (self.events, self.technical):
             log.setReadOnly(True)
             log.setMaximumBlockCount(500)
-            log.setMinimumHeight(140)
-            log.setMaximumHeight(180)
+            log.setMinimumHeight(65)
         self.tabs.addTab(self.history, "订单记录")
         history_page = QWidget()
         history_layout = QVBoxLayout(history_page)
@@ -347,8 +339,7 @@ class OperatorPanel(QWidget):
         self.inventory_table.verticalHeader().hide()
         self.inventory_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.inventory_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
-        self.inventory_table.setMinimumHeight(140)
-        self.inventory_table.setMaximumHeight(180)
+        self.inventory_table.setMinimumHeight(65)
         inventory_layout.addWidget(self.inventory_table)
         self.tabs.addTab(inventory_page, "视觉台账")
         self.queue_card = Card()
@@ -364,8 +355,7 @@ class OperatorPanel(QWidget):
         self.queue_table.verticalHeader().hide()
         self.queue_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.queue_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
-        self.queue_table.setMinimumHeight(140)
-        self.queue_table.setMaximumHeight(180)
+        self.queue_table.setMinimumHeight(90)
         queue_layout.addWidget(self.queue_table)
         actions = QHBoxLayout()
         self.queue_cancel_button = QPushButton("取消选中排队单")
@@ -380,10 +370,20 @@ class OperatorPanel(QWidget):
         for button in (self.queue_cancel_button, self.queue_clear_button, self.scan_button, self.replenish_button):
             actions.addWidget(button)
         queue_layout.addLayout(actions)
-        # Queue is always visible next to the draft, not hidden in a log tab.
-        right.insertWidget(1, self.queue_card)
+        # Keep both resource views visible without making the whole page scroll.
+        resources = QHBoxLayout()
+        resources.setSpacing(12)
+        resources.addWidget(self.queue_card, 3)
+        resources.addWidget(boxes, 2)
+        right.addLayout(resources, 3)
         business_page = QWidget()
-        business_layout = QVBoxLayout(business_page)
+        business_layout = QHBoxLayout(business_page)
+        business_layout.setContentsMargins(4, 4, 4, 4)
+        business_layout.setSpacing(10)
+        business_query = QVBoxLayout()
+        business_review = QVBoxLayout()
+        business_query.setSpacing(4)
+        business_review.setSpacing(4)
         query_row = QHBoxLayout()
         self.business_question = QLineEdit()
         self.business_question.setPlaceholderText("询问订单状态、等待原因或申请修改订单")
@@ -391,35 +391,38 @@ class OperatorPanel(QWidget):
         self.business_ask.clicked.connect(lambda: self._send_business("ask", {"question": self.business_question.text()}))
         query_row.addWidget(self.business_question, 1)
         query_row.addWidget(self.business_ask)
-        business_layout.addLayout(query_row)
+        business_query.addLayout(query_row)
         self.business_output = QPlainTextEdit()
         self.business_output.setReadOnly(True)
-        self.business_output.setMaximumHeight(130)
-        business_layout.addWidget(self.business_output)
+        self.business_output.setMinimumHeight(45)
+        business_query.addWidget(self.business_output, 1)
         self.business_requests = QTableWidget(0, 3)
         self.business_requests.setHorizontalHeaderLabels(["请求", "类型", "状态"])
         self.business_requests.setSelectionBehavior(QTableWidget.SelectRows)
         self.business_requests.setSelectionMode(QTableWidget.SingleSelection)
         self.business_requests.setEditTriggers(QTableWidget.NoEditTriggers)
         self.business_requests.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        business_layout.addWidget(self.business_requests)
+        self.business_requests.setMinimumHeight(45)
+        business_review.addWidget(self.business_requests, 1)
         buttons = QHBoxLayout()
-        for text, callback in (("查询实际状态", lambda: self._send_business("explain_task_status", {})),
-                               ("确认选中请求", lambda: self._resolve_business(True)),
-                               ("拒绝选中请求", lambda: self._resolve_business(False)),
-                               ("重启现场核对…", self._request_scene_review)):
+        buttons.setSpacing(4)
+        for text, description, callback in (("查状态", "查询实际业务状态", lambda: self._send_business("explain_task_status", {})),
+                                            ("确认", "确认选中的业务请求", lambda: self._resolve_business(True)),
+                                            ("拒绝", "拒绝选中的业务请求", lambda: self._resolve_business(False)),
+                                            ("现场核对…", "重启后申请核对现场", self._request_scene_review)):
             button = QPushButton(text)
+            button.setToolTip(description)
             button.clicked.connect(callback)
             button.setEnabled(hasattr(self.worker, "business_command"))
             buttons.addWidget(button)
-        business_layout.addLayout(buttons)
+        business_review.addLayout(buttons)
+        business_layout.addLayout(business_query, 1)
+        business_layout.addLayout(business_review, 1)
         self.business_ask.setEnabled(hasattr(self.worker, "business_command"))
         self.tabs.addTab(business_page, "业务协作")
         records.box.addWidget(self.tabs)
-        page.addWidget(records)
-        page.addStretch()
-        scroll.setWidget(content)
-        root.addWidget(scroll, 1)
+        right.addWidget(records, 2)
+        root.addLayout(page, 1)
 
     def _send_business(self, command, args):
         if not hasattr(self.worker, "business_command"):
@@ -464,13 +467,8 @@ class OperatorPanel(QWidget):
     def _navigate(self, name, index):
         for button in self.nav_buttons:
             button.setChecked(button.text() == name)
-        if name == "工作台":
-            self.scroll.verticalScrollBar().setValue(0)
-        elif name == "任务调度":
-            self.scroll.ensureWidgetVisible(self.queue_card)
-        else:
+        if name not in ("工作台", "任务调度"):
             self.tabs.setCurrentIndex(index)
-            self.scroll.ensureWidgetVisible(self.records)
 
     def _new_id(self):
         self.order_id.setText(datetime.now().strftime("order-%Y%m%d-%H%M%S-%f"))
@@ -906,7 +904,6 @@ class OperatorPanel(QWidget):
             self._submitted_order_id = order_id
             self._registration_receipt_id = order_id
             self.registration_receipt.setText(f"✓ 已登记：{order_id}\n等待服务端队列状态同步")
-            self.scroll.ensureWidgetVisible(self.queue_card)
             self._new_id()
             if not self._order_active:
                 self.task_status.setText("已登记 · 等待调度")
@@ -1064,7 +1061,6 @@ class OperatorPanel(QWidget):
             waiting = [b.get("bin_id") for b in self._bins if b.get("state") == "WAITING_PICKUP"]
             if waiting:
                 self._on_notice(f"恢复前请先取走已完成订单箱 {', '.join(waiting)}；在下方选择订单并确认取货。失败箱会保留，未发送重置请求。")
-                self.scroll.ensureWidgetVisible(self.boxes_card)
                 self.pickup_orders.setFocus()
             else:
                 self._on_notice("恢复前请先核对并处理暂停订单；未发送重置请求。")

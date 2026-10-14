@@ -10,7 +10,7 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 try:
     from PyQt5.QtCore import QObject, pyqtSignal
-    from PyQt5.QtWidgets import QApplication
+    from PyQt5.QtWidgets import QApplication, QPushButton, QScrollArea
 except ImportError:
     raise unittest.SkipTest("Qt tests use /usr/bin/python3 with installed PyQt5")
 import yaml
@@ -231,11 +231,29 @@ class OperatorPanelTests(unittest.TestCase):
                 completed=0, total=4, reason="等待调度")])))
         self.assertIn("✓ 已登记", self.panel.registration_receipt.text())
 
-    def test_small_window_has_no_horizontal_page_scroll(self):
-        self.panel.resize(1024, 768)
+    def test_compact_window_keeps_workstation_on_one_page(self):
+        self.panel.resize(1080, 900)
         self.panel.show()
         self.app.processEvents()
-        self.assertEqual(self.panel.scroll.horizontalScrollBar().maximum(), 0)
+        self.assertFalse(self.panel.findChildren(QScrollArea))
+        for widget in (self.panel.submit_button, self.panel.queue_card,
+                       self.panel.boxes_card, self.panel.records):
+            with self.subTest(widget=widget.objectName() or type(widget).__name__):
+                self.assertTrue(self.panel.rect().contains(
+                    widget.mapTo(self.panel, widget.rect().bottomRight())))
+        self.ready()
+        self.panel._set_workcell_status("INVENTORY_ERROR", "视觉库存复查失败：Timeout", False, False)
+        self.app.processEvents()
+        self.assertTrue(self.panel.rect().contains(
+            self.panel.incident_scan.mapTo(self.panel, self.panel.incident_scan.rect().bottomRight())))
+        self.assertTrue(self.panel.rect().contains(
+            self.panel.pickup_button.mapTo(self.panel, self.panel.pickup_button.rect().bottomRight())))
+        self.panel.tabs.setCurrentIndex(4)
+        self.app.processEvents()
+        for button in self.panel.tabs.widget(4).findChildren(QPushButton):
+            with self.subTest(button=button.text()):
+                self.assertTrue(self.panel.records.rect().contains(
+                    button.mapTo(self.panel.records, button.rect().bottomRight())))
 
     def test_inventory_is_labeled_as_observations_not_real_stock(self):
         self.panel._set_inventory(json.dumps({"epoch": 2, "items": [{"item_id": "obs-2-1", "sku": "corn",
