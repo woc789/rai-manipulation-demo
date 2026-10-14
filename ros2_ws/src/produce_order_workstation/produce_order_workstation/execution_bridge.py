@@ -5,6 +5,7 @@ Cancelling the tree never implies an in-flight skill has stopped: the owner
 waits for the gateway to drain before releasing its physical execution lease.
 """
 
+import json
 import time
 import uuid
 from threading import Lock
@@ -16,6 +17,7 @@ from produce_order_interfaces.srv import FulfillmentStep
 
 from .order import OrderError, OrderCancelled, OrderPaused, PerceptionMismatch
 from .execution_gate import execution_gate
+from .fulfillment_plan import compile_tree, context_digest, planning_context, validate_plan
 
 
 class ExecutionBridge:
@@ -41,8 +43,26 @@ class ExecutionBridge:
         try:
             if not self._client.wait_for_server(timeout_sec=5):
                 raise OrderError("Behavior-tree executor unavailable; no scripted fallback")
-            goal = RunFulfillment.Goal(session_id=token,
-                max_attempts=int(self.station.config["agent"]["max_consecutive_empty_perceptions"]))
+            gateway = self.station._mcp_server
+            max_attempts = int(self.station.config["agent"]["max_consecutive_empty_perceptions"])
+            context = planning_context(order, self.station, max_attempts)
+            proposed = self.station._agent_dispatcher.execute(order, gateway.url, gateway.token,
+                mode="plan", planning_context=context)
+            try:
+                plan = validate_plan(json.loads(proposed), context)
+            except (ValueError, TypeError) as exc:
+                raise OrderError("Agent returned malformed fulfillment plan") from exc
+            if context_digest(planning_context(order, self.station, max_attempts)) != plan["context_digest"]:
+                raise OrderError("Workstation state changed during planning; submit a fresh plan before motion")
+            plan_xml = compile_tree(plan, context)
+            with self._lock:
+                self._active["plan_items"] = [item["sku"] for item in plan["items"]]
+                self._active["plan_index"] = 0
+                self._active["selected_sku"] = ""
+            self.station.event(order.order_id, "BT_PLAN_ACCEPTED", items=plan["items"],
+                               context_digest=plan["context_digest"])
+            goal = RunFulfillment.Goal(session_id=token, max_attempts=max_attempts,
+                                      plan_xml=plan_xml)
             accepted = self._client.send_goal_async(goal, feedback_callback=lambda message:
                 self.station.event(order.order_id, "BT_STAGE", command=message.feedback.stage))
             deadline = time.monotonic()+15
@@ -104,7 +124,8 @@ class ExecutionBridge:
             if session is None or request.session_id != session["token"]:
                 response.status, response.reason = "FAILED", "Invalid or expired execution session"
                 return response
-            key = (request.sequence, request.command, request.detection_id)
+            target_sku = getattr(request, "target_sku", "")
+            key = (request.sequence, request.command, request.detection_id, target_sku)
             if key in session["cache"]:
                 for name, value in session["cache"][key].items():
                     setattr(response, name, value)
@@ -129,42 +150,67 @@ class ExecutionBridge:
             if request.sequence != session["sequence"] or session["terminal"]:
                 response.status, response.reason = "FAILED", "Out-of-order or terminal execution request"
                 return response
+            planned = session.get("plan_items")
+            if planned is not None and request.command in ("select", "pick"):
+                index = session["plan_index"]
+                if index >= len(planned) or target_sku != planned[index]:
+                    response.status, response.reason = "FAILED", "Step differs from validated Agent plan"
+                    session["terminal"] = True
+                    return response
             operation = None
             before_completed = sum(self.station._completed_by_sku.values())
+            before_by_sku = dict(self.station._completed_by_sku)
             started = time.monotonic()
             try:
                 self.station.check_cancel()
                 response.remaining = sum(max(0, line.quantity-self.station._completed_by_sku.get(line.sku, 0))
                                          for line in order.lines)
                 if request.command == "select":
-                    sku = next((line.sku for line in order.lines
-                                if self.station._completed_by_sku.get(line.sku, 0) < line.quantity), None)
+                    sku = target_sku or next((line.sku for line in order.lines
+                                              if self.station._completed_by_sku.get(line.sku, 0) < line.quantity), None)
                     if sku is None:
                         response.status = "DONE"
                     else:
                         gateway = self.station._mcp_server
                         selected = self.station._agent_dispatcher.execute(
-                            order, gateway.url, gateway.token, mode="select")
+                            order, gateway.url, gateway.token, mode="select", target_sku=sku)
                         if not selected:
                             response.status, response.reason = "RETRY", f"No selectable {sku} candidate"
                         else:
                             if selected not in self.station._visual_candidates:
                                 raise OrderError("Agent returned a candidate outside the current visual set")
+                            if self.station._visual_candidates[selected][0] != sku:
+                                raise OrderError("Agent candidate SKU differs from the planned item")
                             response.detection_id = selected
                             session["last_candidate"] = response.detection_id
+                            session["selected_sku"] = sku
                             response.status = "SUCCESS"
                 elif request.command == "pick":
                     if request.detection_id != session["last_candidate"] or not request.detection_id:
                         raise OrderError("Pick requires the selected candidate from this session")
+                    if planned is not None and session["selected_sku"] != target_sku:
+                        raise OrderError("Pick SKU differs from selected Agent plan item")
                     operation = self.server.store.begin_operation(order.order_id, "PICK_AND_PLACE",
                         f"{session['token']}:{request.sequence}")
                     self.station.pick_and_place(order, request.detection_id)
                     if sum(self.station._completed_by_sku.values()) <= before_completed:
                         raise OrderError("Pick returned without verified progress; cannot count completion")
+                    if planned is not None and (
+                        self.station._completed_by_sku.get(target_sku, 0) != before_by_sku.get(target_sku, 0) + 1
+                        or any(self.station._completed_by_sku.get(sku, 0) != count
+                               for sku, count in before_by_sku.items() if sku != target_sku)
+                    ):
+                        self.station.physical_state_uncertain = True
+                        raise OrderError("Verified progress differs from planned SKU; reconcile physical state")
                     session["alternatives"] = False
                     response.status = "SUCCESS"
                     response.remaining = order.total_items-sum(self.station._completed_by_sku.values())
+                    if planned is not None:
+                        session["plan_index"] += 1
+                        session["selected_sku"] = ""
                 elif request.command == "audit":
+                    if planned is not None and session["plan_index"] != len(planned):
+                        raise OrderError("Cannot audit before every planned item has been verified")
                     self.station.finish_order(order)
                     response.status = "SUCCESS"
                 else:

@@ -1,6 +1,7 @@
 # Internal behavior-tree session; not an independent business admission endpoint.
 string session_id
 uint32 max_attempts
+string plan_xml
 ---
 string status
 string error

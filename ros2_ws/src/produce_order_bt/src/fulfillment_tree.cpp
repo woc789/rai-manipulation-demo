@@ -29,10 +29,13 @@ class Capability : public BT::StatefulActionNode {
  public:
   Capability(const std::string& name, const BT::NodeConfig& config,
              std::shared_ptr<Session> session) : StatefulActionNode(name, config), s_(session) {}
-  static BT::PortsList providedPorts() { return {BT::InputPort<std::string>("command")}; }
+  static BT::PortsList providedPorts() { return {BT::InputPort<std::string>("command"),
+                                               BT::InputPort<std::string>("target_sku", "")}; }
   BT::NodeStatus onStart() override {
     if (s_->terminal) return BT::NodeStatus::FAILURE;
     command_ = getInput<std::string>("command").value();
+    auto target = getInput<std::string>("target_sku");
+    target_sku_ = target ? target.value() : "";
     if (command_ == "pick" && s_->remaining == 0) return BT::NodeStatus::SUCCESS;
     auto feedback = std::make_shared<Run::Feedback>(); feedback->stage = command_;
     s_->handle->publish_feedback(feedback);
@@ -43,6 +46,7 @@ class Capability : public BT::StatefulActionNode {
     auto request = std::make_shared<Step::Request>();
     request->session_id = s_->token; request->sequence = s_->sequence++;
     request->command = command_; request->detection_id = command_ == "pick" ? s_->candidate : "";
+    request->target_sku = target_sku_;
     auto sent = s_->client->async_send_request(request);
     future_ = sent.future.share(); request_id_ = sent.request_id;
     started_ = std::chrono::steady_clock::now();
@@ -74,7 +78,7 @@ class Capability : public BT::StatefulActionNode {
   }
  private:
   std::shared_ptr<Session> s_;
-  std::string command_;
+  std::string command_, target_sku_;
   rclcpp::Client<Step>::SharedFuture future_;
   int64_t request_id_ = 0;
   std::chrono::steady_clock::time_point started_;
@@ -88,6 +92,7 @@ class Executor : public rclcpp::Node {
       [this](auto, auto goal) {
         bool expected = false;
         if (goal->session_id.empty() || goal->max_attempts < 1 || goal->max_attempts > 10 ||
+            goal->plan_xml.size() > 32768 ||
             !busy_.compare_exchange_strong(expected, true)) return rclcpp_action::GoalResponse::REJECT;
         return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
       }, [](auto) { return rclcpp_action::CancelResponse::ACCEPT; },
@@ -105,7 +110,13 @@ class Executor : public rclcpp::Node {
     try {
       BT::BehaviorTreeFactory factory;
       factory.registerNodeType<Capability>("Capability", session);
-      factory.registerBehaviorTreeFromFile(ament_index_cpp::get_package_share_directory("produce_order_bt")+"/trees/item.xml");
+      const auto& xml = handle->get_goal()->plan_xml;
+      if (xml.empty()) {
+        // Legacy integration path. Production bridge always supplies a validated plan.
+        factory.registerBehaviorTreeFromFile(ament_index_cpp::get_package_share_directory("produce_order_bt")+"/trees/item.xml");
+      } else {
+        factory.registerBehaviorTreeFromText(xml);
+      }
       auto blackboard = BT::Blackboard::create();
       blackboard->set("attempts", int(handle->get_goal()->max_attempts));
       auto run_tree = [&](const std::string& name) {
@@ -118,10 +129,15 @@ class Executor : public rclcpp::Node {
         return state == BT::NodeStatus::SUCCESS && !handle->is_canceling();
       };
       bool good = true;
-      // Bound the number of completed item cycles as well as per-item retries.
-      unsigned cycles = 0;
-      while (good && session->remaining != 0 && cycles++ < 1000) good = run_tree("Item");
-      if (good && session->remaining == 0 && run_tree("Audit")) result->status = "COMPLETED";
+      if (xml.empty()) {
+        // Bound the number of completed item cycles as well as per-item retries.
+        unsigned cycles = 0;
+        while (good && session->remaining != 0 && cycles++ < 1000) good = run_tree("Item");
+        if (good && session->remaining == 0) good = run_tree("Audit");
+      } else {
+        good = run_tree("AgentPlan");
+      }
+      if (good && session->remaining == 0) result->status = "COMPLETED";
       else { result->status = session->status; result->error = session->error.empty() ? "Bounded behavior-tree execution failed" : session->error; }
     } catch (const std::exception& e) { result->status = "FAILED"; result->error = e.what(); }
     if (handle->is_canceling()) { result->status = "CANCELLED"; handle->canceled(result); }

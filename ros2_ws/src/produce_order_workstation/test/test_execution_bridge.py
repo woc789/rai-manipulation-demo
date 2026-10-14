@@ -85,3 +85,54 @@ def test_uncertain_motion_never_returns_retry(gateway):
     gateway.station.pick_and_place.side_effect = fail
     assert call(gateway,"pick",1,"v1").status == "FAILED"
     assert gateway.server.store.operations()[0]["state"] == "UNCERTAIN"
+
+
+def test_plan_sku_is_enforced_at_gateway(gateway):
+    gateway._active.update(plan_items=["corn"], plan_index=0, selected_sku="")
+    wrong = gateway.step(FulfillmentStep.Request(session_id="secret", sequence=0,
+        command="select", target_sku="apple"), FulfillmentStep.Response())
+    assert wrong.status == "FAILED" and gateway._active["terminal"]
+    gateway.station._agent_dispatcher.execute.assert_not_called()
+
+
+def test_verified_pick_advances_plan_once(gateway):
+    gateway._active.update(plan_items=["corn"], plan_index=0, selected_sku="")
+    selected = gateway.step(FulfillmentStep.Request(session_id="secret", sequence=0,
+        command="select", target_sku="corn"), FulfillmentStep.Response())
+    assert selected.status == "SUCCESS"
+    gateway.station._agent_dispatcher.execute.assert_called_once()
+    assert gateway.station._agent_dispatcher.execute.call_args.kwargs["target_sku"] == "corn"
+    def placed(*_):
+        gateway.station._completed_by_sku["corn"] = 1
+    gateway.station.pick_and_place.side_effect = placed
+    request = FulfillmentStep.Request(session_id="secret", sequence=1, command="pick",
+                                      detection_id="v1", target_sku="corn")
+    assert gateway.step(request, FulfillmentStep.Response()).status == "SUCCESS"
+    assert gateway._active["plan_index"] == 1
+    assert gateway.step(request, FulfillmentStep.Response()).status == "SUCCESS"
+    assert gateway._active["plan_index"] == 1
+    gateway.station.pick_and_place.assert_called_once()
+
+
+def test_candidate_of_wrong_sku_cannot_enter_pick(gateway):
+    gateway._active.update(plan_items=["corn"], plan_index=0, selected_sku="")
+    gateway.station._visual_candidates["v1"] = ("apple", (.5, 0, .05))
+    result = gateway.step(FulfillmentStep.Request(session_id="secret", sequence=0,
+        command="select", target_sku="corn"), FulfillmentStep.Response())
+    assert result.status == "FAILED"
+    gateway.station.pick_and_place.assert_not_called()
+
+
+def test_wrong_sku_progress_is_quarantined(gateway):
+    gateway._active.update(plan_items=["corn"], plan_index=0, selected_sku="")
+    selected = gateway.step(FulfillmentStep.Request(session_id="secret", sequence=0,
+        command="select", target_sku="corn"), FulfillmentStep.Response())
+    assert selected.status == "SUCCESS"
+    def wrong(*_):
+        gateway.station._completed_by_sku["apple"] = 1
+    gateway.station.pick_and_place.side_effect = wrong
+    result = gateway.step(FulfillmentStep.Request(session_id="secret", sequence=1,
+        command="pick", detection_id="v1", target_sku="corn"), FulfillmentStep.Response())
+    assert result.status == "FAILED" and gateway.station.physical_state_uncertain
+    assert gateway._active["plan_index"] == 0
+    assert gateway.server.store.operations()[0]["state"] == "UNCERTAIN"

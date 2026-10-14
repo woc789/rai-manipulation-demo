@@ -45,7 +45,14 @@ def child_agent_runtime(config, stop, ready, count, model_gate):
             count.value += 1
         assert model_gate.wait(10)
         names = [tool["function"]["name"] for tool in kwargs["tools"]]
-        if "query_orders" in names:
+        if names == ["propose_fulfillment_plan"]:
+            from produce_order_workstation.fulfillment_plan import context_digest
+            snapshot = json.loads(kwargs["messages"][-1]["content"])
+            name = "propose_fulfillment_plan"
+            arguments = {"version": 1, "context_digest": context_digest(snapshot),
+                         "items": [{"sku": sku, "visual_attempts": 3}
+                                   for sku, qty in snapshot["remaining"].items() for _ in range(qty)]}
+        elif "query_orders" in names:
             if kwargs["messages"][-1]["role"] == "tool":
                 return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
                     content="已查询订单真实状态；不会擅自改变订单。", tool_calls=[]))])
@@ -210,7 +217,7 @@ def test_model_mcp_service_and_real_motion_action_chain():
                 host.store.close()
         assert process.is_alive()
         assert gateway.order is None
-        assert count.value == 10  # 6 legacy + 2 candidate selections + 2 business turns.
+        assert count.value == 11  # 6 legacy + 1 plan + 2 selections + 2 business turns.
         # Hold the model response to exercise real busy rejection and cancellation.
         station._completed_by_sku = {}
         model_gate.clear()
@@ -222,9 +229,9 @@ def test_model_mcp_service_and_real_motion_action_chain():
             handle = get_future_result(station._agent_dispatcher.client.send_goal_async(goal), timeout_sec=5)
             assert handle is not None and handle.accepted
             deadline = time.monotonic() + 5
-            while count.value != 11 and time.monotonic() < deadline:
+            while count.value != 12 and time.monotonic() < deadline:
                 time.sleep(.02)
-            assert count.value == 11
+            assert count.value == 12
             busy = get_future_result(station._agent_dispatcher.client.send_goal_async(goal), timeout_sec=5)
             assert busy is not None and not busy.accepted
             cancellation = get_future_result(handle.cancel_goal_async(), timeout_sec=5)

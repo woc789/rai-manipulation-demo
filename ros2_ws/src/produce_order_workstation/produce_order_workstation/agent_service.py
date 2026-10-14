@@ -21,6 +21,7 @@ from produce_order_interfaces.action import ExecuteAgent, ExecuteBusiness
 from .agent import ProduceAgent, create_model
 from .mcp_client import WorkstationMCPClient
 from .order import Order, OrderCancelled, OrderError, OrderLine, OrderPaused, validate_order
+from .fulfillment_plan import validate_plan
 
 
 class ProduceAgentService(Node):
@@ -62,12 +63,17 @@ class ProduceAgentService(Node):
         try:
             validate_order(Order(request.order_id, request.zone,
                 tuple(OrderLine(line.sku, line.quantity) for line in request.lines)), self.config)
-            if getattr(request, "mode", "") not in ("", "run", "select"):
+            if getattr(request, "mode", "") not in ("", "run", "select", "plan"):
                 raise ValueError("Unknown Agent task mode")
+            if getattr(request, "mode", "") == "plan":
+                context = json.loads(request.planning_context_json)
+                if (context["order_id"] != request.order_id or context["zone"] != request.zone
+                    or context["requested"] != {line.sku: line.quantity for line in request.lines}):
+                    raise ValueError("Planning context does not match order")
             url = urlparse(request.mcp_url)
             if url.scheme != "http" or url.hostname != "127.0.0.1" or not url.port or url.path != "/mcp" or url.username or url.password or url.query or url.fragment or not request.mcp_token:
                 raise ValueError("Invalid local MCP endpoint")
-        except (ValueError, OrderError):
+        except (ValueError, TypeError, KeyError, OrderError):
             return GoalResponse.REJECT
         with self._lock:
             if self._busy or self._stopping.is_set() or self.model is None:
@@ -88,7 +94,7 @@ class ProduceAgentService(Node):
             handle.publish_feedback(ExecuteAgent.Feedback(stage=stage,
                 detail_json=json.dumps({"order_id": order_id, **details}, ensure_ascii=False)))
 
-        status, error, detection_id = "COMPLETED", "", ""
+        status, error, detection_id, plan_json = "COMPLETED", "", "", ""
         try:
             if cancelled():
                 raise OrderCancelled("Agent cancelled before connecting tools")
@@ -102,7 +108,13 @@ class ProduceAgentService(Node):
                 agent = ProduceAgent(order, self.config["agent"], client, model=self.model,
                     event_sink=event, cancel_requested=cancelled)
                 if getattr(request, "mode", "") == "select":
-                    detection_id = agent.select_candidate()
+                    detection_id = agent.select_candidate(getattr(request, "target_sku", "") or None)
+                elif getattr(request, "mode", "") == "plan":
+                    planning_context = json.loads(request.planning_context_json)
+                    if planning_context["completed"] != context["completed"]:
+                        raise OrderError("Planning context completion changed before Agent decision")
+                    plan_json = json.dumps(validate_plan(agent.plan_order(planning_context), planning_context),
+                                           ensure_ascii=False)
                 else:
                     agent.run()
         except OrderCancelled as exc:
@@ -116,7 +128,8 @@ class ProduceAgentService(Node):
                 self._busy = False
                 self._active_order = ""
             self.publish_status()
-        result = ExecuteAgent.Result(status=status, error=error, detection_id=detection_id)
+        result = ExecuteAgent.Result(status=status, error=error, detection_id=detection_id,
+                                     plan_json=plan_json)
         if status == "CANCELLED" and handle.is_cancel_requested:
             handle.canceled()
         elif status in ("COMPLETED", "PAUSED"):

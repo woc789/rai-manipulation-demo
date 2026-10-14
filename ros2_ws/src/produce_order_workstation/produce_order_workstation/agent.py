@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from .order import Order, OrderCancelled, OrderError, PerceptionMismatch
+from .fulfillment_plan import context_digest, validate_plan
 
 
 class AgentToolClient(Protocol):
@@ -94,12 +95,59 @@ class ProduceAgent:
         self._check_cancel()
         self._run_loop()
 
-    def select_candidate(self) -> str:
+    def plan_order(self, context: dict) -> dict:
+        """Ask for a bounded declarative plan, then reject any contract violation."""
+        self._check_cancel()
+        remaining = context["remaining"]
+        digest = context_digest(context)
+        allowed = [sku for sku, count in remaining.items() if count > 0]
+        if not allowed:
+            plan = {"version": 1, "context_digest": digest, "items": []}
+            return validate_plan(plan, context)
+        tool = {"type": "function", "function": {
+            "name": "propose_fulfillment_plan",
+            "description": "Choose an item order and bounded perception attempts; never include motion, coordinates or XML.",
+            "parameters": {"type": "object", "properties": {
+                "version": {"type": "integer", "enum": [1]},
+                "context_digest": {"type": "string", "enum": [digest]},
+                "items": {"type": "array", "minItems": sum(remaining.values()),
+                          "maxItems": sum(remaining.values()), "items": {
+                              "type": "object", "properties": {
+                                  "sku": {"type": "string", "enum": allowed},
+                                  "visual_attempts": {"type": "integer", "minimum": 1,
+                                      "maximum": context["limits"]["max_visual_attempts_per_item"]}},
+                              "required": ["sku", "visual_attempts"], "additionalProperties": False}}},
+            "required": ["version", "context_digest", "items"], "additionalProperties": False}}}
+        messages = [{"role": "system", "content":
+            "Plan this admitted produce order. Include every remaining item exactly once. "
+            "Inventory counts are uncertain observations, not proof of stock. "
+            "Prefer a sensible SKU sequence using the supplied observations; do not invent SKUs or claim completion. "
+            "Only propose the allowed tool arguments; execution will re-perceive and verify every item."},
+            {"role": "user", "content": json.dumps(context, ensure_ascii=False)}]
+        reply = self.model.chat.completions.create(model=self.model_name, messages=messages,
+            tools=[tool], tool_choice={"type": "function", "function": {"name": "propose_fulfillment_plan"}},
+            temperature=0)
+        self._check_cancel()
+        calls = reply.choices[0].message.tool_calls or []
+        if len(calls) != 1 or calls[0].function.name != "propose_fulfillment_plan":
+            raise OrderError("Agent did not return exactly one plan proposal")
+        try:
+            proposal = json.loads(calls[0].function.arguments)
+        except (ValueError, TypeError) as exc:
+            raise OrderError("Agent plan is not valid JSON") from exc
+        plan = validate_plan(proposal, context)
+        self._event("AGENT_PLAN_PROPOSED", context_digest=digest,
+                    items=plan["items"])
+        return plan
+
+    def select_candidate(self, target_sku: str | None = None) -> str:
         """BT owns execution; this Agent selects one actually perceived ID only."""
         self._check_cancel()
-        sku = self._next_sku()
+        sku = target_sku or self._next_sku()
         if sku is None:
             return ""
+        if sku not in self._remaining() or self._remaining()[sku] < 1:
+            raise OrderError("Requested selection SKU is not remaining in this order")
         result = self._invoke_tool("get_object_positions", {"sku": sku})
         detections = result.get("detections", [])
         self._event("AGENT_TOOL_RESULT", tool="get_object_positions", result=result)

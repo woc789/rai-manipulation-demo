@@ -6,10 +6,13 @@ string mcp_url
 string mcp_token
 # Empty/run: legacy full decision loop. select: perceive and select one item only.
 string mode
+string target_sku
+string planning_context_json
 ---
 string status
 string error
 string detection_id
+string plan_json
 ---
 string stage
 string detail_json

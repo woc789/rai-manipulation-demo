@@ -3,6 +3,7 @@ string session_id
 uint64 sequence
 string command
 string detection_id
+string target_sku
 ---
 string status
 string detection_id
