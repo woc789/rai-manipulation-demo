@@ -17,6 +17,12 @@ source install/setup.bash
 source src/examples/rai-manipulation-demo/ros2_ws/install/local_setup.bash
 set -u
 
+# Every ROS participant in this workcell runs on this host. Keep discovery on
+# loopback so a DHCP/VPN interface change cannot strand long-lived DDS peers.
+# A remote robot deployment must explicitly configure a different discovery
+# range for every participant, including the simulator bridge.
+export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
+
 # Keep C/C++ and BLAS worker arenas bounded while O3DE and the two vision
 # models share a 16 GiB workstation. The API key remains in the private file.
 export MALLOC_ARENA_MAX=2

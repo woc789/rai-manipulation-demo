@@ -59,7 +59,14 @@ class OrderQueue:
             _, missing = inventory.reserve_order(job.order)
             job.missing = missing
             if missing:
-                job.state, job.reason = "WAITING_STOCK", "可用视觉观测不足，等待复查或补货；不等同于确认缺货"
+                ambiguous = set(missing) & inventory.ambiguous_skus()
+                job.state = "WAITING_STOCK"
+                job.reason = (
+                    "同一位置被识别为不同商品（" + "、".join(sorted(ambiguous))
+                    + "）；请调整遮挡或视角并视觉复查，必要时人工核对；未确认前不抓取"
+                    if ambiguous else
+                    "可用视觉观测不足，等待复查或补货；不等同于确认缺货"
+                )
                 continue
             job.state, job.reason = "DISPATCHING", "资源已预留，正在发送执行请求"
             return job

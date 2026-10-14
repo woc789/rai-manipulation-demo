@@ -196,6 +196,7 @@ conda activate rai-jazzy
 source install/setup.bash
 source src/examples/rai-manipulation-demo/ros2_ws/install/setup.bash
 unset ALL_PROXY all_proxy  # this host has an unsupported socks:// proxy setting
+export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST  # 本机仿真；所有 ROS 终端保持一致
 ros2 launch produce_order_workstation workstation.launch.py
 ```
 
@@ -222,6 +223,11 @@ produce-order-workstation.service -f` if the machine becomes slow. This
 isolates failures and lowers allocator overhead; it does not guarantee that
 every possible high-memory order can complete. Stop the units only when no
 order is running.
+
+The start scripts set `ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST` for this
+single-host simulator, avoiding DDS locators tied to a DHCP/VPN address that
+may change mid-run. Set the same variable in any manual `ros2` CLI terminal.
+Remote ROS peers require an explicitly configured discovery policy instead.
 
 The Agent uses the installed `openai` Python package and the Bailian
 OpenAI-compatible API. `DASHSCOPE_API_KEY` may be set in the launch environment;

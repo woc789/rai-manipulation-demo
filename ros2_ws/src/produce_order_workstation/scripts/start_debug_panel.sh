@@ -8,4 +8,5 @@ export PATH=/usr/local/bin:/usr/bin:/bin
 source /opt/ros/jazzy/setup.bash
 source src/examples/rai-manipulation-demo/ros2_ws/install/local_setup.bash
 set -u
+export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
 exec ros2 run produce_order_workstation debug_panel

@@ -1,7 +1,8 @@
 """Thread-safe visual candidate ledger. Never seeded with simulator truth.
 
 Counts describe observations, not guaranteed stock. Identity is approximate
-same-SKU spatial association; all motion safety checks remain in Workstation.
+same-SKU spatial association; overlapping cross-SKU labels are quarantined.
+All motion safety checks remain in Workstation.
 """
 
 from dataclasses import dataclass, asdict
@@ -104,6 +105,22 @@ class InventoryLedger:
                             for old in uncertain_owned
                         ):
                             self._items[identity].state = "UNKNOWN"
+            # Independent text prompts can label the same RGB-D point as two
+            # products. Neither label is trustworthy stock until a different
+            # observation resolves the conflict. Never release an order owner.
+            for identity in identities:
+                item = self._items[identity]
+                conflicts = [other for other in self._items.values()
+                             if other.item_id != identity and other.sku != sku
+                             and other.frame_id == frame_id
+                             and other.state in ("AVAILABLE", "RESERVED", "UNKNOWN")
+                             and self.clock() - other.seen_monotonic <= self.ttl
+                             and dist(other.position[:2], item.position[:2]) <= self.radius
+                             and abs(other.position[2] - item.position[2]) <= self.radius]
+                if conflicts:
+                    item.state = "UNKNOWN"
+                    for other in conflicts:
+                        other.state = "UNKNOWN"
             # An empty scan means uncertainty, not deletion or proven zero stock.
             return identities
 
@@ -131,6 +148,24 @@ class InventoryLedger:
             self._expire()
             item = self._items[item_id]
             return item.state == "AVAILABLE" or (item.state == "RESERVED" and item.order_id == order_id)
+
+    def conflicting_labels(self, item_id):
+        """Fresh labels at one physical point; never used to infer the true SKU."""
+        with self._lock:
+            item = self._items[item_id]
+            return sorted({other.sku for other in self._items.values()
+                           if other.item_id != item_id and other.sku != item.sku
+                           and other.frame_id == item.frame_id
+                           and other.state in ("AVAILABLE", "RESERVED", "UNKNOWN")
+                           and self.clock() - other.seen_monotonic <= self.ttl
+                           and dist(other.position[:2], item.position[:2]) <= self.radius
+                           and abs(other.position[2] - item.position[2]) <= self.radius})
+
+    def ambiguous_skus(self):
+        with self._lock:
+            return {item.sku for item in self._items.values()
+                    if item.state == "UNKNOWN" and self.clock() - item.seen_monotonic <= self.ttl
+                    and self.conflicting_labels(item.item_id)}
 
     def select_for_order(self, item_id, order):
         """Atomically exchange one untouched reservation for a visible alternative.

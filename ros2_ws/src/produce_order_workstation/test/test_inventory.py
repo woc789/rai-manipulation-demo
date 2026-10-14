@@ -25,6 +25,29 @@ def test_observations_keep_identity_and_are_not_classification_guarantees():
     assert book.observe("apple", "base", [(0.301, 0.1, 0.04)])[0] == first
     assert not book.snapshot()["items"][0]["classification_verified"]
     assert book.observe("tomato", "base", [(0.301, 0.1, 0.04)])[0] != first
+    assert book.summary()["apple"]["UNKNOWN"] == 1
+    assert book.summary()["tomato"]["UNKNOWN"] == 1
+    assert book.ambiguous_skus() == {"apple", "tomato"}
+
+
+def test_cross_sku_overlap_is_not_promised_as_two_products():
+    from produce_order_workstation.order import Order, OrderLine
+
+    book, _ = ledger()
+    book.observe("apple", "base", [(0.3, 0.1, 0.04)])
+    book.observe("tomato", "base", [(0.301, 0.1, 0.04)])
+    _, missing = book.reserve_order(Order("ambiguous", "A", (OrderLine("apple", 1),)))
+    assert missing == {"apple": 1}
+    _, missing = book.reserve_order(Order("ambiguous-tomato", "A", (OrderLine("tomato", 1),)))
+    assert missing == {"tomato": 1}
+
+
+def test_old_other_sku_observation_does_not_poison_fresh_stock():
+    book, tick = ledger()
+    book.observe("apple", "base", [(0.3, 0.1, 0.04)])
+    tick[0] = 61.0
+    fresh = book.observe("tomato", "base", [(0.301, 0.1, 0.04)])[0]
+    assert next(row for row in book.snapshot()["items"] if row["item_id"] == fresh)["state"] == "AVAILABLE"
 
 
 def test_spatial_association_is_one_to_one_and_frame_scoped():

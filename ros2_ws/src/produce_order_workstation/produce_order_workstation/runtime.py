@@ -594,7 +594,8 @@ class Workstation:
         raw_points = self.detect(sku)
         points = []
         filtered = {"workspace_or_bin": 0, "previous_safety_rejection": 0,
-                    "duplicate": 0, "target_clearance": 0, "reservation": 0}
+                    "duplicate": 0, "target_clearance": 0, "reservation": 0,
+                    "class_ambiguity": 0}
         for point in sorted(raw_points, key=lambda value: (value[1], value[0])):
             try:
                 self._choose_source([point], zone)
@@ -631,6 +632,9 @@ class Workstation:
             if item_id in excluded:
                 filtered["target_clearance"] += 1
                 continue
+            if self.inventory.conflicting_labels(item_id):
+                filtered["class_ambiguity"] += 1
+                continue
             if not self.inventory.selectable(item_id, order.order_id):
                 filtered["reservation"] += 1
                 continue
@@ -658,7 +662,11 @@ class Workstation:
             "filtered_counts": filtered,
         }
         if not detections and raw_points:
-            result["empty_reason"] = "All localized candidates were rejected by workspace, safety, or reservation rules"
+            result["empty_reason"] = (
+                "Overlapping product labels need another view or operator review; no SKU was verified"
+                if filtered["class_ambiguity"] else
+                "All localized candidates were rejected by workspace, safety, or reservation rules"
+            )
             result.update(self._save_perception_image())
         self.event(order.order_id, "PERCEPTION_RESULT", **result)
         return result

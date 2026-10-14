@@ -368,7 +368,9 @@ def test_visual_tool_returns_detected_coordinates_without_simulator_labels():
 def test_new_perception_invalidates_old_ids_even_for_other_skus():
     station = Workstation(MagicMock(), CONFIG)
     station._scene_prepared = True
-    station.detect = MagicMock(return_value=[(0.29, -0.1, 0.04)])
+    station.detect = MagicMock(side_effect=lambda sku: [
+        (0.29, -0.1, 0.04) if sku == "corn" else (0.40, 0.1, 0.04)
+    ])
     order = Order("fresh-id", "A", (OrderLine("corn", 1), OrderLine("apple", 1)))
     first = station.get_object_positions(order, "corn")["detections"][0]["detection_id"]
     second = station.get_object_positions(order, "apple")["detections"][0]["detection_id"]
@@ -382,6 +384,20 @@ def test_new_perception_invalidates_old_ids_even_for_other_skus():
     third = station.get_object_positions(order, "apple")["detections"][0]["detection_id"]
     assert second != third
     assert second not in station._visual_candidates
+
+
+def test_cross_sku_visual_conflict_is_explained_before_any_motion():
+    station = Workstation(MagicMock(), CONFIG)
+    station._scene_prepared = True
+    station.detect = MagicMock(return_value=[(0.29, -0.1, 0.04)])
+    order = Order("ambiguous-vision", "A", (OrderLine("apple", 1), OrderLine("tomato", 1)))
+    station.get_object_positions(order, "apple")
+    result = station.get_object_positions(order, "tomato")
+    assert result["detections"] == []
+    assert result["filtered_counts"]["class_ambiguity"] == 1
+    assert "Overlapping product labels" in result["empty_reason"]
+    station.move = MagicMock()
+    station.move.assert_not_called()
 
 
 def test_fulfillment_adjusts_destination_without_rejecting_valid_reserved_source():

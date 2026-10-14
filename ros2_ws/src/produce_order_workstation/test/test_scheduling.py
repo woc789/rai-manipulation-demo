@@ -61,10 +61,24 @@ def test_cross_sku_spatial_candidate_cannot_be_promised_twice():
     book = InventoryLedger()
     book.observe("corn", "base", [(.3, .1, .04)])
     book.observe("apple", "base", [(.301, .1, .04)])
-    assert book.reserve_order(order("a", 1, 1))[1] == {"apple": 1}
+    assert book.reserve_order(order("a", 1, 1))[1] == {"corn": 1, "apple": 1}
     assert all(not item["order_id"] for item in book.snapshot()["items"])
-    book.reserve_order(order("a"))
+    assert book.reserve_order(order("a"))[1] == {"corn": 1}
     assert book.reserve_order(order("b", 0, 1))[1] == {"apple": 1}
+
+
+def test_queue_explains_class_conflict_instead_of_claiming_stockout():
+    book = InventoryLedger()
+    book.observe("corn", "base", [(.3, .1, .04)])
+    book.observe("apple", "base", [(.301, .1, .04)])
+    queue = OrderQueue()
+    queue.submit(order("ambiguous", 1, 1))
+    bins = MagicMock()
+    bins.orders = {}
+    bins.can_allocate.return_value = True
+    assert queue.select(bins, book) is None
+    assert queue.jobs["ambiguous"].state == "WAITING_STOCK"
+    assert "不同商品" in queue.jobs["ambiguous"].reason
 
 
 def test_rejected_candidate_can_be_replaced_without_stealing_another_order():
