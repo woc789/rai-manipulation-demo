@@ -1,142 +1,171 @@
-# 生鲜配货工作站测试总结与未覆盖风险
+# 生鲜配货工作站测试清单
 
-记录日期：2026-10-14。代码基线：`04fd55c`（一屏订单面板）。范围是 `ros2_ws/src/produce_order_workstation` 及其与 `produce_order_bt`、ROS 2、MCP、MoveIt/仿真之间的交互。本文件总结**已经有证据的测试**，并非“所有功能均已验收”的声明。
+记录日期：2026-10-14。对应代码：`04fd55c`（一屏订单面板）。这份清单回答三件事：**测了什么、怎么测、得到了什么结果**。`通过`只对列出的测试条件有效，不表示整个项目已经完成全面验收。
 
-## 1. 先看结论：测到哪一层
+## 一、测试结果速览
 
-| 测试层 | 最近一次结果 | 运行的是真实组件吗 | 能证明什么，不能证明什么 |
-|---|---:|---|---|
-| 工作站非 Qt 回归 | 279 通过、9 跳过；2 条第三方弃用警告 | 真实业务类、库存账本、临时 SQLite；大模型、视觉和机械技能多为替身 | 证明指定输入下的状态转换与安全约束；不证明真实相机、模型、机械臂表现 |
-| 隔离 ROS 集成 | 8 通过 | 真实 ROS 2 Action/Service、MCP HTTP 和已编译 C++ 行为树；相机、模型、机械执行使用测试端 | 证明进程/协议间消息链和若干成功、失败、暂停、取消分支；不证明真实仿真抓放 |
-| Qt 面板离屏回归 | 41 通过 | 真实 Qt 控件；`FakeWorker` 提供服务端反馈 | 证明按钮状态、显示和一屏布局；不证明现场服务的响应时间或实际操作全过程 |
-| 完整仿真订单记录 | 4 份：3 份完成，1 份视觉校验失败 | 实际 O3DE 场景、视觉管线、Agent/BT/ROS/MoveIt 流程 | 证明这四种具体订单当时的执行结果；样本过少，不能估计稳定成功率 |
+- **工作站自动化回归：**279 通过、9 跳过；2 条第三方依赖弃用警告。真实业务类和临时 SQLite 参与测试；大模型、相机、机械技能多数由替身提供。
+- **隔离 ROS 集成：**8 通过。真实 ROS 2 Action/Service、MCP HTTP、编译后的 C++ 行为树参与；模型、视觉和机械执行由测试端代替。
+- **Qt 界面离屏回归：**41 通过。真实 Qt 控件参与；服务端反馈由 `FakeWorker` 模拟。
+- **完整仿真订单记录：**4 份；3 份完成、1 份因视觉类别/位置冲突失败。只有这一组涉及真实仿真场景的抓放链路。
+- **计数提醒：**自动化测试之间有覆盖重叠，不能将 `279 + 8 + 41` 理解成真实抓取次数；跳过的集成测试需要单独在隔离 ROS 域启用。
 
-以上三组自动化测试有重叠：隔离集成用例在普通回归中通常因需要显式启用而跳过，**不能把通过数量相加为真实订单数量**。本次一屏界面改动后只重启了面板进程，未为界面改动新增真实订单，也未重置仿真现场。
+## 二、已执行的测试——逐条核对
 
-## 2. 测试方法与结果明细
+### A. 订单、库存和资源
 
-### 2.1 订单、库存、箱位和调度逻辑
+- **T01 订单输入与容量校验**
+  - 方法：构造合法、非法订单，调用实际订单校验与工作站接单入口。
+  - 结果：非法数量、目标和超出约束的订单被拒绝；测试不会因此启动抓放。
+  - 用例：[`test_order.py`](../ros2_ws/src/produce_order_workstation/test/test_order.py)、[`test_order_action.py`](../ros2_ws/src/produce_order_workstation/test/test_order_action.py)。
+- **T02 一单一箱与箱位占用**
+  - 方法：构造混合商品订单，检查分箱映射、箱位分配、完成后待取货状态。
+  - 结果：同一订单共用其订单箱；箱子未确认取走前不能当作空箱复用。
+  - 用例：[`test_fulfillment.py`](../ros2_ws/src/produce_order_workstation/test/test_fulfillment.py)、[`test_scheduling.py`](../ros2_ws/src/produce_order_workstation/test/test_scheduling.py)。
+- **T03 八单争用四箱**
+  - 方法：在账本中建立八单、四个箱位，连续调度，再确认取走其中一箱。
+  - 结果：箱位满时后续订单等待；取走并释放后，等待单获得箱位。
+  - 用例：[`test_targeted_reliability.py`](../ros2_ws/src/produce_order_workstation/test/test_targeted_reliability.py) 的 `test_eight_orders_four_bins_wait_and_pickup_unblocks`。
+- **T04 32 单并发预留八件库存**
+  - 方法：16 个测试线程发出 32 次预留请求，检查每件账本物品的所有者。
+  - 结果：最多八单预留成功；同一物品不会在账本中同时归属两单。
+  - 边界：这里的八件是测试直接写入的观测，不是相机实际识别。
+- **T05 两份四品类混合订单争用同一库存**
+  - 方法：四种商品各建立一件观测，提交普通单和高优先级单并调度。
+  - 结果：高优先级单先获得预留；另一单等待，不会再次占用相同物品。
+- **T06 取消、过期观测与未知库存**
+  - 方法：取消等待订单，或注入已过期/位置不明确的观测，再查询预留状态。
+  - 结果：取消可释放预留；过期和不确定的物品不能被当作可确认库存承诺给新订单。
+  - 用例：[`test_inventory.py`](../ros2_ws/src/produce_order_workstation/test/test_inventory.py)、[`test_scheduling.py`](../ros2_ws/src/produce_order_workstation/test/test_scheduling.py)、[`test_targeted_reliability.py`](../ros2_ws/src/produce_order_workstation/test/test_targeted_reliability.py)。
 
-主要用例位于 [`test_order.py`](../ros2_ws/src/produce_order_workstation/test/test_order.py)、[`test_inventory.py`](../ros2_ws/src/produce_order_workstation/test/test_inventory.py)、[`test_fulfillment.py`](../ros2_ws/src/produce_order_workstation/test/test_fulfillment.py)、[`test_scheduling.py`](../ros2_ws/src/produce_order_workstation/test/test_scheduling.py)、[`test_targeted_reliability.py`](../ros2_ws/src/produce_order_workstation/test/test_targeted_reliability.py)。
+### B. 感知数据、安全筛选与运动接口
 
-方法是创建受控订单和物品观测，调用真实 `OrderQueue`、`InventoryLedger`、`BinManager` 等业务对象，再检查队列、预留、箱位和完成数量。例如：
+- **T07 候选 ID 时效与跨品类冲突**
+  - 方法：注入已知类别、位置和候选 ID；模拟新一轮检测、位置重叠、类别不一致。
+  - 结果：旧 ID 不能继续用；同一位置不能被两类物品重复承诺；有冲突时在机械臂运动前拒绝。
+- **T08 漏检重试和候选重选**
+  - 方法：注入空检测、错误候选、安全可替换候选和局部歧义。
+  - 结果：重试有次数上限；可安全换候选时换候选，位置仍不确定时隔离，不盲目抓取。
+  - 边界：验证的是**检测结果处理逻辑**，没有测出视觉模型的真实漏检率。
+- **T09 场景生成与碰撞几何同步**
+  - 方法：用模拟场景/MoveIt 接口检查桌面、箱子、障碍的几何配置和场景同步回执。
+  - 结果：初始没有订单箱；接单后只生成分配箱；同步失败或规划场景未确认时不会假定障碍已经生效。
+- **T10 运动 Action 与阶段安全**
+  - 方法：注入运动反馈、取消、抓取后抬升失败等结果，检查后续动作和订单进度。
+  - 结果：反馈可传递；取消可下传；抬升失败不能继续搬运和装箱记数。
+  - 边界：部分直接技能测试覆盖旧显式 Agent 模式，不等同于当前默认 BT 路径的完整仿真验证。
+  - 用例：[`test_perception_logic.py`](../ros2_ws/src/produce_order_workstation/test/test_perception_logic.py)、[`test_order_action.py`](../ros2_ws/src/produce_order_workstation/test/test_order_action.py)、[`test_dynamic_scene.py`](../ros2_ws/src/produce_order_workstation/test/test_dynamic_scene.py)、[`test_planning_scene.py`](../ros2_ws/src/produce_order_workstation/test/test_planning_scene.py)、[`test_stock_layout.py`](../ros2_ws/src/produce_order_workstation/test/test_stock_layout.py)。
 
-- 八份订单争用四个箱位：前四单占位，后续等待；确认取走一箱后等待单才可进入。
-- 32 个并发预留请求争用八件账本物品：检查不会把同一件库存承诺给两个订单。
-- 两份四品类混合订单争用同一批物品：检查优先级和预留互斥；未获库存的订单进入等待。
-- 取消等待单释放其预留；过期或不确定的视觉观测不得当成可靠可售库存。
+### C. Agent、MCP 和行为树
 
-这里的“库存”测试对象是**程序账本和观测记录**。测试中给定的类别和坐标不是相机识别结果，所以它不能回答“真实桌面上苹果会不会漏检”。
+- **T11 Agent 规划输入与输出约束**
+  - 方法：给 Agent 一个含剩余数量、箱位和观测摘要的上下文；分别注入合法、漏项、多项、越界和过期摘要的计划。
+  - 结果：只接受覆盖**剩余每一件**的顺序与视觉重试预算；非法计划在运动前拒绝。
+- **T12 Agent 计划真正改变行为树执行顺序**
+  - 方法：让计划把苹果排在玉米前面，解析编译后的固定行为树节点，并在隔离 ROS 测试里执行。
+  - 结果：执行顺序为苹果 `select → pick`、玉米 `select → pick`、最后 `audit`；不是仅保存一段 Agent 文本。
+- **T13 MCP 权限边界**
+  - 方法：通过业务 MCP 查询、提出改单请求，再尝试未授权的批准和抓放调用。
+  - 结果：查询/建议可用；批准须走管理器和人工确认；业务接口不能直接触发物理动作。
+- **T14 模型超时、无效步骤和重复步骤**
+  - 方法：让模型超时、令会话过期，或重复发送同一步骤调用。
+  - 结果：失败分支退出，不因重试再次抓取已验证物品；不确定的物理结果留待核对。
+  - 用例：[`test_agent_boundary.py`](../ros2_ws/src/produce_order_workstation/test/test_agent_boundary.py)、[`test_agent_service.py`](../ros2_ws/src/produce_order_workstation/test/test_agent_service.py)、[`test_mcp_tools.py`](../ros2_ws/src/produce_order_workstation/test/test_mcp_tools.py)、[`test_fulfillment_plan.py`](../ros2_ws/src/produce_order_workstation/test/test_fulfillment_plan.py)、[`test_execution_bridge.py`](../ros2_ws/src/produce_order_workstation/test/test_execution_bridge.py)。
 
-### 2.2 感知结果处理、场景与运动接口
+### D. 持久化、恢复和故障注入
 
-主要用例位于 [`test_perception_logic.py`](../ros2_ws/src/produce_order_workstation/test/test_perception_logic.py)、[`test_order_action.py`](../ros2_ws/src/produce_order_workstation/test/test_order_action.py)、[`test_dynamic_scene.py`](../ros2_ws/src/produce_order_workstation/test/test_dynamic_scene.py)、[`test_planning_scene.py`](../ros2_ws/src/produce_order_workstation/test/test_planning_scene.py)、[`test_stock_layout.py`](../ros2_ws/src/produce_order_workstation/test/test_stock_layout.py)。
+- **T15 订单改动的事务回滚**
+  - 方法：批准订单变更时故意让 SQLite 保存失败，再检查内存订单、库存预留与数据库。
+  - 结果：各处一起回滚，不出现“内存改了、数据库没改”。
+- **T16 维护请求的两层状态**
+  - 方法：分别注入批准成功、实际启动被拒、执行失败、运行中重启和迟到结果。
+  - 结果：批准不等于执行成功；确定未启动可再次确认，结果不明不能自动重试。
+- **T17 已验证抓放结果的防重放**
+  - 方法：记录操作 `INTENT`/`VERIFIED`，模拟快照保存失败或进程重新打开后重发同一操作 ID。
+  - 结果：可查询已验证结果并补齐落后快照；不会再抓一次；仅有 `INTENT` 时要求核对现场。
+- **T18 MCP 与 BT 共享物理技能执行门**
+  - 方法：并发从两个入口请求同一工作站技能，并检查 BT 会话可用工具。
+  - 结果：互斥操作不会同时进入；正常 BT 订单的 MCP 会话只能使用规定的感知能力。
+- **T19 仿真时钟健康**
+  - 方法：用真实 ROS QoS 配置及可控时钟输入，模拟未收到、收包中断和时间冻结。
+  - 结果：异常时禁止继续运动；时钟恢复本身不能解除已隔离的物理任务。
+  - 用例：[`test_business_persistence.py`](../ros2_ws/src/produce_order_workstation/test/test_business_persistence.py)、[`test_targeted_reliability.py`](../ros2_ws/src/produce_order_workstation/test/test_targeted_reliability.py)。数据库测试使用临时文件，不修改用户数据库。
 
-方法是向工作站注入已知检测结果、候选 ID、位姿及动作反馈，或模拟场景/MoveIt 接口，再观察它是否拒绝错误数据、按期望更新规划场景。已覆盖：
+### E. 隔离 ROS 通信
 
-- 跨品类候选落在同一表面位置时，不能重复承诺；候选视觉类别与位置冲突时，必须在机械臂运动前拒绝；旧检测 ID 不能跨新一轮感知继续使用。
-- 安全的候选重选、局部歧义隔离、观测时效、抓取期间的物品身份维持，以及空检测达到次数上限后的停止。部分 `test_order_action.py` 用例还覆盖显式旧 Agent 执行模式，不能直接等同于当前默认 BT 路径的端到端验证。
-- 初始不生成订单箱；接单后只为分配到的订单生成相应箱子；规划场景的桌面、箱体、障碍几何与物理配置一致。同步失败或 MoveIt 未确认碰撞对象时，不继续按“障碍已生效”执行。
-- 运动 Action 的阶段反馈、取消传递、夹爪/高度参数及抬升失败后停止后续搬运。
+- **T20 C++ 行为树与 ROS Action/Service：6 个分支**
+  - 方法：在独立 DDS 域 71 启动编译后的 `fulfillment_tree`，运行 `success`、`planned`、`empty`、`uncertain`、`pause`、`cancel` 六组用例。
+  - 结果：六组均通过；检查了成功、计划顺序、空检测上限、结果不明、暂停与取消。
+  - 用例：[`test_bt_ros_integration.py`](../ros2_ws/src/produce_order_workstation/test/test_bt_ros_integration.py)。
+- **T21 独立 Agent 进程 → MCP HTTP → ROS 通信**
+  - 方法：启动独立 Agent 测试进程和真实 MCP/ROS 接口；用确定性模型、模拟感知和运动端响应。
+  - 结果：通信链路用例通过；不调用收费云模型，也不控制现场机械臂。
+  - 用例：[`test_mcp_ros_integration.py`](../ros2_ws/src/produce_order_workstation/test/test_mcp_ros_integration.py)。
+- **T22 ROS 队列服务与调度反馈**
+  - 方法：通过实际 ROS 接口提交、读取反馈、继续调度、确认取货；工作站技能由 `FakeStation` 代替。
+  - 结果：队列通信集成用例通过；不能据此断言真实抓放成功。
+  - 用例：[`test_queue_ros_integration.py`](../ros2_ws/src/produce_order_workstation/test/test_queue_ros_integration.py)。
 
-这些测试验证的是**感知结果如何被使用**与**规划场景对象如何构造/同步**，不是 GroundingDINO 的真实识别准确率，也不是实际 MoveIt 轨迹的碰撞统计。
+### F. 订单面板
 
-### 2.3 Agent、MCP 与行为树策略
+- **T23 提交、取消、清队列与迟到回执**
+  - 方法：`FakeWorker` 发出提交中、成功、超时、离线、拒绝和迟到回执；模拟用户点击对应按钮。
+  - 结果：按钮和提示随状态更新；请求超时后不永远卡住，迟到回执不覆盖新状态。
+- **T24 取货、恢复、日志和异常引导**
+  - 方法：给界面输入待取货、库存错误、需现场核对等状态，检查可用按钮和引导文本。
+  - 结果：待取货箱须确认取走；恢复不越过现场核对保护；清日志不清原始报告。
+- **T25 一屏布局**
+  - 方法：离屏创建 1080×900 窗口，检查不存在整页滚动容器；检查提交、队列、箱位、记录、异常操作和业务协作按钮坐标。
+  - 结果：控件在窗口内；另外人工检查了普通和异常状态的离屏截图。列表/日志内部仍可滚动。
+  - 边界：未覆盖小于 1080×900 的屏幕、所有字体或高 DPI 缩放。
+  - 用例：[`test_operator_panel.py`](../ros2_ws/src/produce_order_workstation/test/test_operator_panel.py)、[`test_panel_queue_clear.py`](../ros2_ws/src/produce_order_workstation/test/test_panel_queue_clear.py)。
 
-主要用例位于 [`test_agent_boundary.py`](../ros2_ws/src/produce_order_workstation/test/test_agent_boundary.py)、[`test_agent_service.py`](../ros2_ws/src/produce_order_workstation/test/test_agent_service.py)、[`test_mcp_tools.py`](../ros2_ws/src/produce_order_workstation/test/test_mcp_tools.py)、[`test_fulfillment_plan.py`](../ros2_ws/src/produce_order_workstation/test/test_fulfillment_plan.py)、[`test_execution_bridge.py`](../ros2_ws/src/produce_order_workstation/test/test_execution_bridge.py)。
+## 三、真实仿真订单——逐单记录
 
-方法是用确定性模型响应或故意构造非法工具调用，检查它们是否能通过接口和权限校验。已检查的典型场景包括：
+证据目录：`/home/wang/.local/share/produce_order_workstation/reports/`。下列结果从报告状态及事件读取；不是仅凭 UI 进度条判断。本次整理清单**没有重新发布订单**。
 
-- Agent 只能提出本订单**剩余商品的顺序与每件视觉重试次数**；漏项、多项、超出重试上限、未知字段、上下文摘要过期会被拒绝。
-- 合法策略由固定编译器生成行为树：改变 Agent 提议的商品顺序，行为树 `select → pick` 的执行顺序随之改变，最后才 `audit`。
-- 业务 MCP 可以查询与提出请求，但不能绕过操作员批准直接修改订单或触发抓放。正常行为树订单的 MCP 会话只开放感知能力，物理步骤仍由 BT/工作站执行桥推进。
-- 模型超时、执行会话过期、重复步骤调用、结果不确定等情况不应继续盲目运动；已确认的抓放结果可按操作 ID 查询，重复请求不得再抓一遍。
+- **L01 胡萝卜 ×1**：`agent-bt-live-20261014-a1.json`；`COMPLETED 1/1`。有感知、候选选择、抓取、抬升、放置和最终审计事件。
+- **L02 玉米 ×1＋胡萝卜 ×1**：`agent-bt-live-20261014-b2.json`；`COMPLETED 2/2`。两件均有完成记录，中间有返回观察姿态事件。
+- **L03 苹果 ×1＋番茄 ×1**：`agent-bt-live-20261014-c3.json`；`FAILED 0/2`。原因是 `CLASS_CONFLICT`（视觉类别/位置冲突），候选在运动前被拒绝。
+- **L04 番茄 ×1**：`agent-bt-live-20261014-d4.json`；`COMPLETED 1/1`。有抓取、放置和最终审计事件。
+- **L05 结论边界**：四单不是可靠的成功率样本；尤其苹果＋番茄场景实测失败。后续候选隔离逻辑有自动化回归，但这份记录中没有其修复后的同场景仿真复测。
 
-这证明了接口的**约束与失败保护**，不证明云模型总能提出好计划。更多职责边界见 [`agent_bt_planning.md`](agent_bt_planning.md)。
+## 四、尚未充分测试——按优先级列出
 
-### 2.4 持久化、故障恢复与并发安全
+- [ ] **U01 真实视觉稳定性（高）**：各品类、数量、遮挡与机械臂姿态组合；保留相机原图、检测框、候选筛选理由和抓取实物结果。当前注入式测试不能给出漏检/误检率。
+- [ ] **U02 运动中断与现场对账（高）**：分别在未抓、刚抓起、搬运、已放箱未写回的安全可控时点中断/重启；确认不重复抓、不重复记数，状态不明须人工核对。
+- [ ] **U03 长时连续多单（高）**：在同一场景交错执行排队、缺货、补货、取消、取货；逐步比对订单、箱位、库存账本与实物，检查资源不漂移。
+- [ ] **U04 真实 MoveIt 轨迹与避障（中）**：改变物品、箱位、障碍相对位置；记录规划耗时、轨迹与碰撞场景、执行反馈，验证失败后不继续装箱记数。
+- [ ] **U05 真实模型服务异常（中）**：模拟/验证限流、超时、无工具调用、非法参数和迟到回复；检查明确退出、资源释放与不重复运动。
+- [ ] **U06 全栈节点重启与时钟故障（中）**：在安全静止阶段分别重启面板、Agent、MCP、工作站；核对重连、订单状态和现场恢复提示。当前仅有分层测试。
+- [ ] **U07 更多显示环境（中）**：小屏幕、高 DPI、长订单号及长中文错误；当前一屏验收只覆盖 1080×900 等少量状态。
 
-主要用例位于 [`test_business_persistence.py`](../ros2_ws/src/produce_order_workstation/test/test_business_persistence.py) 和 [`test_targeted_reliability.py`](../ros2_ws/src/produce_order_workstation/test/test_targeted_reliability.py)。测试使用 `tmp_path` 建临时 SQLite，不写用户正在使用的业务数据库。
+## 五、复现命令与安全边界
 
-测试通过主动注入保存失败、进程重开、重复调用、并发调用等条件来检查：
+- **R01 工作站回归：**在 `/home/wang/rai_embodied_project` 执行：
 
-- 批准订单变更时，数据库写入失败须回滚内存订单、库存预留和请求状态，不能出现“页面已改、数据库没改”。
-- 维护请求区分“批准”与“真的执行成功”；明确未启动的拒绝可再次确认，运行中、失败或结果未知的操作不能自动重做。
-- 抓放 `INTENT`（已开始的意图）与 `VERIFIED`（已验证的结果）分别记录。快照落后于已验证日志时可以补齐业务进度，但不能仅凭数据库推断当前物理现场安全。
-- MCP 与行为树共享工作站级执行门，测试并发入口不会同时进入互斥的物理技能。
-- `/clock` 的 Best Effort QoS 兼容性、未收到时钟、收包中断和时间冻结都有定向检查；失联后的任务不能因时钟恢复而自动解除隔离。
+  ```bash
+  bash src/examples/rai-manipulation-demo/ros2_ws/src/produce_order_workstation/scripts/check_phase47.sh unit
+  ```
 
-这些属于**可控故障注入**。尚未在真实仿真运动的每一个瞬间断电、杀进程和重启，因此不能声称现场恢复已做完端到端验收。问题背景和修复证据见 [`TARGETED_RELIABILITY_FIX_2026-10-14.md`](TARGETED_RELIABILITY_FIX_2026-10-14.md)。
+- **R02 隔离 ROS 集成：**同一目录执行；脚本自动使用 `ROS_DOMAIN_ID=71`，不要改成现场工作站所在的域：
 
-### 2.5 ROS 2、MCP 和 C++ 行为树集成
+  ```bash
+  bash src/examples/rai-manipulation-demo/ros2_ws/src/produce_order_workstation/scripts/check_phase47.sh integration
+  ```
 
-测试文件为 [`test_bt_ros_integration.py`](../ros2_ws/src/produce_order_workstation/test/test_bt_ros_integration.py)、[`test_mcp_ros_integration.py`](../ros2_ws/src/produce_order_workstation/test/test_mcp_ros_integration.py)、[`test_queue_ros_integration.py`](../ros2_ws/src/produce_order_workstation/test/test_queue_ros_integration.py)。必须显式设置 `PRODUCE_ROS_INTEGRATION=1` 和独立的 `ROS_DOMAIN_ID=71`，避免测试节点连到用户工作站。
+- **R03 Qt 界面测试：**从干净终端执行；系统 Python 才有当前所需的 PyQt5：
 
-- C++ BT 测试启动实际编译的 `fulfillment_tree`，通过真实 `RunFulfillment` Action 与 `FulfillmentStep` Service 测试成功、Agent 计划顺序、空检测达到上限、不确定结果、暂停和取消，共六个参数场景。
-- MCP 测试让独立 Agent 进程通过真实 HTTP MCP 和 ROS 2 Service/Action 交换数据；模型回复与感知/运动服务为确定性测试端，不调用云模型，也不控制现场机械臂。
-- 队列测试通过真实 ROS 服务接口检查接单、顺位/优先级、执行反馈、继续调度与确认取货；工作站技能由 `FakeStation` 代替。
+  ```bash
+  cd /home/wang/rai_embodied_project/src/examples/rai-manipulation-demo
+  source /opt/ros/jazzy/setup.bash
+  source ros2_ws/install/local_setup.bash
+  export QT_QPA_PLATFORM=offscreen
+  export PYTHONPATH="$PWD/ros2_ws/src/produce_order_workstation:$PYTHONPATH"
+  /usr/bin/python3 -m pytest ros2_ws/src/produce_order_workstation/test/test_operator_panel.py \
+    -q -o addopts='' --tb=short
+  ```
 
-因此这里的“集成”是**真实通信栈 + 部分替身能力**，而非完整机器人场景。
+- **R04 真正的完整仿真验收：**上述命令不执行真实订单。仿真订单会改变库存与箱位、可能调用收费模型，需单独安排订单、观察和现场恢复步骤。
 
-### 2.6 操作面板与一屏布局
-
-[`test_operator_panel.py`](../ros2_ws/src/produce_order_workstation/test/test_operator_panel.py) 的 41 项测试使用系统 Python 的 PyQt5 与 `QT_QPA_PLATFORM=offscreen`，由 `FakeWorker` 发出可重复的状态和回执，不发布真实订单。覆盖提交中/成功/超时、取消、队列清理、取货、视觉复查、恢复提示、日志/历史记录、状态刷新顺序及按钮启停。[`test_panel_queue_clear.py`](../ros2_ws/src/produce_order_workstation/test/test_panel_queue_clear.py) 另测清队列等服务请求的超时、拒绝、重复 ID、掉线和迟到回执：等待必须结束，迟到结果不得篡改新状态。
-
-最新布局测试把窗口设为 1080×900，断言不存在整页 `QScrollArea`；提交、队列、箱位、记录、异常处理和“业务协作”操作按钮仍落在窗口可见区域。另用离屏截图人工检查过普通状态和异常状态。**列表与日志控件内部仍可滚动**；测试未覆盖所有桌面缩放比例、字体包或低于该尺寸的屏幕。
-
-### 2.7 真实仿真订单记录
-
-以下证据来自 `~/.local/share/produce_order_workstation/reports/` 的 JSON 报告；“完成”以报告状态及 `FINAL_AUDIT`/`ITEM_COMPLETED` 等事件为依据。本次撰写文档没有重新提交订单，也没有仅凭界面进度条推断物理成功。
-
-| 报告文件 | 订单 | 报告结果 | 关键观察 |
-|---|---|---|---|
-| `agent-bt-live-20261014-a1.json` | 胡萝卜 ×1 | `COMPLETED`，1/1 | 有感知、Agent 候选选择、抓取/抬升/放置、最终审计事件 |
-| `agent-bt-live-20261014-b2.json` | 玉米 ×1＋胡萝卜 ×1 | `COMPLETED`，2/2 | 两件均记录完成；两件间有返回观察姿态事件 |
-| `agent-bt-live-20261014-c3.json` | 苹果 ×1＋番茄 ×1 | `FAILED`，0/2 | `CLASS_CONFLICT`：视觉类别/位置安全校验冲突，未把错误候选交给抓放 |
-| `agent-bt-live-20261014-d4.json` | 番茄 ×1 | `COMPLETED`，1/1 | 有抓取、放置及最终审计事件 |
-
-这组结果只说明**这些具体场景与订单**，不能据此计算可信的漏检率或总体成功率。尤其 `c3` 说明混合水果/番茄场景仍有实测失败。它之后的候选隔离逻辑已有自动化测试，但本记录中没有一次修复后的同场景真实仿真复测。
-
-## 3. 尚未充分测出的风险与建议验收
-
-按业务影响排序；“建议”是未来测试方案，不表示已经通过。
-
-| 优先级 | 可能的问题 | 为什么现有测试不够 | 建议怎么测与通过条件 |
-|---|---|---|---|
-| 高 | 苹果/番茄等商品误检、漏检、遮挡导致选错候选或无法完单 | 多数测试直接注入类别和坐标；真实混合订单 `c3` 已失败 | 固定相机与桌面布局，按品类、数量、机械臂遮挡状态重复真实仿真订单；保存原图、检测框、候选筛选理由和最终实物结果。错抓应为 0，成功率与耗时需按样本统计，不凭单次通过判断 |
-| 高 | 真实运动中断后业务账本与夹爪/箱内物体不一致 | 故障注入主要发生在软件替身和 SQLite | 分别在未抓、刚抓起、搬运、已放入箱但未写回等安全可控时点中断，再重启核对：不重复抓、不重复记数，状态不明时明确等待人工 |
-| 高 | 连续多单、补货与取货交织时资源状态漂移 | 并发和资源互斥在模型中测过，真实场景只记录少量订单 | 在同一场景连续处理多单，穿插等待库存、补货、取消、取货；每一步比较订单状态、箱位、库存账本与实物，不能双重预留或提前复用箱位 |
-| 中 | MoveIt 规划失败、轨迹不合理、碰撞或狭小箱位放置失败 | ROS 集成测试的运动端是假服务；四单样本不足 | 选择不同物品、箱位和障碍相对位置运行，保存轨迹/碰撞场景、规划耗时、执行反馈；失败必须停在可解释状态，不继续装箱记数 |
-| 中 | 外部模型超时、限流、输出格式偏差导致任务长时间悬挂 | 自动化模型响应是确定性替身，不能复现真实 API 波动 | 在隔离环境注入超时、429、无工具调用、非法参数和迟到回复；检查超时、明确失败、释放占用及无重复运动，再做少量真实 API 验证 |
-| 中 | ROS 服务/Action 节点重启、发现延迟或仿真时钟异常时界面与后台状态不同步 | 已有 QoS、隔离 ROS 和界面替身测试，但非完整现场联动 | 在无物品夹持的安全阶段分别重启面板、Agent、MCP、工作站；检查状态重连、订单不重复、现场恢复提示清晰；时钟失联时禁止继续运动 |
-| 中 | 小屏幕、高 DPI、长订单号或较长中文错误信息裁切 | 只验证 1080×900 与几种常见状态 | 在实际显示器缩放设置下切换全部标签页与错误状态，确认按钮、请求行和完整错误说明可访问；低于 1080×900 需单独设计适配方案 |
-
-## 4. 如何安全复现现有自动化测试
-
-从仓库根目录 `/home/wang/rai_embodied_project` 执行。以下命令不构造真实用户订单；隔离 ROS 测试只连接域 71。不要把集成测试的 `ROS_DOMAIN_ID` 改成现场使用的域。
-
-```bash
-# 工作站非 Qt 回归；脚本负责加载现有 ROS Jazzy、Conda 环境与工作区
-bash src/examples/rai-manipulation-demo/ros2_ws/src/produce_order_workstation/scripts/check_phase47.sh unit
-
-# 真实 ROS/MCP/BT 通信，但模型/感知/机器人是测试替身
-bash src/examples/rai-manipulation-demo/ros2_ws/src/produce_order_workstation/scripts/check_phase47.sh integration
-```
-
-Qt 测试用 `/usr/bin/python3`，不是缺少 PyQt5 的 Conda Python：
-
-```bash
-cd /home/wang/rai_embodied_project/src/examples/rai-manipulation-demo
-source /opt/ros/jazzy/setup.bash
-source ros2_ws/install/local_setup.bash
-export QT_QPA_PLATFORM=offscreen
-export PYTHONPATH="$PWD/ros2_ws/src/produce_order_workstation:$PYTHONPATH"
-/usr/bin/python3 -m pytest ros2_ws/src/produce_order_workstation/test/test_operator_panel.py \
-  -q -o addopts='' --tb=short
-```
-
-如果当前终端先前加载过其他 Conda/ROS 环境，应先开一个干净的终端，避免 `PYTHONPATH` 和 `LD_LIBRARY_PATH` 混用。**真实仿真验收不由以上命令完成**：它需要运行中的场景、模型额度、人工观察和订单报告，且会改变现场库存与箱位，执行前应单独规划测试批次。
-
-## 5. 当前总体判断
-
-业务状态机、约束、隔离通信和界面交互已经有较系统的回归测试；这部分的证据较强。完整物理链路目前仍是**小样本、且存在一单视觉失败**，特别是视觉识别、复杂运动、长时连续多单和断点现场恢复，尚不足以称为全面验收。下一轮应优先做可重复的真实仿真测试矩阵，而不是继续增加仅使用替身的通过数量。
+**总体判断：**业务逻辑、通信和界面已有较系统的自动化回归；真实视觉、运动、长时多单和中断恢复仍缺足够的端到端证据，因此目前**不能称为全面测试完成**。
