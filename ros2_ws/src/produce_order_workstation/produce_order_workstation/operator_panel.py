@@ -7,32 +7,70 @@ from time import monotonic
 
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLineEdit, QMenu, QToolButton,
-    QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
-    QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QGridLayout,
+    QHBoxLayout,
+    QHeaderView,
+    QLineEdit,
+    QMenu,
+    QToolButton,
+    QMessageBox,
+    QPlainTextEdit,
+    QProgressBar,
+    QPushButton,
+    QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
 )
 import yaml
 
 from .order import Order, OrderLine, validate_order, readable_error
 from .operator_incident import describe_incident, resolution_steps
-from .panel_components import BinCard, Card, Metric, NAMES, ProduceGlyph, StageStrip, STYLE, STATE_NAMES, label
+from .panel_components import (
+    BinCard,
+    Card,
+    Metric,
+    NAMES,
+    ProduceGlyph,
+    StageStrip,
+    STYLE,
+    STATE_NAMES,
+    label,
+)
 
 
 class OperatorPanel(QWidget):
     """Draft, active task, and server resources are three independent states."""
 
-    def __init__(self, worker_factory, *, start_worker=True, config=None, report_dir=None):
+    def __init__(
+        self, worker_factory, *, start_worker=True, config=None, report_dir=None
+    ):
         super().__init__()
         if config is None:
             from ament_index_python.packages import get_package_share_directory
-            path = Path(get_package_share_directory("produce_order_workstation")) / "config/workstation.yaml"
+
+            path = (
+                Path(get_package_share_directory("produce_order_workstation"))
+                / "config/workstation.yaml"
+            )
             config = yaml.safe_load(path.read_text(encoding="utf-8"))
         self.config = config
-        self.report_dir = report_dir or Path.home() / ".local/share/produce_order_workstation/reports"
+        self.report_dir = (
+            report_dir or Path.home() / ".local/share/produce_order_workstation/reports"
+        )
         self._hidden_history_path = self.report_dir / ".panel_hidden_orders.json"
         try:
             hidden = json.loads(self._hidden_history_path.read_text(encoding="utf-8"))
-            self._hidden_history = set(hidden) if isinstance(hidden, list) and all(isinstance(v, str) for v in hidden) else set()
+            self._hidden_history = (
+                set(hidden)
+                if isinstance(hidden, list) and all(isinstance(v, str) for v in hidden)
+                else set()
+            )
         except (OSError, ValueError, TypeError):
             self._hidden_history = set()
         self._registration_receipt_id = None
@@ -82,7 +120,6 @@ class OperatorPanel(QWidget):
             self.worker.business_result.connect(self._on_business_result)
         self._new_id()
         self._refresh_history()
-        self._restore_last_task()
         self._refresh_draft()
         for signal, slot in (
             (self.worker.connected, self._set_connected),
@@ -97,9 +134,6 @@ class OperatorPanel(QWidget):
             signal.connect(slot)
         if hasattr(self.worker, "registered"):
             self.worker.registered.connect(self._on_registered)
-        self.history_timer = QTimer(self)
-        self.history_timer.timeout.connect(self._refresh_history)
-        self.history_timer.start(5000)
         self.health_timer = QTimer(self)
         self.health_timer.timeout.connect(self._check_status)
         self.health_timer.start(1000)
@@ -148,7 +182,12 @@ class OperatorPanel(QWidget):
         self.incident_next = label("", "muted", wrap=True)
         self.camera_result = label("", "muted", wrap=True)
         self.camera_result.hide()
-        for widget in (self.incident_title, self.incident_reason, self.incident_impact, self.incident_next):
+        for widget in (
+            self.incident_title,
+            self.incident_reason,
+            self.incident_impact,
+            self.incident_next,
+        ):
             widget.setParent(self.incident_card)
             widget.hide()
         self.incident_card.box.addWidget(self.camera_result)
@@ -167,7 +206,9 @@ class OperatorPanel(QWidget):
         self.incident_guide.clicked.connect(self._show_resolution_guide)
         self.help_menu_button = QToolButton()
         self.help_menu_button.setText("诊断与帮助")
-        self.help_menu_button.setStyleSheet("QToolButton { background: white; border: 1px solid #dbe5df; border-radius: 6px; padding: 8px 12px; }")
+        self.help_menu_button.setStyleSheet(
+            "QToolButton { background: white; border: 1px solid #dbe5df; border-radius: 6px; padding: 8px 12px; }"
+        )
         self.help_menu_button.setPopupMode(QToolButton.InstantPopup)
         menu = QMenu(self.help_menu_button)
         self.camera_action = menu.addAction("检查相机数据", self.incident_camera.click)
@@ -178,7 +219,12 @@ class OperatorPanel(QWidget):
         for button in (self.incident_camera, self.incident_guide, self.incident_logs):
             button.setParent(self.incident_card)
             button.hide()
-        for button in (self.incident_scan, self.incident_cancel, self.incident_recover, self.help_menu_button):
+        for button in (
+            self.incident_scan,
+            self.incident_cancel,
+            self.incident_recover,
+            self.help_menu_button,
+        ):
             actions.addWidget(button)
         actions.addStretch()
         self.incident_card.box.addLayout(actions)
@@ -267,7 +313,7 @@ class OperatorPanel(QWidget):
         self.boxes_card = boxes
         boxes.box.addWidget(label("订单箱位", "sectionTitle"))
         grid = QGridLayout()
-        self.bin_cards = [BinCard(f"A{i+1}") for i in range(4)]
+        self.bin_cards = [BinCard(f"A{i + 1}") for i in range(4)]
         for i, card in enumerate(self.bin_cards):
             grid.addWidget(card, i // 2, i % 2)
             card.update_resource({}, False, "fulfillment")
@@ -275,7 +321,9 @@ class OperatorPanel(QWidget):
         pickup_row = QHBoxLayout()
         self.pickup_orders = QComboBox()
         self.pickup_orders.setMinimumContentsLength(12)
-        self.pickup_orders.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.pickup_orders.setSizeAdjustPolicy(
+            QComboBox.AdjustToMinimumContentsLengthWithIcon
+        )
         self.pickup_orders.setToolTip("选择已完成订单，确认人工取走箱子")
         self.pickup_button = QPushButton("确认取货")
         self.pickup_button.clicked.connect(self._pickup)
@@ -289,10 +337,14 @@ class OperatorPanel(QWidget):
         records.setMaximumHeight(180)
         self.tabs = QTabWidget()
         self.clear_logs_button = QPushButton("清空日志")
-        self.clear_logs_button.setToolTip("仅清空事件和技术日志显示，保留订单报告及系统日志")
+        self.clear_logs_button.setToolTip(
+            "仅清空事件和技术日志显示，保留订单报告及系统日志"
+        )
         self.clear_logs_button.clicked.connect(self._clear_logs)
         self.tabs.setCornerWidget(self.clear_logs_button)
-        self.tabs.currentChanged.connect(lambda index: self.clear_logs_button.setVisible(index in (1, 2)))
+        self.tabs.currentChanged.connect(
+            lambda index: self.clear_logs_button.setVisible(index in (1, 2))
+        )
         self.clear_logs_button.hide()
         self.history = QTableWidget(0, 5)
         self.history.setHorizontalHeaderLabels(["订单", "商品", "结果", "完成", "取货"])
@@ -300,7 +352,9 @@ class OperatorPanel(QWidget):
         self.history.setSelectionBehavior(QTableWidget.SelectRows)
         self.history.verticalHeader().hide()
         self.history.verticalHeader().setDefaultSectionSize(40)
-        self.history.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.history.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeToContents
+        )
         self.history.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.history.setMinimumHeight(65)
         self.events = QPlainTextEdit()
@@ -316,7 +370,9 @@ class OperatorPanel(QWidget):
         history_layout.addWidget(self.history)
         history_actions = QHBoxLayout()
         self.history_clear_button = QPushButton("清除已结束记录")
-        self.history_clear_button.setToolTip("清除界面记录，保留原始报告；执行中、暂停、待取货及需恢复订单保留")
+        self.history_clear_button.setToolTip(
+            "清除界面记录，保留原始报告；执行中、暂停、待取货及需恢复订单保留"
+        )
         self.history_clear_button.clicked.connect(self._clear_history)
         self.history_restore_button = QPushButton("恢复显示")
         self.history_restore_button.clicked.connect(self._restore_history)
@@ -331,14 +387,22 @@ class OperatorPanel(QWidget):
         inventory_page = QWidget()
         inventory_layout = QVBoxLayout(inventory_page)
         inventory_layout.setContentsMargins(0, 6, 0, 0)
-        self.inventory_hint = label("等待视觉台账同步 · 候选数量不等于实物库存", "muted")
+        self.inventory_hint = label(
+            "等待视觉台账同步 · 候选数量不等于实物库存", "muted"
+        )
         inventory_layout.addWidget(self.inventory_hint)
         self.inventory_table = QTableWidget(0, 6)
-        self.inventory_table.setHorizontalHeaderLabels(["候选 ID", "类别（未确认）", "状态", "观测位置 / m", "时效", "订单"])
+        self.inventory_table.setHorizontalHeaderLabels(
+            ["候选 ID", "类别（未确认）", "状态", "观测位置 / m", "时效", "订单"]
+        )
         self.inventory_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.inventory_table.verticalHeader().hide()
-        self.inventory_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        self.inventory_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        self.inventory_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeToContents
+        )
+        self.inventory_table.horizontalHeader().setSectionResizeMode(
+            5, QHeaderView.Stretch
+        )
         self.inventory_table.setMinimumHeight(65)
         inventory_layout.addWidget(self.inventory_table)
         self.tabs.addTab(inventory_page, "视觉台账")
@@ -347,13 +411,17 @@ class OperatorPanel(QWidget):
         self.queue_summary = label("订单队列 · 等待同步", "sectionTitle")
         queue_layout.addWidget(self.queue_summary)
         self.queue_table = QTableWidget(0, 7)
-        self.queue_table.setHorizontalHeaderLabels(["订单", "优先级", "状态", "进度", "等待原因", "顺位", "商品"])
+        self.queue_table.setHorizontalHeaderLabels(
+            ["订单", "优先级", "状态", "进度", "等待原因", "顺位", "商品"]
+        )
         self.queue_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.queue_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.queue_table.setSelectionMode(QTableWidget.SingleSelection)
         self.queue_table.itemSelectionChanged.connect(self._update_controls)
         self.queue_table.verticalHeader().hide()
-        self.queue_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.queue_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeToContents
+        )
         self.queue_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
         self.queue_table.setMinimumHeight(90)
         queue_layout.addWidget(self.queue_table)
@@ -367,7 +435,12 @@ class OperatorPanel(QWidget):
         self.scan_button.clicked.connect(self._scan_inventory)
         self.replenish_button = QPushButton("补货准备")
         self.replenish_button.clicked.connect(self._replenish)
-        for button in (self.queue_cancel_button, self.queue_clear_button, self.scan_button, self.replenish_button):
+        for button in (
+            self.queue_cancel_button,
+            self.queue_clear_button,
+            self.scan_button,
+            self.replenish_button,
+        ):
             actions.addWidget(button)
         queue_layout.addLayout(actions)
         # Keep both resource views visible without making the whole page scroll.
@@ -386,9 +459,15 @@ class OperatorPanel(QWidget):
         business_review.setSpacing(4)
         query_row = QHBoxLayout()
         self.business_question = QLineEdit()
-        self.business_question.setPlaceholderText("询问订单状态、等待原因或申请修改订单")
+        self.business_question.setPlaceholderText(
+            "询问订单状态、等待原因或申请修改订单"
+        )
         self.business_ask = QPushButton("询问 Agent")
-        self.business_ask.clicked.connect(lambda: self._send_business("ask", {"question": self.business_question.text()}))
+        self.business_ask.clicked.connect(
+            lambda: self._send_business(
+                "ask", {"question": self.business_question.text()}
+            )
+        )
         query_row.addWidget(self.business_question, 1)
         query_row.addWidget(self.business_ask)
         business_query.addLayout(query_row)
@@ -401,15 +480,23 @@ class OperatorPanel(QWidget):
         self.business_requests.setSelectionBehavior(QTableWidget.SelectRows)
         self.business_requests.setSelectionMode(QTableWidget.SingleSelection)
         self.business_requests.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.business_requests.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.business_requests.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
         self.business_requests.setMinimumHeight(45)
         business_review.addWidget(self.business_requests, 1)
         buttons = QHBoxLayout()
         buttons.setSpacing(4)
-        for text, description, callback in (("查状态", "查询实际业务状态", lambda: self._send_business("explain_task_status", {})),
-                                            ("确认", "确认选中的业务请求", lambda: self._resolve_business(True)),
-                                            ("拒绝", "拒绝选中的业务请求", lambda: self._resolve_business(False)),
-                                            ("现场核对…", "重启后申请核对现场", self._request_scene_review)):
+        for text, description, callback in (
+            (
+                "查状态",
+                "查询实际业务状态",
+                lambda: self._send_business("explain_task_status", {}),
+            ),
+            ("确认", "确认选中的业务请求", lambda: self._resolve_business(True)),
+            ("拒绝", "拒绝选中的业务请求", lambda: self._resolve_business(False)),
+            ("现场核对…", "重启后申请核对现场", self._request_scene_review),
+        ):
             button = QPushButton(text)
             button.setToolTip(description)
             button.clicked.connect(callback)
@@ -436,7 +523,9 @@ class OperatorPanel(QWidget):
         try:
             reply = json.loads(payload)
             result = reply.get("result", {})
-            self.business_output.setPlainText(result.get("answer") or json.dumps(reply, ensure_ascii=False, indent=2))
+            self.business_output.setPlainText(
+                result.get("answer") or json.dumps(reply, ensure_ascii=False, indent=2)
+            )
         except (ValueError, TypeError):
             self.business_output.setPlainText(payload)
 
@@ -447,15 +536,31 @@ class OperatorPanel(QWidget):
             self.business_output.setPlainText("请先选中一个待确认请求。")
             return
         identifier, body = cell.data(Qt.UserRole)
-        retryable = approve and body.get("state") == "APPROVED" and body.get("execution_state") == "REJECTED"
+        retryable = (
+            approve
+            and body.get("state") == "APPROVED"
+            and body.get("execution_state") == "REJECTED"
+        )
         if body.get("state") != "PENDING" and not retryable:
             self.business_output.setPlainText("该请求已处理，不能重复确认。")
             return
         args = {"request_id": identifier}
         if approve:
-            description = "确认丢弃重启前未核对的旧现场并重建？旧订单保留历史进度并结束，不会记为已交付。" if body["kind"] == "request_scene_reset" else json.dumps(body, ensure_ascii=False, indent=2)
-            if QMessageBox.question(self, "确认业务操作", description,
-                                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            description = (
+                "确认丢弃重启前未核对的旧现场并重建？旧订单保留历史进度并结束，不会记为已交付。"
+                if body["kind"] == "request_scene_reset"
+                else json.dumps(body, ensure_ascii=False, indent=2)
+            )
+            if (
+                QMessageBox.question(
+                    self,
+                    "确认业务操作",
+                    description,
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                != QMessageBox.Yes
+            ):
                 return
             if body["kind"] == "request_scene_reset":
                 args["confirmation"] = "RESET_SCENE"
@@ -475,8 +580,15 @@ class OperatorPanel(QWidget):
         self.order_id.setToolTip(self.order_id.text())
 
     def _current_order(self):
-        return Order(self.order_id.text().strip(), "A", tuple(
-            OrderLine(sku, spin.value()) for sku, spin in self.quantity_spins.items() if spin.value()))
+        return Order(
+            self.order_id.text().strip(),
+            "A",
+            tuple(
+                OrderLine(sku, spin.value())
+                for sku, spin in self.quantity_spins.items()
+                if spin.value()
+            ),
+        )
 
     def _refresh_draft(self, _=None):
         order = self._current_order()
@@ -488,8 +600,14 @@ class OperatorPanel(QWidget):
         except ValueError:
             self._valid = False
         limit = self.config["zones"]["A"]["bin_capacity_items"]
-        free = next((b.get("bin_id") for b in self._bins if b.get("state") == "FREE"), None)
-        hint = f"每单上限 {limit} 件" if not self._valid else (f"预计箱位 {free} · 接单时分配" if free else "等待空闲箱位")
+        free = next(
+            (b.get("bin_id") for b in self._bins if b.get("state") == "FREE"), None
+        )
+        hint = (
+            f"每单上限 {limit} 件"
+            if not self._valid
+            else (f"预计箱位 {free} · 接单时分配" if free else "等待空闲箱位")
+        )
         if self._valid and self._state == "RECOVERY_REQUIRED":
             hint = "先处理失败现场；新订单只登记、暂不执行"
         self.draft_hint.setText(hint)
@@ -497,59 +615,126 @@ class OperatorPanel(QWidget):
 
     def _update_controls(self):
         synced = self._online and monotonic() - self._last_status < 5
-        self.submit_button.setEnabled(synced and self._valid and (
-            self._can_register and not self._registration_pending if self._queue_enabled
-            else self._can_submit and not self._order_active))
-        self.submit_button.setText("提交中…" if self._registration_pending else "提交订单")
+        self.submit_button.setEnabled(
+            synced
+            and self._valid
+            and (
+                self._can_register and not self._registration_pending
+                if self._queue_enabled
+                else self._can_submit and not self._order_active
+            )
+        )
+        self.submit_button.setText(
+            "提交中…" if self._registration_pending else "提交订单"
+        )
         waiting_pickup = any(b.get("state") == "WAITING_PICKUP" for b in self._bins)
         paused = any(b.get("state") == "PAUSED" for b in self._bins)
-        self.recover_button.setEnabled(synced and not self._order_active
-            and (self._can_recover or (self._state == "RECOVERY_REQUIRED" and (waiting_pickup or paused))))
+        self.recover_button.setEnabled(
+            synced
+            and not self._order_active
+            and (
+                self._can_recover
+                or (self._state == "RECOVERY_REQUIRED" and (waiting_pickup or paused))
+            )
+        )
         self.recovery_action.setEnabled(self.recover_button.isEnabled())
         if self._state == "RECOVERY_REQUIRED":
             if not self._can_recover and waiting_pickup:
-                ids = ', '.join(b['bin_id'] for b in self._bins if b.get('state') == 'WAITING_PICKUP')
-                self.workcell_notice.setText(f"现场需要恢复；先确认取走 {ids} 的已完成订单，再恢复失败现场。")
+                ids = ", ".join(
+                    b["bin_id"]
+                    for b in self._bins
+                    if b.get("state") == "WAITING_PICKUP"
+                )
+                self.workcell_notice.setText(
+                    f"现场需要恢复；先确认取走 {ids} 的已完成订单，再恢复失败现场。"
+                )
             elif self._can_recover:
-                self.workcell_notice.setText(self._state_reason if self._state_reason.startswith("场景恢复失败")
-                    else "失败现场需核对；确认后可恢复工作台，将清理失败箱和桌面。")
-        self.pickup_button.setEnabled(synced and self._can_pickup and self.pickup_orders.count() > 0 and not self._order_active)
-        self.cancel_button.setEnabled(synced and self._order_active and self._accepted
-            and not self._cancel_requesting and not self._cancel_waiting)
-        self.cancel_button.setText("请求取消中…" if self._cancel_requesting else
-                                   "等待安全取消" if self._cancel_waiting else "取消")
-        editable = not self._registration_pending if self._queue_enabled else not self._order_active
+                self.workcell_notice.setText(
+                    self._state_reason
+                    if self._state_reason.startswith("场景恢复失败")
+                    else "失败现场需核对；确认后可恢复工作台，将清理失败箱和桌面。"
+                )
+        self.pickup_button.setEnabled(
+            synced
+            and self._can_pickup
+            and self.pickup_orders.count() > 0
+            and not self._order_active
+        )
+        self.cancel_button.setEnabled(
+            synced
+            and self._order_active
+            and self._accepted
+            and not self._cancel_requesting
+            and not self._cancel_waiting
+        )
+        self.cancel_button.setText(
+            "请求取消中…"
+            if self._cancel_requesting
+            else "等待安全取消"
+            if self._cancel_waiting
+            else "取消"
+        )
+        editable = (
+            not self._registration_pending
+            if self._queue_enabled
+            else not self._order_active
+        )
         self.retry_button.setEnabled(editable)
         self.order_id.setEnabled(editable)
         self.priority.setEnabled(editable)
         for spin in self.quantity_spins.values():
             spin.setEnabled(editable)
-        self.scan_button.setEnabled(synced and self._queue_enabled
-            and not self._scan_request_pending and self._state != "SCANNING")
+        self.scan_button.setEnabled(
+            synced
+            and self._queue_enabled
+            and not self._scan_request_pending
+            and self._state != "SCANNING"
+        )
         row = self.queue_table.currentRow()
         cell = self.queue_table.item(row, 0) if row >= 0 else None
         job = getattr(self, "_queue_jobs", {}).get(cell.text(), {}) if cell else {}
-        self.queue_cancel_button.setEnabled(synced and self._queue_enabled
+        self.queue_cancel_button.setEnabled(
+            synced
+            and self._queue_enabled
             and self._queue_cancel_pending is None
-            and job.get("state") in ("QUEUED", "WAITING_STOCK", "WAITING_BIN", "PAUSED"))
-        self.queue_cancel_button.setText("正在取消…" if self._queue_cancel_pending else
-            "丢弃暂停订单…" if job.get("state") == "PAUSED" else "取消选中排队单")
-        self.queue_clear_button.setEnabled(synced and self._queue_enabled
-            and not self._queue_clear_pending and bool(self._clearable_orders()))
-        self.replenish_button.setEnabled(synced and self._queue_enabled and self._state == "READY")
+            and job.get("state") in ("QUEUED", "WAITING_STOCK", "WAITING_BIN", "PAUSED")
+        )
+        self.queue_cancel_button.setText(
+            "正在取消…"
+            if self._queue_cancel_pending
+            else "丢弃暂停订单…"
+            if job.get("state") == "PAUSED"
+            else "取消选中排队单"
+        )
+        self.queue_clear_button.setEnabled(
+            synced
+            and self._queue_enabled
+            and not self._queue_clear_pending
+            and bool(self._clearable_orders())
+        )
+        self.replenish_button.setEnabled(
+            synced and self._queue_enabled and self._state == "READY"
+        )
         self._refresh_incident(synced)
 
     def _refresh_incident(self, synced):
         job = getattr(self, "_queue_jobs", {}).get(self.task_id.text())
-        incident = describe_incident(self._state, self._state_reason, synced, job,
-                                     self.recover_button.isEnabled())
+        incident = describe_incident(
+            self._state,
+            self._state_reason,
+            synced,
+            job,
+            self.recover_button.isEnabled(),
+        )
         self.incident_card.setVisible(incident is not None)
         if incident is None:
             self._incident_order_id = None
             return
         self._incident_order_id = job.get("order_id") if job else None
         self.incident_title.setText(incident.title)
-        self.incident_reason.setText("原因：" + (incident.reason[:180] or "等待进一步核对"))
+        self.incident_reason.setText(
+            "原因：" + (incident.reason[:180] or "等待进一步核对")
+        )
         self.incident_reason.setToolTip(incident.reason)
         self.incident_impact.setText("影响：" + incident.impact)
         self.incident_next.setText("下一步：" + incident.next_step)
@@ -560,14 +745,25 @@ class OperatorPanel(QWidget):
         self.incident_recover.setVisible(self._state == "RECOVERY_REQUIRED")
         self.incident_recover.setEnabled(incident.recover)
         waiting_pickup = any(b.get("state") == "WAITING_PICKUP" for b in self._bins)
-        self.incident_recover.setText("先确认取货" if not self._can_recover and waiting_pickup
-            else "处理暂停订单" if not self._can_recover and any(b.get("state") == "PAUSED" for b in self._bins)
-            else "恢复工作台…")
+        self.incident_recover.setText(
+            "先确认取货"
+            if not self._can_recover and waiting_pickup
+            else "处理暂停订单"
+            if not self._can_recover
+            and any(b.get("state") == "PAUSED" for b in self._bins)
+            else "恢复工作台…"
+        )
         self.incident_logs.setEnabled(True)
         self.incident_camera.hide()
-        self.incident_camera.setEnabled(synced and not self._camera_checking and hasattr(self.worker, "check_camera"))
+        self.incident_camera.setEnabled(
+            synced
+            and not self._camera_checking
+            and hasattr(self.worker, "check_camera")
+        )
         self.camera_action.setEnabled(self.incident_camera.isEnabled())
-        self.incident_camera.setText("检查中…" if self._camera_checking else "检查相机数据")
+        self.incident_camera.setText(
+            "检查中…" if self._camera_checking else "检查相机数据"
+        )
 
     def _show_resolution_guide(self):
         job = getattr(self, "_queue_jobs", {}).get(self._incident_order_id)
@@ -590,7 +786,9 @@ class OperatorPanel(QWidget):
             return
         self._camera_checking = True
         self._camera_check_started = monotonic()
-        self.camera_result.setText("正在检查三路相机消息，约 2 秒；不运行视觉模型、不移动机械臂。")
+        self.camera_result.setText(
+            "正在检查三路相机消息，约 2 秒；不运行视觉模型、不移动机械臂。"
+        )
         self.camera_result.show()
         self.worker.check_camera(self.config["camera"])
         self._update_controls()
@@ -602,10 +800,18 @@ class OperatorPanel(QWidget):
             return
         self._camera_checking = False
         names = {"color": "图像", "depth": "深度", "info": "相机参数"}
-        summary = " / ".join(f"{names.get(row['kind'], row['kind'])}：{'收到' if row['messages'] else '未收到'}"
-                             for row in result["topics"])
-        next_step = "消息链路有数据，可重试库存复查；不代表识别、时间同步或三维坐标已正确。" if result["all_received"] else "先检查仿真是否暂停或退出，恢复后重新检查；不要重复下单。"
-        self.camera_result.setText(f"{datetime.now():%H:%M:%S} 检查 · " + summary + "。" + next_step)
+        summary = " / ".join(
+            f"{names.get(row['kind'], row['kind'])}：{'收到' if row['messages'] else '未收到'}"
+            for row in result["topics"]
+        )
+        next_step = (
+            "消息链路有数据，可重试库存复查；不代表识别、时间同步或三维坐标已正确。"
+            if result["all_received"]
+            else "先检查仿真是否暂停或退出，恢复后重新检查；不要重复下单。"
+        )
+        self.camera_result.setText(
+            f"{datetime.now():%H:%M:%S} 检查 · " + summary + "。" + next_step
+        )
         self.camera_result.setToolTip(payload)
         self.camera_result.show()
         self._on_notice(summary + "。" + next_step)
@@ -614,12 +820,23 @@ class OperatorPanel(QWidget):
     def _cancel_incident_order(self):
         identifier = self._incident_order_id
         job = getattr(self, "_queue_jobs", {}).get(identifier, {})
-        if not self.incident_cancel.isEnabled() or job.get("state") not in (
-                "QUEUED", "WAITING_STOCK", "WAITING_BIN") or job.get("completed", 0):
+        if (
+            not self.incident_cancel.isEnabled()
+            or job.get("state") not in ("QUEUED", "WAITING_STOCK", "WAITING_BIN")
+            or job.get("completed", 0)
+        ):
             self._on_notice("订单状态已变化，请核对当前任务；未发送取消请求")
             return
-        if QMessageBox.question(self, "取消等待订单", f"取消订单 {identifier}？\n不会清除其他订单或移动商品。",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes:
+        if (
+            QMessageBox.question(
+                self,
+                "取消等待订单",
+                f"取消订单 {identifier}？\n不会清除其他订单或移动商品。",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            == QMessageBox.Yes
+        ):
             self._on_notice(f"正在请求取消等待订单 {identifier}…")
             self.worker.cancel_queued(identifier)
 
@@ -630,15 +847,29 @@ class OperatorPanel(QWidget):
     def _check_status(self):
         if self._camera_checking and monotonic() - self._camera_check_started > 10:
             self._camera_checking = False
-            self.camera_result.setText("相机检查响应未确认，请先检查通信；不能据此认定相机故障。")
+            self.camera_result.setText(
+                "相机检查响应未确认，请先检查通信；不能据此认定相机故障。"
+            )
         if self._scan_request_pending and monotonic() - self._scan_requested_at > 10:
             self._scan_request_pending = False
             self._on_notice("复查请求状态尚未确认；请核对工作台状态，勿连续点击")
         synced = self._online and monotonic() - self._last_status < 5
-        if self._last_inventory and (not synced or monotonic() - self._last_inventory >= 5):
-            self.inventory_hint.setText("历史视觉观测 · 台账未同步 · 不可当作当前实物库存")
-        self.connection.setText("● 订单服务在线" if synced else "● 状态未同步" if self._online else "● 订单服务离线")
-        self.connection.setStyleSheet("color: #377a5c;" if synced else "color: #986d39;")
+        if self._last_inventory and (
+            not synced or monotonic() - self._last_inventory >= 5
+        ):
+            self.inventory_hint.setText(
+                "历史视觉观测 · 台账未同步 · 不可当作当前实物库存"
+            )
+        self.connection.setText(
+            "● 订单服务在线"
+            if synced
+            else "● 状态未同步"
+            if self._online
+            else "● 订单服务离线"
+        )
+        self.connection.setStyleSheet(
+            "color: #377a5c;" if synced else "color: #986d39;"
+        )
         self._update_metrics()
         self._update_controls()
         self._render_bins()
@@ -649,12 +880,21 @@ class OperatorPanel(QWidget):
             state = "INVENTORY_ERROR"
         if state != self._state:
             self.camera_result.hide()
-        self._state, self._can_submit, self._can_recover = state, can_submit, can_recover
+        self._state, self._can_submit, self._can_recover = (
+            state,
+            can_submit,
+            can_recover,
+        )
         self._state_reason = reason
         if state == "SCANNING":
             self._scan_request_pending = False
-        self.workcell_notice.setText("库存复查失败 · 订单保留，处理步骤见下方" if state == "INVENTORY_ERROR"
-            else reason if state not in ("READY", "RUNNING") else "")
+        self.workcell_notice.setText(
+            "库存复查失败 · 订单保留，处理步骤见下方"
+            if state == "INVENTORY_ERROR"
+            else reason
+            if state not in ("READY", "RUNNING")
+            else ""
+        )
         self.workcell_notice.setToolTip(reason)
         self.workcell_notice.setVisible(bool(self.workcell_notice.text()))
         self._update_metrics()
@@ -670,19 +910,36 @@ class OperatorPanel(QWidget):
         self._last_status = monotonic()
         self._bins = status.get("bins", [])
         selected_row = self.business_requests.currentRow()
-        selected_item = self.business_requests.item(selected_row, 0) if selected_row >= 0 else None
+        selected_item = (
+            self.business_requests.item(selected_row, 0) if selected_row >= 0 else None
+        )
         selected_request = selected_item.data(Qt.UserRole)[0] if selected_item else None
         self.business_requests.setRowCount(0)
         for body in status.get("approval_requests", []):
             row = self.business_requests.rowCount()
             self.business_requests.insertRow(row)
-            kinds = {"request_order_change": "修改订单", "request_replenishment": "补货准备", "request_scene_reset": "核对并重建旧现场"}
+            kinds = {
+                "request_order_change": "修改订单",
+                "request_replenishment": "补货准备",
+                "request_scene_reset": "核对并重建旧现场",
+            }
             states = {"PENDING": "待确认", "APPROVED": "已确认", "REJECTED": "已拒绝"}
-            execution = {"ADMITTING": "准入中", "RUNNING": "执行中", "SUCCEEDED": "已完成", "REJECTED": "未启动，可重试", "FAILED": "执行失败，需核对", "UNKNOWN": "结果未知，需核对"}
+            execution = {
+                "ADMITTING": "准入中",
+                "RUNNING": "执行中",
+                "SUCCEEDED": "已完成",
+                "REJECTED": "未启动，可重试",
+                "FAILED": "执行失败，需核对",
+                "UNKNOWN": "结果未知，需核对",
+            }
             label = states.get(body["state"], body["state"])
             if body.get("execution_state"):
-                label += " · " + execution.get(body["execution_state"], body["execution_state"])
-            for column, value in enumerate((body["request_id"][:10], kinds.get(body["kind"],body["kind"]), label)):
+                label += " · " + execution.get(
+                    body["execution_state"], body["execution_state"]
+                )
+            for column, value in enumerate(
+                (body["request_id"][:10], kinds.get(body["kind"], body["kind"]), label)
+            ):
                 cell = QTableWidgetItem(str(value))
                 cell.setToolTip(json.dumps(body, ensure_ascii=False, indent=2))
                 if column == 0:
@@ -692,22 +949,45 @@ class OperatorPanel(QWidget):
                 self.business_requests.selectRow(row)
         self._queue_enabled = bool(status.get("queue_enabled"))
         self._can_register = bool(status.get("can_register"))
-        if self._registration_pending and self._registration_reconcile_allowed and any(job.get("order_id") == self._registration_order_id
-                for job in status.get("orders", [])):
-            self._on_registered(True, self._registration_order_id, "状态台账确认订单已登记")
+        if (
+            self._registration_pending
+            and self._registration_reconcile_allowed
+            and any(
+                job.get("order_id") == self._registration_order_id
+                for job in status.get("orders", [])
+            )
+        ):
+            self._on_registered(
+                True, self._registration_order_id, "状态台账确认订单已登记"
+            )
         self._render_queue(status.get("orders", []))
         if self._registration_receipt_id:
             job = self._queue_jobs.get(self._registration_receipt_id)
             if job:
-                state_name = {"QUEUED": "排队", "WAITING_STOCK": "等待库存核对",
-                    "WAITING_BIN": "等待箱位", "DISPATCHING": "准备执行", "RUNNING": "执行中",
-                    "PAUSED": "安全暂停", "WAITING_PICKUP": "待取货", "COLLECTED": "已取货",
-                    "CANCELED": "已取消", "CANCELLED": "已取消", "FAILED": "失败"}.get(job["state"], job["state"])
-                self.registration_receipt.setText(f"✓ 已登记：{job['order_id']}\n当前状态：{state_name} · {job.get('reason', '')}")
+                state_name = {
+                    "QUEUED": "排队",
+                    "WAITING_STOCK": "等待库存核对",
+                    "WAITING_BIN": "等待箱位",
+                    "DISPATCHING": "准备执行",
+                    "RUNNING": "执行中",
+                    "PAUSED": "安全暂停",
+                    "WAITING_PICKUP": "待取货",
+                    "COLLECTED": "已取货",
+                    "CANCELED": "已取消",
+                    "CANCELLED": "已取消",
+                    "FAILED": "失败",
+                }.get(job["state"], job["state"])
+                self.registration_receipt.setText(
+                    f"✓ 已登记：{job['order_id']}\n当前状态：{state_name} · {job.get('reason', '')}"
+                )
         self._can_pickup = bool(status.get("can_pickup"))
         selected = self.pickup_orders.currentData()
         self.pickup_orders.clear()
-        waiting = {b["order_id"]: b.get("bin_id", "") for b in self._bins if b.get("state") == "WAITING_PICKUP" and b.get("order_id")}
+        waiting = {
+            b["order_id"]: b.get("bin_id", "")
+            for b in self._bins
+            if b.get("state") == "WAITING_PICKUP" and b.get("order_id")
+        }
         for order_id, bin_id in waiting.items():
             self.pickup_orders.addItem(f"{bin_id} · …{order_id[-12:]}", order_id)
         index = self.pickup_orders.findData(selected)
@@ -717,40 +997,94 @@ class OperatorPanel(QWidget):
         self._update_metrics()
         self._refresh_draft()
         self._check_status()
+        self._refresh_history()
 
     def _render_queue(self, orders):
         row = self.queue_table.currentRow()
         selected_cell = self.queue_table.item(row, 0) if row >= 0 else None
         selected_id = selected_cell.text() if selected_cell else None
         self._queue_jobs = {job["order_id"]: job for job in orders}
-        names = {"QUEUED": "排队", "DISPATCHING": "资源已预留", "RUNNING": "执行中",
-                 "WAITING_STOCK": "等待库存核对", "WAITING_BIN": "等待箱位",
-                 "WAITING_PICKUP": "等待取货", "COLLECTED": "已取货", "FAILED": "失败",
-                 "CANCELED": "已取消", "CANCELLED": "已取消", "PAUSED": "暂停 · 保留箱位",
-                 "EXECUTION_UNCERTAIN": "执行结果不明 · 待核对"}
-        visible_orders = [job for job in orders if job["state"] not in ("CANCELED", "CANCELLED")
-            and (job["order_id"] not in self._hidden_history or self._history_protected(job["order_id"], job["state"]))]
+        names = {
+            "QUEUED": "排队",
+            "DISPATCHING": "资源已预留",
+            "RUNNING": "执行中",
+            "WAITING_STOCK": "等待库存核对",
+            "WAITING_BIN": "等待箱位",
+            "WAITING_PICKUP": "等待取货",
+            "COLLECTED": "已取货",
+            "FAILED": "失败",
+            "CANCELED": "已取消",
+            "CANCELLED": "已取消",
+            "PAUSED": "暂停 · 保留箱位",
+            "EXECUTION_UNCERTAIN": "执行结果不明 · 待核对",
+            "RECOVERY_REQUIRED": "需要现场核对",
+        }
+        visible_orders = [
+            job
+            for job in orders
+            if job["state"] not in ("CANCELED", "CANCELLED")
+            and (
+                job["order_id"] not in self._hidden_history
+                or self._history_protected(job["order_id"], job["state"])
+            )
+        ]
         pending_states = ("QUEUED", "WAITING_STOCK", "WAITING_BIN", "PAUSED")
-        waiting_jobs = sorted((job for job in orders if job["state"] in pending_states and not job.get("review_required")),
-                              key=lambda job: -job["priority"])
-        ranks = {job["order_id"]: str(index + 1) for index, job in enumerate(waiting_jobs)}
+        waiting_jobs = sorted(
+            (
+                job
+                for job in orders
+                if job["state"] in pending_states and not job.get("review_required")
+            ),
+            key=lambda job: -job["priority"],
+        )
+        ranks = {
+            job["order_id"]: str(index + 1) for index, job in enumerate(waiting_jobs)
+        }
         running_states = ("RUNNING", "DISPATCHING", "EXECUTION_UNCERTAIN")
-        visible_orders.sort(key=lambda job: (0 if job["state"] in running_states else
-            1 if job["state"] in pending_states else 2, -job["priority"] if job["state"] in pending_states else 0))
-        self.queue_summary.setText(f"订单队列 · 执行 {sum(j['state'] in running_states for j in orders)} · 等待 {len(waiting_jobs)}")
+        visible_orders.sort(
+            key=lambda job: (
+                0
+                if job["state"] in running_states
+                else 1
+                if job["state"] in pending_states
+                else 2,
+                -job["priority"] if job["state"] in pending_states else 0,
+            )
+        )
+        self.queue_summary.setText(
+            f"订单队列 · 执行 {sum(j['state'] in running_states for j in orders)} · 等待 {len(waiting_jobs)}"
+        )
         self.queue_table.setRowCount(len(visible_orders))
         for row, job in enumerate(visible_orders):
             reason = job.get("reason", "")
-            if self._state == "RECOVERY_REQUIRED" and job["state"] in ("QUEUED", "WAITING_STOCK", "WAITING_BIN"):
+            if self._state == "RECOVERY_REQUIRED" and job["state"] in (
+                "QUEUED",
+                "WAITING_STOCK",
+                "WAITING_BIN",
+            ):
                 reason = "现场需要恢复，尚未执行 · " + reason
             if job.get("missing"):
-                reason += " · " + " / ".join(f"{NAMES.get(sku, sku)}缺少可用观测 {count}"
-                                                for sku, count in job["missing"].items())
-            state_name = "等待人工复查 · 保留进度" if job.get("review_required") else names.get(job["state"], job["state"])
-            values = [job["order_id"], job["priority"], state_name,
-                      f"{job['completed']}/{job['total']}", reason,
-                      ranks.get(job["order_id"], "—"),
-                      " / ".join(f"{NAMES.get(line['sku'], line['sku'])}×{line['quantity']}" for line in job.get("lines", []))]
+                reason += " · " + " / ".join(
+                    f"{NAMES.get(sku, sku)}缺少可用观测 {count}"
+                    for sku, count in job["missing"].items()
+                )
+            state_name = (
+                "等待人工复查 · 保留进度"
+                if job.get("review_required")
+                else names.get(job["state"], job["state"])
+            )
+            values = [
+                job["order_id"],
+                job["priority"],
+                state_name,
+                f"{job['completed']}/{job['total']}",
+                reason,
+                ranks.get(job["order_id"], "—"),
+                " / ".join(
+                    f"{NAMES.get(line['sku'], line['sku'])}×{line['quantity']}"
+                    for line in job.get("lines", [])
+                ),
+            ]
             for col, value in enumerate(values):
                 cell = QTableWidgetItem(str(value))
                 cell.setToolTip(str(value))
@@ -760,7 +1094,14 @@ class OperatorPanel(QWidget):
         self.history_clear_button.setEnabled(self.history.rowCount() > 0)
         if not self._queue_enabled:
             return
-        running = next((job for job in orders if job["state"] in ("RUNNING", "DISPATCHING", "EXECUTION_UNCERTAIN")), None)
+        running = next(
+            (
+                job
+                for job in orders
+                if job["state"] in ("RUNNING", "DISPATCHING", "EXECUTION_UNCERTAIN")
+            ),
+            None,
+        )
         self._order_active = self._accepted = running is not None
         if running:
             if self._cancel_for_id != running["order_id"]:
@@ -773,10 +1114,15 @@ class OperatorPanel(QWidget):
             self._set_progress(running["completed"], running["total"])
         else:
             self._cancel_requesting = self._cancel_waiting = False
-            waiting = [job for job in orders if job["state"] in (
-                "QUEUED", "WAITING_STOCK", "WAITING_BIN", "PAUSED")]
-            focus = next((job for job in waiting if job["order_id"] == self._submitted_order_id),
-                         waiting[0] if waiting else None)
+            waiting = [
+                job
+                for job in orders
+                if job["state"] in ("QUEUED", "WAITING_STOCK", "WAITING_BIN", "PAUSED")
+            ]
+            focus = next(
+                (job for job in waiting if job["order_id"] == self._submitted_order_id),
+                waiting[0] if waiting else None,
+            )
             if self._registration_pending:
                 return
             if focus:
@@ -789,12 +1135,36 @@ class OperatorPanel(QWidget):
                 self.failure_reason.setVisible(bool(focus.get("reason")))
                 self._last_queue_terminal = None
                 return
-            terminal = max((job for job in orders if job["state"] in (
-                "WAITING_PICKUP", "FAILED", "CANCELLED", "CANCELED")),
-                key=lambda job: job.get("finished_sequence", 0), default=None)
-            terminal = next((job for job in orders if job["order_id"] == self._submitted_order_id
-                and job["state"] in ("CANCELED", "CANCELLED")), terminal)
-            if terminal and self._last_queue_terminal != (terminal["order_id"], terminal["state"]):
+            terminal = max(
+                (
+                    job
+                    for job in orders
+                    if job["state"]
+                    in (
+                        "WAITING_PICKUP",
+                        "COLLECTED",
+                        "RECOVERY_REQUIRED",
+                        "FAILED",
+                        "CANCELLED",
+                        "CANCELED",
+                    )
+                ),
+                key=lambda job: job.get("finished_sequence", 0),
+                default=None,
+            )
+            terminal = next(
+                (
+                    job
+                    for job in orders
+                    if job["order_id"] == self._submitted_order_id
+                    and job["state"] in ("CANCELED", "CANCELLED")
+                ),
+                terminal,
+            )
+            if terminal and self._last_queue_terminal != (
+                terminal["order_id"],
+                terminal["state"],
+            ):
                 self._last_queue_terminal = (terminal["order_id"], terminal["state"])
                 self.task_id.setText(terminal["order_id"])
                 self.task_status.setText(names[terminal["state"]])
@@ -805,17 +1175,31 @@ class OperatorPanel(QWidget):
                 self.failure_reason.setVisible(terminal["state"] != "WAITING_PICKUP")
 
     def _clearable_orders(self):
-        return [identifier for identifier, job in getattr(self, "_queue_jobs", {}).items()
-                if job["state"] in ("QUEUED", "WAITING_STOCK", "WAITING_BIN")
-                and not job.get("completed", 0)]
+        return [
+            identifier
+            for identifier, job in getattr(self, "_queue_jobs", {}).items()
+            if job["state"] in ("QUEUED", "WAITING_STOCK", "WAITING_BIN")
+            and not job.get("completed", 0)
+        ]
 
     def _clear_queue(self):
         ids = self._clearable_orders()
-        if not ids or self._queue_clear_pending or not self.queue_clear_button.isEnabled():
+        if (
+            not ids
+            or self._queue_clear_pending
+            or not self.queue_clear_button.isEnabled()
+        ):
             return
-        if QMessageBox.question(self, "清除待执行队列",
+        if (
+            QMessageBox.question(
+                self,
+                "清除待执行队列",
                 f"取消当前 {len(ids)} 份尚未执行的订单？\n正在执行、已部分装箱和待取货订单将保留。",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            != QMessageBox.Yes
+        ):
             return
         self._queue_clear_pending = True
         self.queue_clear_button.setEnabled(False)
@@ -840,7 +1224,14 @@ class OperatorPanel(QWidget):
             order_id = self.queue_table.item(row, 0).text()
             job = self._queue_jobs[order_id]
             if job["state"] == "PAUSED":
-                if QMessageBox.question(self, "丢弃部分订单", "仅允许丢弃安全暂停的订单。确认移走已装商品和订单箱？") == QMessageBox.Yes:
+                if (
+                    QMessageBox.question(
+                        self,
+                        "丢弃部分订单",
+                        "仅允许丢弃安全暂停的订单。确认移走已装商品和订单箱？",
+                    )
+                    == QMessageBox.Yes
+                ):
                     self._queue_cancel_pending = order_id
                     self._on_notice("已请求丢弃安全暂停订单，等待服务确认…")
                     self.worker.cancel_queued(order_id, True)
@@ -881,7 +1272,12 @@ class OperatorPanel(QWidget):
         self._append(message)
 
     def _replenish(self):
-        if QMessageBox.question(self, "补货准备", "替换桌面剩余货源？已完成的订单箱将保留。") == QMessageBox.Yes:
+        if (
+            QMessageBox.question(
+                self, "补货准备", "替换桌面剩余货源？已完成的订单箱将保留。"
+            )
+            == QMessageBox.Yes
+        ):
             self._on_notice("已请求补货准备，等待服务确认…")
             self.worker.replenish()
 
@@ -903,7 +1299,9 @@ class OperatorPanel(QWidget):
         if success:
             self._submitted_order_id = order_id
             self._registration_receipt_id = order_id
-            self.registration_receipt.setText(f"✓ 已登记：{order_id}\n等待服务端队列状态同步")
+            self.registration_receipt.setText(
+                f"✓ 已登记：{order_id}\n等待服务端队列状态同步"
+            )
             self._new_id()
             if not self._order_active:
                 self.task_status.setText("已登记 · 等待调度")
@@ -915,7 +1313,9 @@ class OperatorPanel(QWidget):
         if not success:
             if "未确认" in message:
                 self._registration_receipt_id = order_id
-            self.registration_receipt.setText(f"{'登记未确认' if '未确认' in message else '登记失败'}：{order_id}\n{message}")
+            self.registration_receipt.setText(
+                f"{'登记未确认' if '未确认' in message else '登记失败'}：{order_id}\n{message}"
+            )
         self._update_controls()
 
     def _set_inventory(self, payload):
@@ -924,18 +1324,29 @@ class OperatorPanel(QWidget):
         except (ValueError, TypeError):
             return
         self._last_inventory = monotonic()
-        states = {"AVAILABLE": "可选择", "RESERVED": "已预留", "CARRYING": "搬运中",
-                  "PLACED": "已装箱", "COLLECTED": "已取货", "UNKNOWN": "未知"}
+        states = {
+            "AVAILABLE": "可选择",
+            "RESERVED": "已预留",
+            "CARRYING": "搬运中",
+            "PLACED": "已装箱",
+            "COLLECTED": "已取货",
+            "UNKNOWN": "未知",
+        }
         items = snapshot.get("items", [])
-        self.inventory_hint.setText(f"已观测 {len(items)} 个候选 · 场景批次 {snapshot.get('epoch', 0)} · 非实物库存保证")
+        self.inventory_hint.setText(
+            f"已观测 {len(items)} 个候选 · 场景批次 {snapshot.get('epoch', 0)} · 非实物库存保证"
+        )
         self.inventory_table.setRowCount(len(items))
         for row, item in enumerate(items):
             point = item.get("position", [0, 0, 0])
-            values = [item.get("item_id", ""), NAMES.get(item.get("sku"), item.get("sku", "")),
-                      states.get(item.get("state"), item.get("state", "")),
-                      " / ".join(f"{v:.3f}" for v in point),
-                      "过期" if item.get("stale") else f"{item.get('age_sec', 0):.0f}s",
-                      item.get("order_id", "") or "—"]
+            values = [
+                item.get("item_id", ""),
+                NAMES.get(item.get("sku"), item.get("sku", "")),
+                states.get(item.get("state"), item.get("state", "")),
+                " / ".join(f"{v:.3f}" for v in point),
+                "过期" if item.get("stale") else f"{item.get('age_sec', 0):.0f}s",
+                item.get("order_id", "") or "—",
+            ]
             for col, value in enumerate(values):
                 cell = QTableWidgetItem(str(value))
                 cell.setToolTip(f"{value}\n坐标系：{item.get('frame_id', '')}")
@@ -944,14 +1355,31 @@ class OperatorPanel(QWidget):
     def _render_bins(self):
         by_id = {b.get("bin_id"): b for b in self._bins}
         for i, card in enumerate(self.bin_cards):
-            card.update_resource(by_id.get(f"A{i+1}", {}), self._online and monotonic() - self._last_status < 5, self.config.get("operation_mode", "fulfillment"))
+            card.update_resource(
+                by_id.get(f"A{i + 1}", {}),
+                self._online and monotonic() - self._last_status < 5,
+                self.config.get("operation_mode", "fulfillment"),
+            )
 
     def _update_metrics(self):
-        values = [STATE_NAMES.get(self._state, self._state), "1" if self._state == "RUNNING" else "0",
-                  str(len({b.get("order_id") for b in self._bins if b.get("state") == "WAITING_PICKUP"})),
-                  str(sum(b.get("state") == "FREE" for b in self._bins))]
+        values = [
+            STATE_NAMES.get(self._state, self._state),
+            "1" if self._state == "RUNNING" else "0",
+            str(
+                len(
+                    {
+                        b.get("order_id")
+                        for b in self._bins
+                        if b.get("state") == "WAITING_PICKUP"
+                    }
+                )
+            ),
+            str(sum(b.get("state") == "FREE" for b in self._bins)),
+        ]
         for metric, value in zip(self.metrics, values):
-            metric.value.setText(value if self._online and monotonic() - self._last_status < 5 else "—")
+            metric.value.setText(
+                value if self._online and monotonic() - self._last_status < 5 else "—"
+            )
 
     def _submit(self):
         if not self.submit_button.isEnabled():
@@ -961,7 +1389,9 @@ class OperatorPanel(QWidget):
         if self._queue_enabled:
             self._registration_pending = True
             self._registration_order_id = order.order_id
-            self._registration_reconcile_allowed = order.order_id not in getattr(self, "_queue_jobs", {})
+            self._registration_reconcile_allowed = order.order_id not in getattr(
+                self, "_queue_jobs", {}
+            )
             self._registration_receipt_id = None
             self.registration_receipt.setText(f"正在登记：{order.order_id}")
             self._on_notice(f"正在提交 {order.order_id}，等待登记确认…")
@@ -974,8 +1404,12 @@ class OperatorPanel(QWidget):
                 self.failure_reason.clear()
                 self.failure_reason.hide()
             self._update_controls()
-            self.worker.submit(order.order_id, {line.sku: line.quantity for line in order.lines},
-                               True, self.priority.value())
+            self.worker.submit(
+                order.order_id,
+                {line.sku: line.quantity for line in order.lines},
+                True,
+                self.priority.value(),
+            )
             return
         self._order_active, self._accepted = True, False
         self._active_order_id = order.order_id
@@ -987,7 +1421,9 @@ class OperatorPanel(QWidget):
         self._set_progress(0, sum(line.quantity for line in order.lines))
         self.failure_reason.hide()
         self._update_controls()
-        self.worker.submit(order.order_id, {line.sku: line.quantity for line in order.lines}, True)
+        self.worker.submit(
+            order.order_id, {line.sku: line.quantity for line in order.lines}, True
+        )
 
     def _set_accepted(self, accepted):
         self._accepted = accepted
@@ -1019,22 +1455,31 @@ class OperatorPanel(QWidget):
         phase = event.get("step", "")
         if "place" in str(phase) or "release" in str(phase):
             index = 3
-        if stage in ("ITEM_COMPLETED", "VERIFYING", "ORDER_COMPLETED") or tool == "finish_order":
+        if (
+            stage in ("ITEM_COMPLETED", "VERIFYING", "ORDER_COMPLETED")
+            or tool == "finish_order"
+        ):
             index = 4
         if stage == "CANCEL_REQUESTED":
             self.stage.setText("等待安全取消")
             self.technical.appendPlainText(f"{stage}\n{detail}")
             return
         self.steps.set_stage(index)
-        self.stage.setText(["接单", "视觉定位", "抓取 / 搬运", "装箱", "结果校验"][index])
+        self.stage.setText(
+            ["接单", "视觉定位", "抓取 / 搬运", "装箱", "结果校验"][index]
+        )
         self.stage.setToolTip(stage)
         self.technical.appendPlainText(f"{stage}\n{detail}")
         if stage == "AGENT_TOOL_CALL":
             self._append(f"Agent → {tool}")
         elif stage == "ITEM_COMPLETED":
-            self._append(f"已装箱 {NAMES.get(event.get('sku'), event.get('sku', ''))} · {completed}/{total}")
+            self._append(
+                f"已装箱 {NAMES.get(event.get('sku'), event.get('sku', ''))} · {completed}/{total}"
+            )
         elif stage in ("PERCEPTION_EMPTY", "PERCEPTION_EXHAUSTED"):
-            self._append(f"视觉未找到目标 · {event.get('attempts', '')}/{event.get('limit', '')}")
+            self._append(
+                f"视觉未找到目标 · {event.get('attempts', '')}/{event.get('limit', '')}"
+            )
 
     def _on_result(self, status, completed, requested, error, report):
         self._order_active = self._accepted = False
@@ -1058,15 +1503,28 @@ class OperatorPanel(QWidget):
         if not self.recover_button.isEnabled():
             return
         if not self._can_recover:
-            waiting = [b.get("bin_id") for b in self._bins if b.get("state") == "WAITING_PICKUP"]
+            waiting = [
+                b.get("bin_id")
+                for b in self._bins
+                if b.get("state") == "WAITING_PICKUP"
+            ]
             if waiting:
-                self._on_notice(f"恢复前请先取走已完成订单箱 {', '.join(waiting)}；在下方选择订单并确认取货。失败箱会保留，未发送重置请求。")
+                self._on_notice(
+                    f"恢复前请先取走已完成订单箱 {', '.join(waiting)}；在下方选择订单并确认取货。失败箱会保留，未发送重置请求。"
+                )
                 self.pickup_orders.setFocus()
             else:
                 self._on_notice("恢复前请先核对并处理暂停订单；未发送重置请求。")
                 self._navigate("任务调度", 4)
             return
-        if QMessageBox.question(self, "恢复工作台", "清理失败订单和桌面，重新准备库存？\n待取货订单必须先取走。") == QMessageBox.Yes:
+        if (
+            QMessageBox.question(
+                self,
+                "恢复工作台",
+                "清理失败订单和桌面，重新准备库存？\n待取货订单必须先取走。",
+            )
+            == QMessageBox.Yes
+        ):
             self._on_notice("已请求恢复工作台，等待服务确认…")
             self.worker.recover()
 
@@ -1074,82 +1532,96 @@ class OperatorPanel(QWidget):
         if not self.pickup_button.isEnabled():
             return
         order_id = self.pickup_orders.currentData()
-        if QMessageBox.question(self, "确认取货", f"取走订单 {order_id}？\n对应箱子和商品将从仿真中移除。") == QMessageBox.Yes:
+        if (
+            QMessageBox.question(
+                self,
+                "确认取货",
+                f"取走订单 {order_id}？\n对应箱子和商品将从仿真中移除。",
+            )
+            == QMessageBox.Yes
+        ):
             self._on_notice("已请求确认取货，等待服务确认…")
             self.worker.pickup(order_id)
 
     def _append(self, message):
         self.events.appendPlainText(f"{datetime.now():%H:%M:%S}  {message}")
 
-    def _restore_last_task(self):
-        """A panel restart must not hide the last persisted order result."""
-        if self.history.rowCount() == 0:
-            return
-        path = Path(self.history.item(0, 0).toolTip())
-        try:
-            result = json.loads(path.read_text(encoding="utf-8"))
-            status = result.get("status", "UNKNOWN")
-            discarded = path.with_suffix(".discard.json").exists()
-            if discarded:
-                status = "CANCELED"
-            self.task_title.setText("最近任务")
-            self.task_id.setText(result.get("order_id", path.stem))
-            self.task_status.setText(STATE_NAMES.get(status, status))
-            self._set_progress(int(result.get("completed", 0)), int(result.get("requested", 0)))
-            self.stage.setText("历史结果")
-            error = "" if discarded else result.get("error", "")
-            message = readable_error(error) if error else ""
-            self.failure_reason.setText(message[:160] + ("…" if len(message) > 160 else ""))
-            self.failure_reason.setToolTip(message)
-            self.failure_reason.setVisible(bool(error))
-        except (OSError, ValueError, TypeError):
-            return
-
     def _refresh_history(self):
-        paths = sorted(self.report_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True) if self.report_dir.exists() else []
-        rows = []
-        for path in paths:
-            if path.name.endswith((".pickup.json", ".discard.json")):
-                continue
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if not isinstance(data, dict) or not data.get("order_id") or "status" not in data or "requested" not in data:
-                    continue
-                order_id = data.get("order_id", path.stem)
-                if order_id in self._hidden_history and not self._history_protected(order_id, data.get("status")):
-                    continue
-                lines = data.get("lines", [])
-                products = " / ".join(f"{NAMES.get(l.get('sku'), l.get('sku', ''))}×{l.get('quantity', '')}" for l in lines)
-                delivery = "已取货" if path.with_name(f"{path.stem}.pickup.json").exists() else "—"
-                discarded = path.with_suffix(".discard.json").exists()
-                if discarded:
-                    delivery = "已丢弃"
-                if any(b.get("order_id") == order_id and b.get("state") == "WAITING_PICKUP" for b in self._bins):
-                    delivery = "待取货"
-                status = "CANCELED" if discarded else data.get("status", "—")
-                rows.append((path, [order_id, products or "—", STATE_NAMES.get(status, status), f"{data.get('completed', 0)}/{data.get('requested', 0)}", delivery]))
-            except (OSError, ValueError, TypeError, AttributeError):
-                continue
-            if len(rows) >= 50:
-                break
-        self.history.setRowCount(len(rows))
-        for row, (path, values) in enumerate(rows):
-            for col, value in enumerate(values):
-                item = QTableWidgetItem(str(value))
-                item.setToolTip(str(path) if col == 0 else str(value))
-                self.history.setItem(row, col, item)
-        self.tabs.setTabText(0, f"订单记录 · {len(rows)}")
+        """The server's database projection is authoritative; JSON reports are exports."""
+        terminal = {
+            "WAITING_PICKUP",
+            "COLLECTED",
+            "FAILED",
+            "CANCELED",
+            "CANCELLED",
+            "PAUSED",
+            "RECOVERY_REQUIRED",
+            "EXECUTION_UNCERTAIN",
+        }
+        jobs = [
+            job
+            for job in getattr(self, "_queue_jobs", {}).values()
+            if job["state"] in terminal
+            and (
+                job["order_id"] not in self._hidden_history
+                or self._history_protected(job["order_id"], job["state"])
+            )
+        ]
+        jobs.sort(key=lambda job: job.get("finished_sequence", 0), reverse=True)
+        self.history.setRowCount(min(50, len(jobs)))
+        for row, job in enumerate(jobs[:50]):
+            identifier, state = job["order_id"], job["state"]
+            discarded = (
+                state in ("CANCELED", "CANCELLED") and job.get("completed", 0) > 0
+            )
+            delivery = (
+                "已丢弃"
+                if discarded
+                else "已取货"
+                if state == "COLLECTED"
+                else "待取货"
+                if state == "WAITING_PICKUP"
+                else "—"
+            )
+            products = " / ".join(
+                f"{NAMES.get(line['sku'], line['sku'])}×{line['quantity']}"
+                for line in job.get("lines", [])
+            )
+            values = [
+                identifier,
+                products or "—",
+                STATE_NAMES.get(state, state),
+                f"{job.get('completed', 0)}/{job.get('total', 0)}",
+                delivery,
+            ]
+            for column, value in enumerate(values):
+                cell = QTableWidgetItem(str(value))
+                cell.setToolTip(
+                    "来源：工作站 SQLite 业务记录" if column == 0 else str(value)
+                )
+                self.history.setItem(row, column, cell)
+        self.tabs.setTabText(0, f"订单记录 · {min(50, len(jobs))}")
         self.history_restore_button.setEnabled(bool(self._hidden_history))
-        self.history_clear_button.setEnabled(bool(rows))
+        self.history_clear_button.setEnabled(bool(jobs))
 
     def _history_protected(self, order_id, status):
-        if any(b.get("order_id") == order_id and b.get("state") != "FREE" for b in self._bins):
+        if any(
+            b.get("order_id") == order_id and b.get("state") != "FREE"
+            for b in self._bins
+        ):
             return True
         job = getattr(self, "_queue_jobs", {}).get(order_id, {})
-        return job.get("state") in ("QUEUED", "WAITING_STOCK", "WAITING_BIN", "PAUSED",
-            "RUNNING", "DISPATCHING", "EXECUTION_UNCERTAIN", "WAITING_PICKUP") or (
-            status == "COMPLETED" and not (self.report_dir / f"{order_id}.pickup.json").exists()) or (
-            status == "PAUSED" and not (self.report_dir / f"{order_id}.discard.json").exists())
+        return bool(job.get("review_required")) or job.get("state") in (
+            "QUEUED",
+            "WAITING_STOCK",
+            "WAITING_BIN",
+            "PAUSED",
+            "RUNNING",
+            "DISPATCHING",
+            "EXECUTION_UNCERTAIN",
+            "WAITING_PICKUP",
+            "RECOVERY_REQUIRED",
+        )
 
     def _save_hidden_history(self):
         self.report_dir.mkdir(parents=True, exist_ok=True)
@@ -1158,18 +1630,26 @@ class OperatorPanel(QWidget):
         temporary.replace(self._hidden_history_path)
 
     def _clear_history(self):
-        if QMessageBox.question(self, "清除已结束记录", "清除已结束订单的界面记录？\n原始报告保留，可恢复显示；执行中、暂停、待取货和需恢复订单不会清除。",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+        if (
+            QMessageBox.question(
+                self,
+                "清除已结束记录",
+                "清除已结束订单的界面记录？\n原始报告保留，可恢复显示；执行中、暂停、待取货和需恢复订单不会清除。",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            != QMessageBox.Yes
+        ):
             return
         previous = set(self._hidden_history)
-        for path in self.report_dir.glob("*.json"):
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(data, dict) and data.get("order_id") and "requested" in data and data.get("status") in (
-                        "COMPLETED", "FAILED", "CANCELLED", "CANCELED") and not self._history_protected(data["order_id"], data["status"]):
-                    self._hidden_history.add(data["order_id"])
-            except (OSError, ValueError, TypeError):
-                continue
+        for identifier, job in getattr(self, "_queue_jobs", {}).items():
+            if job["state"] in (
+                "COLLECTED",
+                "FAILED",
+                "CANCELLED",
+                "CANCELED",
+            ) and not self._history_protected(identifier, job["state"]):
+                self._hidden_history.add(identifier)
         try:
             self._save_hidden_history()
         except OSError as exc:
@@ -1178,7 +1658,9 @@ class OperatorPanel(QWidget):
             return
         self._refresh_history()
         self._render_queue(list(getattr(self, "_queue_jobs", {}).values()))
-        self._on_notice(f"已清除 {len(self._hidden_history - previous)} 份界面记录；原始报告保留")
+        self._on_notice(
+            f"已清除 {len(self._hidden_history - previous)} 份界面记录；原始报告保留"
+        )
 
     def _restore_history(self):
         previous = set(self._hidden_history)

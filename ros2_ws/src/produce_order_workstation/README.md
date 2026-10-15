@@ -11,11 +11,19 @@ one-by-one in response to order lines.
 
 ## Modules and data path
 
+**2026-10-15 database refactor:** authoritative orders, inventory, reservations,
+bin ownership and verified progress now live in normalized SQLite tables.
+The older dated architecture sections below describe historical baselines;
+see [the current design](../../../docs/DATABASE_REFACTOR_PLAN.md) and
+[implementation/test handoff](../../../docs/DATABASE_REFACTOR_DELIVERY_2026-10-15.md).
+
 | File | Responsibility |
 | --- | --- |
 | `config/demo_scene.yaml` | Reproducible mixed inventory, four bins and a physical route barrier; independent of the order. |
 | `config/workstation.yaml` | Operation mode, initial stock, Agent endpoint/model, legacy SKU-bin mapping and motion limits. |
-| `fulfillment.py` | In-memory bin ownership, allocation, waiting-for-pickup and collection lifecycle. |
+| `database.py` / `schema.py` | Unified SQLite transactions, relational constraints, versioned migration, audit and approvals. |
+| `inventory_repository.py` | Persisted observations, association, freshness, reservation and verified placement; no permanent in-memory inventory ledger. |
+| `resource_repository.py` | Database-backed orders, queue, priority, bin allocation, pickup and restart quarantine. |
 | `order.py` | Validate order and bin capacity, parse 3D perception results, determine drop offsets and verify placement. |
 | `agent.py` | Bounded model/tool loop; discovers tool schemas and calls tools through MCP. |
 | `agent_service.py` | Launch-started independent ROS Agent runtime, serial task admission, model client reuse and per-task decision context. |
@@ -23,7 +31,8 @@ one-by-one in response to order lines.
 | `mcp_client.py` | Official MCP ClientSession: initialize, discover tools, invoke tools and read order context over loopback HTTP. |
 | `mcp_server.py` | Order-scoped MCP facade for three workstation tools and one read-only resource; token guard, serial execution and safe shutdown. |
 | `runtime.py` | RGB-D perception adapter, visual-candidate registry, validated pick/place tool, ROS motion Action client and final audit. |
-| `order_server.py` | Persistent ROS Action server, one order at a time, cancellation and JSON reports. |
+| `order_server.py` | ROS admission/dispatch and realtime health; short database transactions, one physical executor, optional JSON exports. |
+| `operator_panel.py` | Order/queue/history views of ROS-published database state; JSON reports are not the history ledger. |
 | `debug_panel.py` | Temporary PyQt debug UI: enter counts, watch Agent calls and ROS feedback, retry or recover the workcell. |
 | `planning_scene.py` | Synchronize table, bin and verified barrier proxies; attach/detach the audited carried-item sphere. |
 | `PLANNING_SCENE_PLAN.md` | Phased design, validation gates, geometry assumptions and rollback risks. |

@@ -11,11 +11,16 @@ from rclpy.action import GoalResponse
 from produce_order_interfaces.action import ExecuteOrder
 from produce_order_interfaces.msg import OrderLine as RosOrderLine
 from produce_order_interfaces.srv import ConfirmPickup
-from produce_order_workstation.fulfillment import BinManager
-from produce_order_workstation.order import Order, OrderError, OrderLine, plan_placements, validate_order
+from db_support import make_resources, complete
+from produce_order_workstation.order import (
+    Order,
+    OrderError,
+    OrderLine,
+    plan_placements,
+    validate_order,
+)
 from produce_order_workstation.order_server import OrderActionServer
-from produce_order_workstation.scheduling import OrderQueue
-from produce_order_workstation.inventory import InventoryLedger
+from db_support import make_inventory
 from produce_order_workstation.runtime import Workstation
 
 
@@ -24,21 +29,39 @@ CONFIG = yaml.safe_load((PACKAGE / "config/workstation.yaml").read_text())
 
 
 def order(name="mixed"):
-    return Order(name, "A", (OrderLine("corn", 1), OrderLine("carrot", 1),
-                              OrderLine("apple", 1), OrderLine("tomato", 1)))
+    return Order(
+        name,
+        "A",
+        (
+            OrderLine("corn", 1),
+            OrderLine("carrot", 1),
+            OrderLine("apple", 1),
+            OrderLine("tomato", 1),
+        ),
+    )
 
 
 def server_stub(manager):
     station = MagicMock()
-    station.inventory = InventoryLedger()
-    for sku, x in (("corn", .3), ("carrot", .4), ("apple", .5), ("tomato", .6)):
-        station.inventory.observe(sku, "base", [(x, -.1, .04), (x, .1, .04)])
+    station.inventory = make_inventory(store=manager.store)
+    station.physical_state_uncertain = False
+    for sku, x in (("corn", 0.3), ("carrot", 0.4), ("apple", 0.5), ("tomato", 0.6)):
+        station.inventory.observe(sku, "base", [(x, -0.1, 0.04), (x, 0.1, 0.04)])
     return SimpleNamespace(
-        _lock=Lock(), _busy=False, _scene_ready=True, _state="READY",
-        _state_reason="", config=CONFIG, bin_manager=manager,
-        queue=OrderQueue(), _dispatch_order_id=None, _order_contexts={},
-        publish_status=MagicMock(), get_logger=MagicMock(),
-        workstation=station, report_path=lambda _: Path("/nonexistent-report"),
+        _lock=Lock(),
+        _busy=False,
+        _scene_ready=True,
+        _state="READY",
+        _state_reason="",
+        config=CONFIG,
+        resources=manager,
+        store=manager.store,
+        _dispatch_order_id=None,
+        _dispatch_timed_out=False,
+        publish_status=MagicMock(),
+        get_logger=MagicMock(),
+        workstation=station,
+        report_path=lambda _: Path("/nonexistent-report"),
     )
 
 
@@ -51,16 +74,22 @@ def test_fulfillment_is_the_default_and_mixed_order_uses_one_bin():
 
 
 def test_offsets_are_global_not_restarted_for_each_sku():
-    placements = plan_placements(Order("two", "A", (OrderLine("corn", 1), OrderLine("apple", 1))), CONFIG)
+    placements = plan_placements(
+        Order("two", "A", (OrderLine("corn", 1), OrderLine("apple", 1))), CONFIG
+    )
     assert len({(p.offset_x, p.offset_y) for p in placements}) == 2
 
 
 def test_total_capacity_applies_to_whole_order():
     with pytest.raises(ValueError, match="at most 4"):
-        validate_order(Order("large", "A", (OrderLine("corn", 3), OrderLine("apple", 2))), CONFIG)
+        validate_order(
+            Order("large", "A", (OrderLine("corn", 3), OrderLine("apple", 2))), CONFIG
+        )
     modified = deepcopy(CONFIG)
     modified["operation_mode"] = "classification"
-    validate_order(Order("legacy", "A", (OrderLine("corn", 3), OrderLine("apple", 2))), modified)
+    validate_order(
+        Order("legacy", "A", (OrderLine("corn", 3), OrderLine("apple", 2))), modified
+    )
 
 
 @pytest.mark.parametrize("index", [-1, 4, True])
@@ -70,53 +99,53 @@ def test_invalid_bin_is_rejected(index):
 
 
 def test_completed_order_keeps_ownership_and_next_order_uses_next_bin():
-    manager = BinManager(CONFIG)
+    manager = make_resources(CONFIG)
     assert manager.allocate(order("first")).bin_indices == (0,)
-    manager.finish("first", "COMPLETED", True, ["goods"])
-    assert manager.bins["A1"].state == "WAITING_PICKUP"
+    manager.finish_allocation("first", "COMPLETED", True)
+    assert manager.bin("A1").state == "WAITING_PICKUP"
     assert not manager.can_reset()
     assert manager.allocate(order("second")).bin_indices == (1,)
-    assert manager.pickup("first").entities == ["goods"]
-    manager.confirm_pickup("first")
-    assert manager.bins["A1"].state == "FREE"
-    assert manager.bins["A2"].order_id == "second"
-    assert manager.orders["first"].state == "COLLECTED"
+    assert manager.pickup("first").order == order("first")
+    manager.confirm_pickup("first", make_inventory(store=manager.store))
+    assert manager.bin("A1").state == "FREE"
+    assert manager.bin("A2").order_id == "second"
+    assert manager.allocation("first").state == "COLLECTED"
     with pytest.raises(ValueError):
         manager.allocate(order("first"))
 
 
 def test_full_bins_require_pickup_and_release_only_selected_order():
-    manager = BinManager(CONFIG)
+    manager = make_resources(CONFIG)
     for i in range(4):
         manager.allocate(order(str(i)))
-        manager.finish(str(i), "COMPLETED", True, [])
+        manager.finish_allocation(str(i), "COMPLETED", True)
     assert not manager.can_allocate("A")
     with pytest.raises(ValueError, match="No receiving bin"):
         manager.allocate(order("fifth"))
-    manager.confirm_pickup("1")
+    manager.confirm_pickup("1", make_inventory(store=manager.store))
     assert manager.allocate(order("fifth")).bin_indices == (1,)
-    assert manager.bins["A1"].order_id == "0"
+    assert manager.bin("A1").order_id == "0"
 
 
 def test_motion_failure_keeps_bin_but_failure_before_motion_releases_it():
-    manager = BinManager(CONFIG)
+    manager = make_resources(CONFIG)
     manager.allocate(order("no-motion"))
-    manager.finish("no-motion", "FAILED", False, [])
-    assert manager.bins["A1"].state == "FREE"
+    manager.finish_allocation("no-motion", "FAILED", False)
+    assert manager.bin("A1").state == "FREE"
     manager.allocate(order("moved"))
-    manager.finish("moved", "CANCELLED", True, [])
-    assert manager.bins["A1"].state == "RECOVERY_REQUIRED"
+    manager.finish_allocation("moved", "CANCELLED", True)
+    assert manager.bin("A1").state == "RECOVERY_REQUIRED"
     with pytest.raises(ValueError, match="completed"):
-        manager.confirm_pickup("moved")
+        manager.confirm_pickup("moved", make_inventory(store=manager.store))
     manager.reset()
-    assert manager.bins["A1"].state == "FREE"
-    assert manager.orders["moved"].state == "DISCARDED_BY_RESET"
+    assert manager.bin("A1").state == "FREE"
+    assert manager.allocation("moved").state == "DISCARDED_BY_RESET"
 
 
 def test_reset_cannot_destroy_completed_orders():
-    manager = BinManager(CONFIG)
+    manager = make_resources(CONFIG)
     manager.allocate(order())
-    manager.finish("mixed", "COMPLETED", True, [])
+    manager.finish_allocation("mixed", "COMPLETED", True)
     server = server_stub(manager)
     response = SimpleNamespace(success=False, message="")
     OrderActionServer.recover_callback(server, None, response)
@@ -126,101 +155,129 @@ def test_reset_cannot_destroy_completed_orders():
 
 
 def test_pickup_service_cleanup_failure_retains_ownership_and_can_retry(tmp_path):
-    manager = BinManager(CONFIG)
+    manager = make_resources(CONFIG)
     manager.allocate(order())
-    manager.finish("mixed", "COMPLETED", True, ["goods"])
+    manager.finish_allocation("mixed", "COMPLETED", True)
     server = server_stub(manager)
     server.report_path = lambda _: tmp_path / "mixed.json"
     server.workstation.collect_order.side_effect = RuntimeError("delete timeout")
     request = ConfirmPickup.Request(order_id="mixed")
-    response = OrderActionServer.pickup_callback(server, request, ConfirmPickup.Response())
+    response = OrderActionServer.pickup_callback(
+        server, request, ConfirmPickup.Response()
+    )
     assert not response.success
-    assert manager.bins["A1"].state == "WAITING_PICKUP"
+    assert manager.bin("A1").state == "WAITING_PICKUP"
     assert not server._busy
     server.workstation.collect_order.side_effect = None
-    response = OrderActionServer.pickup_callback(server, request, ConfirmPickup.Response())
+    response = OrderActionServer.pickup_callback(
+        server, request, ConfirmPickup.Response()
+    )
     assert response.success
-    assert manager.bins["A1"].state == "FREE"
+    assert manager.bin("A1").state == "FREE"
     assert (tmp_path / "mixed.pickup.json").is_file()
     server.workstation.prepare_scene.assert_not_called()
 
 
 def test_pickup_is_rejected_while_robot_is_busy():
-    server = server_stub(BinManager(CONFIG))
+    server = server_stub(make_resources(CONFIG))
     server._busy = True
-    response = OrderActionServer.pickup_callback(server, ConfirmPickup.Request(order_id="unknown"), ConfirmPickup.Response())
+    response = OrderActionServer.pickup_callback(
+        server, ConfirmPickup.Request(order_id="unknown"), ConfirmPickup.Response()
+    )
     assert not response.success
     server.workstation.collect_order.assert_not_called()
 
 
 def test_goal_allocates_bin_before_acceptance_and_busy_rejection_does_not_allocate():
-    manager = BinManager(CONFIG)
+    manager = make_resources(CONFIG)
     server = server_stub(manager)
-    goal = ExecuteOrder.Goal(order_id="first", zone="A", prepare_scene=True,
-                             lines=[RosOrderLine(sku="corn", quantity=1)])
+    goal = ExecuteOrder.Goal(
+        order_id="first",
+        zone="A",
+        prepare_scene=True,
+        lines=[RosOrderLine(sku="corn", quantity=1)],
+    )
     assert OrderActionServer.goal_callback(server, goal) == GoalResponse.ACCEPT
-    assert manager.bins["A1"].order_id == "first"
+    assert manager.bin("A1").order_id == "first"
     goal.order_id = "second"
     assert OrderActionServer.goal_callback(server, goal) == GoalResponse.REJECT
-    assert "second" not in manager.orders
+    assert manager.allocation("second") is None
 
 
 def test_legacy_classification_allocates_sku_bins():
     config = deepcopy(CONFIG)
     config["operation_mode"] = "classification"
-    manager = BinManager(config)
+    manager = make_resources(config)
     assert manager.allocate(order()).bin_indices == (0, 1, 2, 3)
-    manager.finish("mixed", "COMPLETED", True, [])
-    manager.confirm_pickup("mixed")
-    assert all(b.state == "FREE" for b in manager.bins.values())
+    manager.finish_allocation("mixed", "COMPLETED", True)
+    manager.confirm_pickup("mixed", make_inventory(store=manager.store))
+    assert all(b["state"] == "FREE" for b in manager.snapshot_bins())
 
 
 def test_complete_action_keeps_scene_and_records_allocated_bin(tmp_path):
-    manager = BinManager(CONFIG)
+    manager = make_resources(CONFIG)
     server = server_stub(manager)
     server.report_path = lambda order_id: tmp_path / f"{order_id}.json"
     server._publish_feedback = MagicMock()
-    request = ExecuteOrder.Goal(order_id="done", zone="A", prepare_scene=True,
-                                lines=[RosOrderLine(sku="corn", quantity=1)])
+    request = ExecuteOrder.Goal(
+        order_id="done",
+        zone="A",
+        prepare_scene=True,
+        lines=[RosOrderLine(sku="corn", quantity=1)],
+    )
     assert OrderActionServer.goal_callback(server, request) == GoalResponse.ACCEPT
     server.workstation.motion_attempted = True
     server.workstation._placed_entities = [("corn", "entity", 0, (0.3, 0, 0.04))]
-    server.workstation.run.return_value = dict(status="COMPLETED", completed=1,
-                                              requested=1, error=None)
+
+    def verified_run(_order):
+        with server.store.transaction() as db:
+            db.execute("UPDATE order_lines SET completed=1 WHERE order_id='done'")
+        return dict(status="COMPLETED", completed=1, requested=1, error=None)
+
+    server.workstation.run.side_effect = verified_run
     handle = MagicMock()
     handle.request = request
     response = OrderActionServer.execute_callback(server, handle)
     assert response.status == "COMPLETED"
     server.workstation.begin_order.assert_called_once_with(
-        Order("done", "A", (OrderLine("corn", 1),)), bin_index=0)
+        Order("done", "A", (OrderLine("corn", 1),)), bin_index=0
+    )
     server.workstation.prepare_scene.assert_not_called()
     handle.succeed.assert_called_once()
     assert server._scene_ready and not server._busy
-    assert manager.bins["A1"].state == "WAITING_PICKUP"
+    assert manager.bin("A1").state == "WAITING_PICKUP"
     report = yaml.safe_load((tmp_path / "done.json").read_text())
     assert report["bin_ids"] == ["A1"]
     assert report["delivery_state"] == "WAITING_PICKUP"
 
 
-def test_receipt_failure_does_not_release_cleaned_bin(tmp_path):
-    manager = BinManager(CONFIG)
+def test_receipt_export_failure_does_not_undo_committed_pickup(tmp_path):
+    manager = make_resources(CONFIG)
     manager.allocate(order())
-    manager.finish("mixed", "COMPLETED", True, [])
+    manager.finish_allocation("mixed", "COMPLETED", True)
     server = server_stub(manager)
     # A regular file cannot serve as the receipt directory.
     blocked = tmp_path / "blocked"
     blocked.write_text("test")
     server.report_path = lambda _: blocked / "mixed.json"
-    result = OrderActionServer.pickup_callback(server, ConfirmPickup.Request(order_id="mixed"), ConfirmPickup.Response())
-    assert not result.success
-    assert manager.bins["A1"].state == "WAITING_PICKUP"
+    result = OrderActionServer.pickup_callback(
+        server, ConfirmPickup.Request(order_id="mixed"), ConfirmPickup.Response()
+    )
+    assert result.success
+    assert manager.bin("A1").state == "FREE"
+    assert manager.get("mixed").state == "COLLECTED"
     assert not server._busy
 
 
 def test_begin_order_preserves_cross_order_delivered_names():
     station = Workstation(MagicMock(), CONFIG)
     station._scene_prepared = True
-    station._delivered_entity_names.add("previous_apple")
+    complete(
+        station,
+        Order("previous", "A", (OrderLine("apple", 1),)),
+        "apple",
+        "previous_apple",
+    )
     station.begin_order(order(), bin_index=2)
     assert station._allocated_bin_index == 2
     assert station._delivered_entity_names == {"previous_apple"}
@@ -236,10 +293,13 @@ def pickup_station():
     table = SimpleNamespace(name="table_tomato", prefab_name="tomato")
     bridge = MagicMock()
     bridge.spawned_entities = [own, other, box, table]
-    bridge._despawn_entity.side_effect = lambda entity: bridge.spawned_entities.remove(entity)
+    bridge._despawn_entity.side_effect = lambda entity: bridge.spawned_entities.remove(
+        entity
+    )
     station._scene_bridge = bridge
     station.synchronize_scene = MagicMock()
-    station._delivered_entity_names = {own.name, other.name}
+    complete(station, Order("own", "A", (OrderLine("apple", 1),)), "apple", own.name)
+    complete(station, Order("other", "A", (OrderLine("corn", 1),)), "corn", other.name)
     slot = tuple(CONFIG["zones"]["A"]["slots"][0])
     station.slot_bin_position = MagicMock(return_value=slot)
     station.observe_after_place = MagicMock(return_value=[(*slot, 0.05)])
@@ -250,7 +310,10 @@ def test_pickup_deletes_only_order_goods_and_repeat_cleanup_is_safe():
     station, own, placed = pickup_station()
     station.collect_order(order(), placed)
     station._scene_bridge._despawn_entity.assert_any_call(own)
-    assert [e.name for e in station._scene_bridge.spawned_entities] == ["other_corn", "table_tomato"]
+    assert [e.name for e in station._scene_bridge.spawned_entities] == [
+        "other_corn",
+        "table_tomato",
+    ]
     station.collect_order(order(), placed)
     assert station._scene_bridge._despawn_entity.call_count == 2  # goods + their box
 

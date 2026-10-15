@@ -3,7 +3,6 @@ operation_mode: fulfillment
 execution:
   backend: behavior_tree
 persistence:
-  enabled: true
   path: ~/.local/share/produce_order_workstation/workcell-mcp.sqlite3
 scene_service_timeout_s: 20.0
 scheduler:
