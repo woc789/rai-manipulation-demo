@@ -31,8 +31,10 @@ entities:
   # Two staggered mixed banks, spaced for the fixed RGBDCamera5 view.
   # >= 10 cm centre spacing, >= 17 cm from future bin centres, >= 40 cm
   # from panda_link0. Leave the crate footprint clear; do not change box slots.
-  # Two corn cobs occupy the foreground gap between A2/A3, away from the
-  # x_min edge; two remain in the side banks. Visibility alone is not a detection.
+  # Four corn cobs use a staggered foreground patch between A2/A3. This
+  # measured layout improves corn detection from 2 to 3, not a 4/4 guarantee.
+  # More compact rows and tilted apples were tested and rejected.
+  # Keep >= 10 cm between centres and >= 17 cm from all future bin centres.
   # Template positions are NOT perception results.
   - name: stock_carrot_1
     prefab_name: carrot
@@ -67,8 +69,8 @@ entities:
   - name: stock_corn_2
     prefab_name: corn
     pose:
-      translation: {x: 0.326, y: 0.539, z: 0.05}
-      rotation: {x: 0.7071067811865476, y: 0.0, z: 0.0, w: 0.7071067811865476}
+      translation: {x: 0.450, y: 0.090, z: 0.05}
+      rotation: {x: 0.6532814824381883, y: 0.2705980500730985, z: 0.2705980500730985, w: 0.6532814824381883}
   - name: stock_carrot_2
     prefab_name: carrot
     pose:
@@ -87,7 +89,7 @@ entities:
   - name: stock_corn_3
     prefab_name: corn
     pose:
-      translation: {x: 0.220, y: -0.347, z: 0.05}
+      translation: {x: 0.450, y: -0.090, z: 0.05}
       rotation: {x: 0.5, y: 0.5, z: 0.5, w: 0.5}
   - name: stock_tomato_3
     prefab_name: tomato

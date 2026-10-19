@@ -53,6 +53,15 @@ def test_corn_orientations_are_normalized_and_long_axis_stays_horizontal():
         assert 1 - 2*(q.x*q.x + q.y*q.y) == pytest.approx(0.0, abs=1e-8)
 
 
+def test_corn_uses_verified_foreground_patch_not_distant_side_extremes():
+    _, scene = fixtures()
+    for item in scene.entities:
+        if item.prefab_name == "corn":
+            p = item.pose.pose.position
+            assert .450 <= p.x <= .560
+            assert abs(p.y) <= .090
+
+
 def test_corn_templates_leave_room_for_observed_settling_displacement():
     _, scene = fixtures()
     for item in scene.entities:
