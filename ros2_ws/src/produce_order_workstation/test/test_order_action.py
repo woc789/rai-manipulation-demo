@@ -147,6 +147,75 @@ def test_scan_failure_has_error_state_and_keeps_waiting_order():
     server.publish_status.assert_called_once()
 
 
+@pytest.mark.parametrize("complete_on_retry", [False, True])
+def test_initial_scan_is_bounded_and_requires_complete_stock(complete_on_retry):
+    from threading import RLock
+    from db_support import make_resources
+    from produce_order_workstation.order_server import OrderActionServer
+
+    def snapshot(count):
+        return {
+            "items": [
+                dict(
+                    sku=sku,
+                    state="AVAILABLE",
+                    verification="FRESH",
+                    stale=False,
+                    order_id="",
+                )
+                for sku in CONFIG["aliases"]
+                for _ in range(count)
+            ]
+        }
+
+    server = SimpleNamespace(
+        workstation=MagicMock(),
+        config=CONFIG,
+        resources=make_resources(CONFIG),
+        _lock=RLock(),
+        _initial_inventory_required=True,
+        _inventory_ready=False,
+        _busy=True,
+        get_logger=MagicMock(),
+        publish_status=MagicMock(),
+    )
+    server.workstation.physical_state_uncertain = False
+    server.workstation.inventory.snapshot.side_effect = [
+        snapshot(2),
+        snapshot(4 if complete_on_retry else 2),
+    ]
+    OrderActionServer._scan_stock(server)
+    assert server.workstation.scan_inventory.call_count == 2
+    assert server._inventory_ready == complete_on_retry
+    assert server._initial_inventory_required != complete_on_retry
+    assert server._state == ("READY" if complete_on_retry else "INVENTORY_ERROR")
+    if not complete_on_retry:
+        assert "玉米 2/4" in server._state_reason and "视觉复查" in server._state_reason
+
+
+def test_normal_depleted_inventory_scan_does_not_require_initial_counts():
+    from threading import RLock
+    from db_support import make_resources
+    from produce_order_workstation.order_server import OrderActionServer
+
+    server = SimpleNamespace(
+        workstation=MagicMock(),
+        config=CONFIG,
+        resources=make_resources(CONFIG),
+        _lock=RLock(),
+        _initial_inventory_required=False,
+        _inventory_ready=True,
+        _busy=True,
+        get_logger=MagicMock(),
+        publish_status=MagicMock(),
+    )
+    server.workstation.physical_state_uncertain = False
+    OrderActionServer._scan_stock(server)
+    assert server._inventory_ready and server._state == "READY"
+    server.workstation.scan_inventory.assert_called_once()
+    server.workstation.inventory.snapshot.assert_not_called()
+
+
 def test_recovery_cleanup_handles_missing_entity_after_successful_delete(monkeypatch):
     station = Workstation(MagicMock(), CONFIG)
     first, second = SimpleNamespace(name="first"), SimpleNamespace(name="second")
@@ -401,6 +470,32 @@ def test_action_goal_uses_shared_order_validation():
     order = order_from_goal(goal)
     validate_order(order, CONFIG)
     assert order == Order("action-001", "A", (OrderLine("corn", 1),))
+
+
+def test_direct_action_cannot_bypass_initial_visual_acceptance():
+    from threading import Lock
+    from rclpy.action import GoalResponse
+    from db_support import make_resources
+    from produce_order_workstation.order_server import OrderActionServer
+
+    goal = ExecuteOrder.Goal(
+        order_id="cannot-bypass",
+        zone="A",
+        prepare_scene=True,
+        lines=[OrderLineMsg(sku="corn", quantity=1)],
+    )
+    server = SimpleNamespace(
+        config=CONFIG,
+        _lock=Lock(),
+        resources=make_resources(CONFIG),
+        _dispatch_order_id=None,
+        _busy=False,
+        _scene_ready=True,
+        _initial_inventory_required=True,
+        get_logger=MagicMock(),
+    )
+    assert OrderActionServer.goal_callback(server, goal) == GoalResponse.REJECT
+    assert server.resources.get(goal.order_id) is None
 
 
 def test_failed_order_without_motion_is_retryable_but_motion_requires_recovery():

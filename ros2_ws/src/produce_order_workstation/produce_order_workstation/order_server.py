@@ -35,6 +35,7 @@ from .runtime import Workstation
 from .resource_repository import ResourceRepository
 from .database import WorkcellDatabase
 from .business import BusinessCoordinator
+from .inventory_repository import initial_stock_check
 
 CLOCK_QOS = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
 
@@ -90,6 +91,8 @@ class OrderActionServer(Node):
         self._scan_requested = False
         self._resume_review_after_scan = False
         self._inventory_ready = False
+        self._initial_inventory_required = True
+        self._initial_inventory_check = None
         self._lock = Lock()
         self._stopping = Event()
         self._busy = False
@@ -497,7 +500,53 @@ class OrderActionServer(Node):
 
     def _scan_stock(self):
         try:
-            self.workstation.scan_inventory(list(self.config["aliases"]))
+            initial = getattr(self, "_initial_inventory_required", False)
+            attempts = (
+                int(self.config.get("perception", {}).get("initial_scan_attempts", 2))
+                if initial
+                else 1
+            )
+            # Bounded even for a malformed user configuration; no endless retries.
+            attempts = max(1, min(attempts, 3))
+            for attempt in range(1, attempts + 1):
+                self.workstation.scan_inventory(list(self.config["aliases"]))
+                if not initial:
+                    break
+                report = initial_stock_check(
+                    self.workstation.inventory.snapshot(),
+                    self.config["stock"]["initial_counts"],
+                )
+                report["attempt"] = attempt
+                with self._lock:
+                    self._initial_inventory_check = report
+                if report["passed"]:
+                    break
+                labels = {
+                    "corn": "玉米",
+                    "carrot": "胡萝卜",
+                    "apple": "苹果",
+                    "tomato": "番茄",
+                }
+                details = "、".join(
+                    f"{labels.get(sku, sku)} {report['confirmed'][sku]}/{count}"
+                    + (
+                        f"（类别冲突 {report['conflicts'][sku]}）"
+                        if report["conflicts"][sku]
+                        else ""
+                    )
+                    for sku, count in report["expected"].items()
+                )
+                reason = f"初始化视觉验收未通过：{details}；第 {attempt}/{attempts} 轮"
+                with self._lock:
+                    self._inventory_ready = False
+                    self._state_reason = reason
+                self.publish_status()
+            if initial and not report["passed"]:
+                raise ValueError(
+                    reason
+                    + "；请检查相机画面与物品布局，再点击“视觉复查”；订单保留，暂不执行"
+                )
+            self._initial_inventory_required = False
             self._inventory_ready = True
             with self._lock:
                 if getattr(self, "_resume_review_after_scan", False):
@@ -740,8 +789,11 @@ class OrderActionServer(Node):
         else:
             success = True
             with self._lock:
+                self._inventory_ready = False
+                self._initial_inventory_required = True
+                self._initial_inventory_check = None
                 self._scan_requested = True
-            self._set_state("READY", "桌面已补货，等待视觉复查", ready=True)
+            self._set_state("SCANNING", "桌面已补货，等待四类商品视觉验收", ready=True)
         finally:
             with self._lock:
                 self._busy = False
@@ -782,6 +834,9 @@ class OrderActionServer(Node):
                     getattr(self, "store", None), WorkcellDatabase
                 ),
                 "startup_review": bool(getattr(self, "_startup_review", False)),
+                "initial_inventory_check": getattr(
+                    self, "_initial_inventory_check", None
+                ),
                 "approval_requests": self.store.requests()
                 if isinstance(getattr(self, "store", None), WorkcellDatabase)
                 else [],
@@ -856,10 +911,17 @@ class OrderActionServer(Node):
             self.get_logger().error(f"Could not preload mixed inventory: {exc}")
             self._set_state("RECOVERY_REQUIRED", f"库存初始化失败：{exc}")
             return
-        self._set_state("READY", "混合库存已就绪，可以提交订单", ready=True)
         with self._lock:
+            self._initial_inventory_required = True
+            self._inventory_ready = False
+            self._initial_inventory_check = None
             self._scan_requested = True
-        self.get_logger().info("Mixed table inventory is ready: four of each SKU")
+        self._set_state(
+            "SCANNING", "场景已生成，等待四类商品视觉验收；尚未确认库存齐全", ready=True
+        )
+        self.get_logger().info(
+            "Mixed stock spawned; visual count/class validation is still pending"
+        )
 
     def pickup_callback(self, request, response):
         with self._lock:
@@ -1001,9 +1063,11 @@ class OrderActionServer(Node):
                     self._startup_review = False
                 self._dispatch_timed_out = False
                 self._inventory_ready = False
+                self._initial_inventory_required = True
+                self._initial_inventory_check = None
                 self._scan_requested = True
             success = True
-            self._set_state("READY", "场景已重置，库存已就绪", ready=True)
+            self._set_state("SCANNING", "场景已重置，等待初始化视觉验收", ready=True)
         except Exception as exc:
             error = str(exc)
             self.get_logger().error(f"Workcell recovery failed: {exc}")
@@ -1060,9 +1124,11 @@ class OrderActionServer(Node):
             if self._busy:
                 self.get_logger().warning("Rejected order: workcell is busy")
                 return GoalResponse.REJECT
-            if not self._scene_ready:
+            if not self._scene_ready or getattr(
+                self, "_initial_inventory_required", False
+            ):
                 self.get_logger().warning(
-                    "Rejected order: mixed inventory is not ready"
+                    "Rejected order: scene or initial visual inventory acceptance is not ready"
                 )
                 return GoalResponse.REJECT
             try:

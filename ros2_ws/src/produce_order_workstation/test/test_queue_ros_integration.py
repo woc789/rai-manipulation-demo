@@ -143,6 +143,9 @@ def test_service_queue_action_feedback_priority_resume_and_pickup(
     config = yaml.safe_load((package / "config/workstation.yaml").read_text())
     config["execution"] = {"backend": "legacy_agent"}
     config["persistence"] = {"path": str(tmp_path / "queue.db")}
+    # This isolated transport test has exactly two synthetic corn/apple each;
+    # the production acceptance gate must validate that declared fixture too.
+    config["stock"]["initial_counts"] = {"corn": 2, "apple": 2}
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.safe_dump(config))
     server = order_server.OrderActionServer(

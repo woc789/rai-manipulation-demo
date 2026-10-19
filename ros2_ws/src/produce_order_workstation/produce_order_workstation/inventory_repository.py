@@ -7,6 +7,35 @@ import time
 import uuid
 
 
+def initial_stock_check(snapshot, expected):
+    """Validate visual evidence, never simulator poses or configured stock as evidence.
+
+    This gate applies only to a newly prepared/replenished source, not to a table
+    depleted by normal orders. Unknown/conflicting/stale records cannot count.
+    """
+    counts = dict.fromkeys(expected, 0)
+    conflicts = dict.fromkeys(expected, 0)
+    for item in snapshot["items"]:
+        sku = item["sku"]
+        if sku not in counts:
+            continue
+        if item["verification"] == "AMBIGUOUS" and not item["stale"]:
+            conflicts[sku] += 1
+        if (
+            item["state"] == "AVAILABLE"
+            and item["verification"] == "FRESH"
+            and not item["stale"]
+            and not item["order_id"]
+        ):
+            counts[sku] += 1
+    return {
+        "passed": counts == expected and not any(conflicts.values()),
+        "expected": dict(expected),
+        "confirmed": counts,
+        "conflicts": conflicts,
+    }
+
+
 @dataclass
 class VisualRecord:
     item_id: str

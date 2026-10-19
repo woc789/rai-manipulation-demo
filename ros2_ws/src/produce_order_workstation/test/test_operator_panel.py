@@ -587,6 +587,14 @@ class OperatorPanelTests(unittest.TestCase):
         self.assertIn("复查失败", self.panel.workcell_notice.text())
         self.assertFalse(self.panel.workcell_notice.isHidden())
 
+    def test_initial_stock_shortage_is_visible_without_opening_logs(self):
+        self.ready()
+        reason = "视觉库存复查失败：初始化视觉验收未通过：玉米 2/4、胡萝卜 4/4；请点击视觉复查"
+        self.panel._set_workcell_status("INVENTORY_ERROR", reason, False, True)
+        self.assertIn("玉米 2/4", self.panel.workcell_notice.text())
+        self.assertIn("视觉复查", self.panel.workcell_notice.text())
+        self.assertFalse(self.panel.workcell_notice.isHidden())
+
     def test_inventory_error_has_local_action_and_no_blind_motion_retry(self):
         self.ready()
         self.panel._set_workcell_status(

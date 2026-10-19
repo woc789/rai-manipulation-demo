@@ -11,6 +11,33 @@ def ledger():
     return book, tick
 
 
+def test_initial_stock_accepts_only_exact_fresh_visual_counts():
+    from produce_order_workstation.inventory_repository import initial_stock_check
+
+    book, tick = ledger()
+    expected = {"corn": 4, "carrot": 4, "apple": 4, "tomato": 4}
+    for index, sku in enumerate(expected):
+        book.observe(sku, "base", [(index, j * 0.15, 0.04) for j in range(4)])
+    assert initial_stock_check(book.snapshot(), expected)["passed"]
+    tick[0] = 61
+    report = initial_stock_check(book.snapshot(), expected)
+    assert not report["passed"] and report["confirmed"] == dict.fromkeys(expected, 0)
+
+
+def test_initial_stock_rejects_partial_excess_and_cross_class_conflicts():
+    from produce_order_workstation.inventory_repository import initial_stock_check
+
+    book, _ = ledger()
+    book.observe("corn", "base", [(0, 0, 0.04), (0, 0.2, 0.04)])
+    report = initial_stock_check(book.snapshot(), {"corn": 4})
+    assert not report["passed"] and report["confirmed"]["corn"] == 2
+    book.observe("corn", "base", [(0, j * 0.15, 0.04) for j in range(5)])
+    assert not initial_stock_check(book.snapshot(), {"corn": 4})["passed"]
+    book.observe("apple", "base", [(0, 0, 0.04)])
+    report = initial_stock_check(book.snapshot(), {"corn": 4, "apple": 1})
+    assert not report["passed"] and report["conflicts"]["apple"] == 1
+
+
 def test_no_initial_stock_or_truth_seeding():
     book, _ = ledger()
     assert book.snapshot()["items"] == []

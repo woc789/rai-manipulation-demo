@@ -890,11 +890,7 @@ class OperatorPanel(QWidget):
         if state == "SCANNING":
             self._scan_request_pending = False
         self.workcell_notice.setText(
-            "库存复查失败 · 订单保留，处理步骤见下方"
-            if state == "INVENTORY_ERROR"
-            else reason
-            if state not in ("READY", "RUNNING")
-            else ""
+            reason if state not in ("READY", "RUNNING") else ""
         )
         self.workcell_notice.setToolTip(reason)
         self.workcell_notice.setVisible(bool(self.workcell_notice.text()))
