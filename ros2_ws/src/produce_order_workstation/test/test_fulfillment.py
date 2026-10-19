@@ -81,9 +81,9 @@ def test_offsets_are_global_not_restarted_for_each_sku():
 
 
 def test_total_capacity_applies_to_whole_order():
-    with pytest.raises(ValueError, match="at most 4"):
+    with pytest.raises(ValueError, match="at most 8"):
         validate_order(
-            Order("large", "A", (OrderLine("corn", 3), OrderLine("apple", 2))), CONFIG
+            Order("large", "A", (OrderLine("corn", 5), OrderLine("apple", 4))), CONFIG
         )
     modified = deepcopy(CONFIG)
     modified["operation_mode"] = "classification"

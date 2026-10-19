@@ -364,7 +364,7 @@ def test_scene_has_four_bins_and_mixed_order_independent_stock():
 
 def test_stock_quantity_is_distinct_from_bin_capacity():
     assert CONFIG["stock"]["initial_counts"]["apple"] == 4
-    assert CONFIG["zones"]["A"]["bin_capacity_items"] == 4
+    assert CONFIG["zones"]["A"]["bin_capacity_items"] == 8
     modified = deepcopy(CONFIG)
     modified["stock"]["initial_counts"]["apple"] = 3
     with pytest.raises(ValueError, match="prepared scene stock 3"):

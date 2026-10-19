@@ -89,7 +89,7 @@ placement mode for regressions. Both modes now require explicit pickup and never
 automatically replenish after success. See `FULFILLMENT_PHASE01.md` for the
 baseline, state/interface design, implementation details and acceptance checklist.
 
-The current small-bin configuration permits **four items total per mixed order**,
+The current small-bin configuration permits **eight items total per mixed order**,
 not four per SKU in fulfillment mode. This is a bounded simulation configuration,
 not a measured packing-capacity claim. Distinct release offsets do not constitute
 collision-aware 3D packing. Larger orders need larger bins and a validated placement
@@ -269,8 +269,9 @@ ros2 run produce_order_workstation debug_panel
 The launch starts both vision services by default; model initialization can
 take around a minute. Only enter quantities; zero means the SKU is not needed.
 Each SKU initially has four pieces. In fulfillment mode the whole order uses
-one server-allocated empty bin, with at most four items total. The UI permits
-0–4 per SKU but rejects a combined total over four. The Action goal must have
+one server-allocated empty bin, with at most eight items total. The UI permits
+0–8 per SKU but rejects a combined total over eight; initial stock remains four
+per SKU, so registration does not guarantee immediate stock availability. The Action goal must have
 `prepare_scene=true` (retained as a compatibility flag; it now means the
 preloaded workcell is required). After a verified order the server retains the
 goods and bin ownership as `WAITING_PICKUP`; the table is not replenished. A failed

@@ -32,6 +32,7 @@ from .order import (
     fulfillment_mode,
     parse_centroids,
     plan_placements,
+    placement_offsets,
     verify_bin_placement,
 )
 from .planning_scene import PlanningSceneSync
@@ -755,7 +756,7 @@ class Workstation:
         center = self.config["zones"][order.zone]["slots"][placement.bin_index]
         options = [preferred] + [
             (center[0] + dx, center[1] + dy)
-            for dx, dy in ((-0.03, -0.04), (-0.03, 0.04), (0.03, -0.04), (0.03, 0.04))
+            for dx, dy in placement_offsets(8 if order.total_items > 4 else 4)
         ]
         for target in options:
             if distance_xy(source, target) > self._source_target_clearance() and all(

@@ -133,11 +133,18 @@ class OperatorPanelTests(unittest.TestCase):
     def test_capacity_is_inline_and_does_not_change_task(self):
         self.ready()
         self.panel._on_result("COMPLETED", 4, 4, "", "")
-        self.panel.quantity_spins["corn"].setValue(4)
+        self.panel.quantity_spins["corn"].setValue(8)
         self.assertFalse(self.panel.submit_button.isEnabled())
         self.assertEqual(self.panel.task_count.text(), "4 / 4")
         self.assertEqual(self.panel.progress.value(), 4)
         self.assertEqual(self.panel.task_status.text(), "配货完成")
+
+    def test_eight_item_mixed_draft_is_allowed(self):
+        self.ready()
+        for spin in self.panel.quantity_spins.values():
+            self.assertEqual(spin.maximum(), 8)
+            spin.setValue(2)
+        self.assertTrue(self.panel.submit_button.isEnabled())
 
     def test_heartbeat_preserves_finished_task(self):
         self.ready()

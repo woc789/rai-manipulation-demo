@@ -28,7 +28,7 @@ zones:
   A:
     tolerance_m: 0.07
     bin_half_extents_m: [0.08, 0.08]
-    bin_capacity_items: 4
+    bin_capacity_items: 8
     sku_bins:
       corn: 0
       carrot: 1

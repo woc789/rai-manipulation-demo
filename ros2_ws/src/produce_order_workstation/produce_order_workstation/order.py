@@ -11,6 +11,7 @@ import yaml
 CENTROID = re.compile(
     r"Centroid\(x=([-+0-9.eE]+), y=([-+0-9.eE]+), z=([-+0-9.eE]+)\)"
 )
+MAX_BIN_ITEMS = 8
 
 
 class OrderError(RuntimeError):
@@ -165,8 +166,8 @@ def validate_order(order: Order, config: dict) -> None:
         seen.add(line.sku)
     zone = config["zones"][order.zone]
     capacity = zone["bin_capacity_items"]
-    if type(capacity) is not int or capacity < 1 or capacity > 4:
-        raise ValueError("Bin capacity must be between 1 and 4 items")
+    if type(capacity) is not int or not 1 <= capacity <= MAX_BIN_ITEMS:
+        raise ValueError(f"Bin capacity must be between 1 and {MAX_BIN_ITEMS} items")
     sku_bins = zone["sku_bins"]
     if fulfillment_mode(config) == "classification" and (set(sku_bins) != set(config["aliases"]) or set(sku_bins.values()) != set(
         range(len(zone["slots"]))
@@ -188,16 +189,31 @@ def validate_order(order: Order, config: dict) -> None:
             )
 
 
-def plan_placements(order: Order, config: dict, *, bin_index: int | None = None) -> tuple[Placement, ...]:
-    """Use globally distinct offsets for one order, or per-SKU legacy offsets."""
-    validate_order(order, config)
-    sku_bins = config["zones"][order.zone]["sku_bins"]
+def placement_offsets(count: int) -> tuple[tuple[float, float], ...]:
+    """Distinct release centres, not a guarantee of non-overlapping 3D packing."""
+    if type(count) is not int or not 1 <= count <= MAX_BIN_ITEMS:
+        raise ValueError(f"Placement count must be between 1 and {MAX_BIN_ITEMS}")
     offsets = {
         1: [(0.0, 0.0)],
         2: [(0.0, -0.04), (0.0, 0.04)],
         3: [(-0.03, -0.04), (-0.03, 0.04), (0.03, 0.0)],
         4: [(-0.03, -0.04), (-0.03, 0.04), (0.03, -0.04), (0.03, 0.04)],
     }
+    if count <= 4:
+        return tuple(offsets[count])
+    perimeter = (
+        (-0.045, -0.045), (0.045, 0.045),
+        (-0.045, 0.045), (0.045, -0.045),
+        (0.0, -0.045), (0.0, 0.045),
+        (-0.045, 0.0), (0.045, 0.0),
+    )
+    return perimeter[:count]
+
+
+def plan_placements(order: Order, config: dict, *, bin_index: int | None = None) -> tuple[Placement, ...]:
+    """Use globally distinct offsets for one order, or per-SKU legacy offsets."""
+    validate_order(order, config)
+    sku_bins = config["zones"][order.zone]["sku_bins"]
     if fulfillment_mode(config) == "fulfillment":
         # None is a planning preview / standalone CLI default, not server allocation.
         selected = 0 if bin_index is None else bin_index
@@ -205,11 +221,11 @@ def plan_placements(order: Order, config: dict, *, bin_index: int | None = None)
             raise ValueError("Invalid allocated bin index")
         skus = [line.sku for line in order.lines for _ in range(line.quantity)]
         return tuple(Placement(sku, selected, x, y)
-                     for sku, (x, y) in zip(skus, offsets[order.total_items]))
+                     for sku, (x, y) in zip(skus, placement_offsets(order.total_items)))
     return tuple(
         Placement(line.sku, sku_bins[line.sku], offset_x, offset_y)
         for line in order.lines
-        for offset_x, offset_y in offsets[line.quantity]
+        for offset_x, offset_y in placement_offsets(line.quantity)
     )
 
 

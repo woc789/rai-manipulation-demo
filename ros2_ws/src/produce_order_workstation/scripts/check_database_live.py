@@ -29,7 +29,11 @@ def main():
         choices=["corn", "carrot", "apple", "tomato"],
     )
     parser.add_argument("--confirm-pickup", action="store_true")
+    parser.add_argument("--order-timeout", type=float, default=900,
+                        help="Maximum seconds waiting for a registered order's result")
     args = parser.parse_args()
+    if args.order_timeout <= 0:
+        parser.error("--order-timeout must be positive")
     if not args.database.is_file():
         parser.error("Database must already exist; this probe never creates one")
     rclpy.init()
@@ -100,7 +104,7 @@ def main():
                 row["order_id"] == identifier and row["state"] in terminal
                 for row in status.get("orders", [])
             ),
-            480,
+            args.order_timeout,
         )
         row = next(row for row in status["orders"] if row["order_id"] == identifier)
         print(json.dumps(row, ensure_ascii=False), flush=True)
