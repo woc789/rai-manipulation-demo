@@ -69,7 +69,7 @@ class ResourceRepository:
             return None
         row = rows[0]
         lines = self.store.rows(
-            "SELECT sku,quantity,completed FROM order_lines WHERE order_id=? ORDER BY rowid",
+            "SELECT p.sku,p.quantity,p.completed FROM order_progress p JOIN order_lines l USING(order_id,sku) WHERE p.order_id=? ORDER BY l.rowid",
             (identifier,),
         )
         order = Order(
@@ -104,7 +104,8 @@ class ResourceRepository:
         return {
             row["sku"]: row["completed"]
             for row in self.store.rows(
-                "SELECT sku,completed FROM order_lines WHERE order_id=?", (identifier,)
+                "SELECT sku,completed FROM order_progress WHERE order_id=?",
+                (identifier,),
             )
         }
 
@@ -480,18 +481,21 @@ class ResourceRepository:
             )
         ]
 
+    def delivered_entity_names(self):
+        return {
+            row["entity_name"]
+            for row in self.store.rows("""
+            SELECT p.entity_name FROM placed_items p JOIN inventory_items i USING(item_id)
+            WHERE i.state IN ('PLACED','COLLECTED')
+        """)
+        }
+
     def recover(self):
         """Preserve evidence, invalidate old observations, quarantine physical ownership."""
         with self.store.transaction() as db:
             for job in self.all():
                 if job.state == "COLLECTED" and job.reason != "已确认取货，箱位已释放":
                     self.update(job.order.order_id, reason="已确认取货，箱位已释放")
-                progress = self.store.verified_progress(job.order.order_id)
-                for sku, count in progress.items():
-                    db.execute(
-                        "UPDATE order_lines SET completed=MAX(completed,MIN(quantity,?)) WHERE order_id=? AND sku=?",
-                        (count, job.order.order_id, sku),
-                    )
                 allocation = self.allocation(job.order.order_id)
                 active = bool(
                     allocation
@@ -532,14 +536,10 @@ class ResourceRepository:
             db.execute(
                 "UPDATE inventory_items SET state='UNKNOWN',verification='REVIEW',executing=0 WHERE state IN ('AVAILABLE','RESERVED','CARRYING','UNKNOWN')"
             )
-            db.execute(
-                "UPDATE reservations SET state='REVIEW',updated=? WHERE state IN ('HELD','CARRYING')",
-                (time.time(),),
-            )
             # Only never-started orders may release old promises and await a new scan.
             db.execute(
-                """UPDATE reservations SET state='RELEASED',updated=? WHERE state='REVIEW' AND order_id IN
+                """UPDATE reservations SET released=?,updated=? WHERE released IS NULL AND order_id IN
                 (SELECT order_id FROM orders WHERE state IN ('QUEUED','WAITING_STOCK','WAITING_BIN') AND review_required=0)""",
-                (time.time(),),
+                (time.time(), time.time()),
             )
             return bool(self.store.rows("SELECT 1 FROM orders WHERE review_required=1"))

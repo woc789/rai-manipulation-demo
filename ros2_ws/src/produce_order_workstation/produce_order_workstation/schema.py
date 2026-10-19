@@ -1,4 +1,4 @@
-"""Version-one relational schema and one-time import of the retired JSON format."""
+"""Version-one bootstrap/import and transactional upgrade to lean schema two."""
 
 import json
 import re
@@ -6,7 +6,13 @@ import time
 import uuid
 
 
-SCHEMA = (
+OBSERVATION_SCHEMA = """CREATE TABLE inventory_observations(
+    observation_id INTEGER PRIMARY KEY, item_id TEXT NOT NULL REFERENCES inventory_items(item_id),
+    sku TEXT NOT NULL,frame_id TEXT NOT NULL,x REAL NOT NULL,y REAL NOT NULL,z REAL NOT NULL,
+    observed REAL NOT NULL,run_id TEXT NOT NULL,epoch INTEGER NOT NULL,source TEXT NOT NULL)"""
+
+
+SCHEMA_V1 = (
     "CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL)",
     """CREATE TABLE orders(
         sequence INTEGER PRIMARY KEY AUTOINCREMENT, order_id TEXT NOT NULL UNIQUE,
@@ -30,10 +36,7 @@ SCHEMA = (
         state TEXT NOT NULL CHECK(state IN ('AVAILABLE','RESERVED','CARRYING','PLACED','COLLECTED','UNKNOWN','RETIRED')),
         verification TEXT NOT NULL DEFAULT 'FRESH', executing INTEGER NOT NULL DEFAULT 0 CHECK(executing IN (0,1)),
         version INTEGER NOT NULL DEFAULT 1)""",
-    """CREATE TABLE inventory_observations(
-        observation_id INTEGER PRIMARY KEY, item_id TEXT NOT NULL REFERENCES inventory_items(item_id),
-        sku TEXT NOT NULL,frame_id TEXT NOT NULL,x REAL NOT NULL,y REAL NOT NULL,z REAL NOT NULL,
-        observed REAL NOT NULL,run_id TEXT NOT NULL,epoch INTEGER NOT NULL,source TEXT NOT NULL)""",
+    OBSERVATION_SCHEMA,
     """CREATE TABLE reservations(
         reservation_id INTEGER PRIMARY KEY,item_id TEXT NOT NULL REFERENCES inventory_items(item_id),
         order_id TEXT NOT NULL REFERENCES orders(order_id),
@@ -85,7 +88,7 @@ def import_legacy(store, snapshot):
             raise ValueError(
                 f"Legacy order {identifier} has no lines; migration rolled back"
             )
-        progress = store.verified_progress(identifier)
+        progress = legacy_verified_progress(db, identifier)
         if checkpoint.get("order_id") == identifier:
             for sku, count in checkpoint.get("completed_by_sku", {}).items():
                 progress[sku] = max(progress.get(sku, 0), count)
@@ -244,3 +247,96 @@ def import_legacy(store, snapshot):
                 ),
             )
     store.set_meta("migration", {"from": "legacy_snapshot", "at": now})
+
+
+def legacy_verified_progress(db, identifier):
+    """Migration only. An operation's cumulative JSON never drives new execution."""
+    progress = {}
+    for row in db.execute(
+        "SELECT result FROM operations WHERE order_id=? AND state='VERIFIED'",
+        (identifier,),
+    ):
+        result = json.loads(row[0]) if row[0] else {}
+        for sku, count in result.get("completed_by_sku", {}).items():
+            if type(count) is int and count >= 0:
+                progress[sku] = max(progress.get(sku, 0), count)
+    return progress
+
+
+def upgrade_v2(store):
+    """Run under the migration owner's transaction. Preserve historical counts."""
+    db = store.db
+    db.execute("ALTER TABLE order_lines RENAME COLUMN completed TO legacy_completed")
+    for row in list(db.execute("SELECT * FROM order_lines")):
+        placed = db.execute(
+            "SELECT COUNT(*) FROM placed_items WHERE order_id=? AND sku=?",
+            (row["order_id"], row["sku"]),
+        ).fetchone()[0]
+        old = max(
+            row["legacy_completed"],
+            legacy_verified_progress(db, row["order_id"]).get(row["sku"], 0),
+        )
+        if placed > row["quantity"]:
+            raise ValueError(
+                "Historical placements exceed demand; reconcile before upgrading"
+            )
+        db.execute(
+            "UPDATE order_lines SET legacy_completed=? WHERE order_id=? AND sku=?",
+            (max(0, min(row["quantity"], old) - placed), row["order_id"], row["sku"]),
+        )
+    db.execute("ALTER TABLE inventory_items DROP COLUMN version")
+    db.execute("ALTER TABLE reservations ADD COLUMN released REAL")
+    db.execute("UPDATE reservations SET released=updated WHERE state='RELEASED'")
+    db.execute("""UPDATE inventory_items SET state='UNKNOWN',verification='REVIEW',executing=0
+                  WHERE state NOT IN ('PLACED','COLLECTED','RETIRED')
+                  AND item_id IN (SELECT item_id FROM reservations WHERE state='REVIEW')""")
+    db.execute("DROP INDEX one_item_owner")
+    db.execute("DROP INDEX reservation_order")
+    db.execute("ALTER TABLE reservations DROP COLUMN state")
+    db.execute(
+        "CREATE UNIQUE INDEX one_item_owner ON reservations(item_id) WHERE released IS NULL"
+    )
+    db.execute("CREATE INDEX reservation_order ON reservations(order_id,released)")
+    db.execute("CREATE INDEX placed_order_sku ON placed_items(order_id,sku)")
+    db.execute("""
+        CREATE VIEW order_progress AS
+        SELECT l.order_id,l.sku,l.quantity,l.legacy_completed,
+            l.legacy_completed+(SELECT COUNT(*) FROM placed_items p
+                WHERE p.order_id=l.order_id AND p.sku=l.sku) AS completed
+        FROM order_lines l
+    """)
+    db.execute("""
+        CREATE VIEW reservation_status AS
+        SELECT r.*, CASE WHEN r.released IS NOT NULL THEN 'RELEASED'
+            WHEN i.state='RESERVED' THEN 'HELD'
+            WHEN i.state='CARRYING' THEN 'CARRYING'
+            WHEN i.state IN ('PLACED','COLLECTED') THEN 'CONSUMED'
+            ELSE 'REVIEW' END AS state
+        FROM reservations r JOIN inventory_items i USING(item_id)
+    """)
+    db.execute("""
+        CREATE TRIGGER placement_within_demand BEFORE INSERT ON placed_items
+        WHEN EXISTS(SELECT 1 FROM order_progress l WHERE l.order_id=NEW.order_id
+                    AND l.sku=NEW.sku AND l.completed>=l.quantity)
+        BEGIN SELECT RAISE(ABORT,'Placement exceeds remaining demand'); END
+    """)
+    # Empty bootstrap history is unnecessary; nonempty pre-upgrade history is preserved.
+    if not db.execute("SELECT 1 FROM inventory_observations LIMIT 1").fetchone():
+        db.execute("DROP TABLE inventory_observations")
+    for table, column, redundant in (
+        ("events", "body", ("order_id", "stage")),
+        ("requests", "body", ("request_id", "expected_database_version")),
+        ("operations", "result", ("completed_by_sku",)),
+    ):
+        for row in list(
+            db.execute(f"SELECT rowid,{column} FROM {table} WHERE {column} IS NOT NULL")
+        ):
+            payload = json.loads(row[1])
+            if isinstance(payload, dict) and any(key in payload for key in redundant):
+                for key in redundant:
+                    payload.pop(key, None)
+                db.execute(
+                    f"UPDATE {table} SET {column}=? WHERE rowid=?",
+                    (json.dumps(payload, ensure_ascii=False), row[0]),
+                )
+    db.execute("PRAGMA user_version=2")

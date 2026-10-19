@@ -10,7 +10,11 @@ import uuid
 
 
 class WorkcellDatabase:
-    def __init__(self, path):
+    def __init__(self, path, *, max_events=5000, event_retention_days=7):
+        if type(max_events) is not int or max_events < 1 or event_retention_days <= 0:
+            raise ValueError("History limits must be positive")
+        self.max_events = max_events
+        self.event_retention_days = event_retention_days
         self.path = Path(path).expanduser()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = RLock()
@@ -97,9 +101,9 @@ class WorkcellDatabase:
 
     def _migrate(self):
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version > 1:
+        if version > 2:
             raise ValueError("Database schema is newer than this application")
-        if version == 1:
+        if version == 2:
             return
         has_legacy = self.db.execute(
             "SELECT 1 FROM sqlite_master WHERE name='snapshots' AND type='table'"
@@ -109,23 +113,25 @@ class WorkcellDatabase:
             if has_legacy
             else None
         )
-        if legacy and str(self.path) != ":memory:":
-            backup_path = self.path.with_name(self.path.name + ".pre-relational.bak")
+        if (legacy or version == 1) and str(self.path) != ":memory:":
+            suffix = ".pre-v2.bak" if version == 1 else ".pre-relational.bak"
+            backup_path = self.path.with_name(self.path.name + suffix)
             if backup_path.exists():
                 raise ValueError(
                     f"Migration backup already exists; inspect it before retrying: {backup_path}"
                 )
             with sqlite3.connect(backup_path) as backup:
                 self.db.backup(backup)
-        from .schema import SCHEMA, import_legacy
+        from .schema import SCHEMA_V1, import_legacy, upgrade_v2
 
         with self.transaction() as db:
-            for statement in SCHEMA:
-                db.execute(statement)
-            if legacy:
-                import_legacy(self, json.loads(legacy[0]))
-            db.execute("DROP TABLE IF EXISTS snapshots")
-            db.execute("PRAGMA user_version=1")
+            if version == 0:
+                for statement in SCHEMA_V1:
+                    db.execute(statement)
+                if legacy:
+                    import_legacy(self, json.loads(legacy[0]))
+                db.execute("DROP TABLE IF EXISTS snapshots")
+            upgrade_v2(self)
 
     def event(self, entry):
         with self.transaction():
@@ -134,7 +140,14 @@ class WorkcellDatabase:
                 (
                     entry.get("order_id"),
                     entry.get("stage"),
-                    json.dumps(entry, ensure_ascii=False),
+                    json.dumps(
+                        {
+                            key: value
+                            for key, value in entry.items()
+                            if key not in ("order_id", "stage")
+                        },
+                        ensure_ascii=False,
+                    ),
                     time.time(),
                 ),
             )
@@ -157,9 +170,10 @@ class WorkcellDatabase:
 
     def events_for_order(self, order_id):
         return [
-            json.loads(row["body"])
+            dict(json.loads(row["body"]), order_id=row["order_id"], stage=row["stage"])
             for row in self.rows(
-                "SELECT body FROM events WHERE order_id=? ORDER BY id", (order_id,)
+                "SELECT order_id,stage,body FROM events WHERE order_id=? ORDER BY id",
+                (order_id,),
             )
         ]
 
@@ -187,6 +201,13 @@ class WorkcellDatabase:
                 )
             ]
 
+    def has_order_operation(self, identifier):
+        return bool(
+            self.rows(
+                "SELECT 1 FROM operations WHERE order_id=? LIMIT 1", (identifier,)
+            )
+        )
+
     def operation(self, identifier):
         with self._lock:
             row = self.db.execute(
@@ -204,25 +225,16 @@ class WorkcellDatabase:
                 else None
             )
 
-    def verified_progress(self, order_id):
-        with self._lock:
-            progress = {}
-            for (encoded,) in self.db.execute(
-                "SELECT result FROM operations WHERE order_id=? AND state='VERIFIED'",
-                (order_id,),
-            ):
-                result = json.loads(encoded) if encoded else {}
-                for sku, count in result.get("completed_by_sku", {}).items():
-                    if type(count) is int and count >= 0:
-                        progress[sku] = max(progress.get(sku, 0), count)
-            return progress
-
     def request(self, identifier):
         with self._lock:
             row = self.db.execute(
                 "SELECT body,state FROM requests WHERE request_id=?", (identifier,)
             ).fetchone()
-            return dict(json.loads(row[0]), state=row[1]) if row else None
+            return (
+                dict(json.loads(row[0]), request_id=identifier, state=row[1])
+                if row
+                else None
+            )
 
     def quarantine_interrupted_maintenance(self):
         with self.transaction():
@@ -261,6 +273,7 @@ class WorkcellDatabase:
                     "Maintenance already admitted or result unknown; do not repeat"
                 )
             request.pop("state")
+            request.pop("request_id", None)
             request.update(execution_state="ADMITTING", execution_error="")
             self.db.execute(
                 "UPDATE requests SET state='APPROVED',body=? WHERE request_id=?",
@@ -277,6 +290,7 @@ class WorkcellDatabase:
             if not request or request.get("execution_state") not in expected:
                 return False
             request.pop("state")
+            request.pop("request_id", None)
             request.update(execution_state=state, execution_error=error)
             self.db.execute(
                 "UPDATE requests SET body=? WHERE request_id=?",
@@ -287,8 +301,8 @@ class WorkcellDatabase:
     def create_request(self, body):
         identifier = uuid.uuid4().hex
         with self.transaction():
-            for (encoded,) in self.db.execute(
-                "SELECT body FROM requests WHERE state='PENDING'"
+            for existing_id, encoded in self.db.execute(
+                "SELECT request_id,body FROM requests WHERE state='PENDING'"
             ):
                 existing = json.loads(encoded)
                 original = {
@@ -297,10 +311,9 @@ class WorkcellDatabase:
                     if k not in ("request_id", "created", "expires")
                 }
                 if original == body and existing["expires"] > time.time():
-                    return existing
+                    return dict(existing, request_id=existing_id)
             body = dict(
                 body,
-                request_id=identifier,
                 created=time.time(),
                 expires=time.time() + 600,
             )
@@ -308,14 +321,14 @@ class WorkcellDatabase:
                 "INSERT INTO requests VALUES(?,?,'PENDING')",
                 (identifier, json.dumps(body, ensure_ascii=False)),
             )
-        return body
+        return dict(body, request_id=identifier)
 
     def requests(self):
         with self._lock:
             return [
-                dict(json.loads(body), state=state)
-                for body, state in self.db.execute(
-                    "SELECT body,state FROM requests ORDER BY rowid DESC LIMIT 50"
+                dict(json.loads(body), request_id=identifier, state=state)
+                for identifier, body, state in self.db.execute(
+                    "SELECT request_id,body,state FROM requests ORDER BY rowid DESC LIMIT 50"
                 )
             ]
 
@@ -333,3 +346,32 @@ class WorkcellDatabase:
     def close(self):
         with self._lock:
             self.db.close()
+
+    def prune_history(self, *, now=None):
+        """Soft budget: never remove pending/uncertain evidence or terminal milestones."""
+        cutoff = (
+            time.time() if now is None else now
+        ) - self.event_retention_days * 86400
+        with self.transaction() as db:
+            return db.execute(
+                """
+                DELETE FROM events
+                WHERE (created<? OR id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT ?))
+                  AND NOT EXISTS(SELECT 1 FROM requests r WHERE r.state='APPROVED'
+                    AND json_extract(CASE WHEN json_valid(r.body) THEN r.body ELSE '{}' END,'$.execution_state')
+                        IN ('ADMITTING','RUNNING','UNKNOWN'))
+                  AND stage NOT IN ('ORDER_FAILED','ORDER_COMPLETED','ORDER_CANCELLED','FINAL_AUDIT')
+                  AND (
+                    order_id IS NULL OR order_id='' OR EXISTS(
+                      SELECT 1 FROM orders o WHERE o.order_id=events.order_id
+                        AND o.state IN ('COLLECTED','FAILED','CANCELED','CANCELLED','DISCARDED_BY_RESET')
+                        AND o.review_required=0
+                        AND NOT EXISTS(SELECT 1 FROM bin_allocations a WHERE a.order_id=o.order_id AND a.released IS NULL)
+                        AND NOT EXISTS(SELECT 1 FROM operations p WHERE p.order_id=o.order_id AND p.state IN ('INTENT','UNCERTAIN'))
+                        AND NOT EXISTS(SELECT 1 FROM requests r WHERE r.state='PENDING'
+                          AND json_extract(CASE WHEN json_valid(r.body) THEN r.body ELSE '{}' END,'$.arguments.order_id')=o.order_id)
+                    )
+                  )
+            """,
+                (cutoff, self.max_events),
+            ).rowcount

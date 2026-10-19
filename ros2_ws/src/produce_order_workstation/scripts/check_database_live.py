@@ -113,13 +113,14 @@ def main():
                 "SELECT count(*) FROM orders WHERE order_id=?", (identifier,)
             ).fetchone()[0]
             completed = db.execute(
-                "SELECT sum(completed) FROM order_lines WHERE order_id=?", (identifier,)
+                "SELECT sum(completed) FROM order_progress WHERE order_id=?",
+                (identifier,),
             ).fetchone()[0]
             placed = db.execute(
                 "SELECT count(*) FROM placed_items WHERE order_id=?", (identifier,)
             ).fetchone()[0]
             consumed = db.execute(
-                "SELECT count(*) FROM reservations WHERE order_id=? AND state='CONSUMED'",
+                "SELECT count(*) FROM reservation_status WHERE order_id=? AND state='CONSUMED'",
                 (identifier,),
             ).fetchone()[0]
             verified = db.execute(

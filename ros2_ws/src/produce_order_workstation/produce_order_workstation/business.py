@@ -106,7 +106,6 @@ class BusinessCoordinator:
                     )
                     validate_order(changed, s.config)
                     body["expected_version"] = order_version(job.order)
-                    body["expected_database_version"] = job.version
                 elif command == "request_replenishment":
                     # Full-table replenishment is the existing operation; requested
                     # counts are advice, never used as inventory measurements.

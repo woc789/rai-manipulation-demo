@@ -73,6 +73,12 @@ class Workstation:
             self.store,
             association_radius=perception.get("association_radius_m", 0.035),
             ttl=perception.get("inventory_ttl_s", 60.0),
+            record_observations=config.get("persistence", {}).get(
+                "record_observations", False
+            ),
+            observation_limit=config.get("persistence", {}).get(
+                "max_observations", 1000
+            ),
         )
         self._perception_generation = 0
         self._rejected_visual_positions: dict[
@@ -129,11 +135,7 @@ class Workstation:
 
     @property
     def _delivered_entity_names(self):
-        return {
-            row["entity_name"]
-            for row in self.store.rows("""SELECT p.entity_name FROM placed_items p
-            JOIN inventory_items i USING(item_id) WHERE i.state IN ('PLACED','COLLECTED')""")
-        }
+        return self.resources.delivered_entity_names()
 
     def event(self, order_id: str, stage: str, **details) -> None:
         entry = {

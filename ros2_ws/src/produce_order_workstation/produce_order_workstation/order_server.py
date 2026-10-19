@@ -161,7 +161,11 @@ class OrderActionServer(Node):
             "produce_order_runtime", executor_type="single_threaded"
         )
         self.store = WorkcellDatabase(
-            os.getenv("PRODUCE_STATE_DB", self.config["persistence"]["path"])
+            os.getenv("PRODUCE_STATE_DB", self.config["persistence"]["path"]),
+            max_events=self.config["persistence"].get("max_events", 5000),
+            event_retention_days=self.config["persistence"].get(
+                "event_retention_days", 7
+            ),
         )
         self.resources = ResourceRepository(self.store, self.config)
         self.workstation = Workstation(self.connector, self.config, store=self.store)
@@ -226,7 +230,14 @@ class OrderActionServer(Node):
         self._watchdog_timer = self.create_timer(
             1.0, self.check_dispatch_timeout, callback_group=ReentrantCallbackGroup()
         )
+        self._history_timer = self.create_timer(60.0, self._prune_history)
         Thread(target=self._prepare_initial_stock, daemon=True).start()
+
+    def _prune_history(self):
+        try:
+            self.store.prune_history()
+        except sqlite3.Error as exc:
+            self.get_logger().warning(f"History cleanup deferred: {exc}")
 
     def submit_callback(self, request, response):
         try:
@@ -609,9 +620,7 @@ class OrderActionServer(Node):
             if self._dispatch_order_id:
                 job = self.resources.get(self._dispatch_order_id)
                 allocation = self.resources.allocation(job.order.order_id)
-                attempted = self.store.rows(
-                    "SELECT 1 FROM operations WHERE order_id=?", (job.order.order_id,)
-                )
+                attempted = self.store.has_order_operation(job.order.order_id)
                 if not attempted and not self.resources.placements(job.order.order_id):
                     if allocation:
                         self.resources.allocation_state(

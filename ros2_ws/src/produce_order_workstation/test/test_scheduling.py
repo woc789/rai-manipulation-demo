@@ -305,7 +305,7 @@ def test_late_acceptance_requests_cancel_and_late_result_does_not_restart_queue(
     OrderActionServer._dispatch_response(server, response, "active")
     handle.cancel_goal_async.assert_called_once()
     with server.store.transaction() as db:
-        db.execute("UPDATE order_lines SET completed=1 WHERE order_id='active'")
+        db.execute("UPDATE order_lines SET legacy_completed=1 WHERE order_id='active'")
     result_future.set_result(
         SimpleNamespace(
             result=SimpleNamespace(status="COMPLETED", completed=1, error="")
@@ -570,7 +570,7 @@ def test_discard_paused_requires_explicit_confirmation_and_cleanup_success(tmp_p
     server.resources.submit(job)
     server.resources.allocate(job)
     with server.store.transaction() as db:
-        db.execute("UPDATE order_lines SET completed=1 WHERE order_id='partial'")
+        db.execute("UPDATE order_lines SET legacy_completed=1 WHERE order_id='partial'")
     server.resources.finish_allocation("partial", "PAUSED", False)
     server.resources.finish("partial", "PAUSED", 1, "urgent")
     server.workstation.collect_order = MagicMock(

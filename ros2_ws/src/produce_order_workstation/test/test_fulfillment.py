@@ -231,7 +231,9 @@ def test_complete_action_keeps_scene_and_records_allocated_bin(tmp_path):
 
     def verified_run(_order):
         with server.store.transaction() as db:
-            db.execute("UPDATE order_lines SET completed=1 WHERE order_id='done'")
+            db.execute(
+                "UPDATE order_lines SET legacy_completed=1 WHERE order_id='done'"
+            )
         return dict(status="COMPLETED", completed=1, requested=1, error=None)
 
     server.workstation.run.side_effect = verified_run

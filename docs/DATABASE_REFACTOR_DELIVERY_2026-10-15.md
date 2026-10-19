@@ -1,5 +1,8 @@
 # 数据库统一业务状态：改造与验收
 
+> 本文记录结构 v1。2026-10-19 的精简已将 completed 改为查询结果、移除预留重复阶段并增加历史保留规则。
+> 当前结构、查询方法与验证见 [v2 精简说明](DATABASE_SIMPLIFICATION_2026-10-19.md)。
+
 - 日期：2026-10-15。
 - 改造前基线：`4b6a698`。
 - 设计依据：[DATABASE_REFACTOR_PLAN.md](DATABASE_REFACTOR_PLAN.md)。

@@ -61,7 +61,7 @@ def mark_placed(book, item, owner):
 
 
 def seed_progress(station, counts, identifier=None):
-    """Fixture-only evidence; tests of real placement use record_placement instead."""
+    """Fixture-only migrated baseline; new physical results use record_placement."""
     identifier = (
         identifier or getattr(station, "_active_order_id", None) or "fixture-order"
     )
@@ -87,7 +87,7 @@ def seed_progress(station, counts, identifier=None):
                 )
             else:
                 db.execute(
-                    "UPDATE order_lines SET completed=? WHERE order_id=? AND sku=?",
+                    "UPDATE order_lines SET legacy_completed=? WHERE order_id=? AND sku=?",
                     (count, identifier, sku),
                 )
     station._active_order_id = identifier

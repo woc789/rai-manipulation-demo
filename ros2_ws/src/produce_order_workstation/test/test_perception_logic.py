@@ -320,7 +320,7 @@ def test_review_pause_never_automatically_restarts():
     queue = make_resources()
     job = queue.submit(Order("a", "A", (OrderLine("corn", 2),)))
     with queue.store.transaction() as db:
-        db.execute("UPDATE order_lines SET completed=1 WHERE order_id='a'")
+        db.execute("UPDATE order_lines SET legacy_completed=1 WHERE order_id='a'")
     queue.finish("a", "PAUSED", 1, "[REVIEW_REQUIRED] detection exhausted")
     assert queue.get("a").review_required and queue.pending() == []
     assert queue.snapshot_orders()[0]["review_required"]

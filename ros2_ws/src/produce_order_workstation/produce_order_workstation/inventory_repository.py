@@ -33,12 +33,29 @@ class InventoryRepository:
         clock=time.monotonic,
         wall_clock=time.time,
         run_id=None,
+        record_observations=False,
+        observation_limit=1000,
     ):
         if association_radius <= 0 or ttl <= 0:
             raise ValueError("Inventory radius and TTL must be positive")
         self.store, self.radius, self.ttl = store, association_radius, ttl
         self.clock, self.wall_clock = clock, wall_clock
         self.run_id = run_id or store.session_id
+        if type(observation_limit) is not int or observation_limit < 1:
+            raise ValueError("Observation limit must be positive")
+        self.record_observations = bool(record_observations)
+        self.observation_limit = observation_limit
+        if self.record_observations:
+            from .schema import OBSERVATION_SCHEMA
+
+            with store.transaction() as db:
+                if not db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='inventory_observations'"
+                ).fetchone():
+                    db.execute(OBSERVATION_SCHEMA)
+                    db.execute(
+                        "CREATE INDEX observations_item ON inventory_observations(item_id,observed)"
+                    )
 
     @property
     def epoch(self):
@@ -47,7 +64,7 @@ class InventoryRepository:
     def _read(self):
         records = {}
         for row in self.store.rows("""SELECT i.*,r.order_id FROM inventory_items i LEFT JOIN reservations r
-            ON r.item_id=i.item_id AND r.state<>'RELEASED' WHERE i.state<>'RETIRED' ORDER BY i.rowid"""):
+            ON r.item_id=i.item_id AND r.released IS NULL WHERE i.state<>'RETIRED' ORDER BY i.rowid"""):
             item = VisualRecord(
                 row["item_id"],
                 row["sku"],
@@ -124,43 +141,31 @@ class InventoryRepository:
             elif values != old_values:
                 db.execute(
                     """UPDATE inventory_items SET sku=?,frame_id=?,x=?,y=?,z=?,observed=?,seen_tick=?,run_id=?,epoch=?,
-                    state=?,verification=?,executing=?,version=version+1 WHERE item_id=?""",
+                    state=?,verification=?,executing=? WHERE item_id=?""",
                     (*values, item.item_id),
                 )
             reservation = db.execute(
-                "SELECT * FROM reservations WHERE item_id=? AND state<>'RELEASED'",
+                "SELECT * FROM reservations WHERE item_id=? AND released IS NULL",
                 (item.item_id,),
             ).fetchone()
             if reservation and reservation["order_id"] != item.order_id:
                 db.execute(
-                    "UPDATE reservations SET state='RELEASED',updated=? WHERE reservation_id=?",
-                    (now, reservation["reservation_id"]),
+                    "UPDATE reservations SET released=?,updated=? WHERE reservation_id=?",
+                    (now, now, reservation["reservation_id"]),
                 )
                 reservation = None
             if item.order_id:
-                status = {
-                    "RESERVED": "HELD",
-                    "CARRYING": "CARRYING",
-                    "PLACED": "CONSUMED",
-                    "COLLECTED": "CONSUMED",
-                    "UNKNOWN": "REVIEW",
-                }[item.state]
                 if reservation is None:
                     db.execute(
-                        "INSERT INTO reservations(item_id,order_id,state,created,updated) VALUES(?,?,?,?,?)",
-                        (item.item_id, item.order_id, status, now, now),
-                    )
-                elif status != reservation["state"]:
-                    db.execute(
-                        "UPDATE reservations SET state=?,updated=? WHERE reservation_id=?",
-                        (status, now, reservation["reservation_id"]),
+                        "INSERT INTO reservations(item_id,order_id,created,updated) VALUES(?,?,?,?)",
+                        (item.item_id, item.order_id, now, now),
                     )
 
     def reset(self):
         with self.store.transaction() as db:
             db.execute(
-                "UPDATE reservations SET state='RELEASED',updated=? WHERE state<>'RELEASED'",
-                (self.wall_clock(),),
+                "UPDATE reservations SET released=?,updated=? WHERE released IS NULL",
+                (self.wall_clock(), self.wall_clock()),
             )
             db.execute(
                 "UPDATE inventory_items SET state='RETIRED',executing=0 WHERE state<>'RETIRED'"
@@ -170,9 +175,9 @@ class InventoryRepository:
     def invalidate_source(self):
         with self.store.transaction() as db:
             db.execute(
-                """UPDATE reservations SET state='RELEASED',updated=? WHERE state<>'RELEASED'
+                """UPDATE reservations SET released=?,updated=? WHERE released IS NULL
                 AND item_id IN (SELECT item_id FROM inventory_items WHERE state NOT IN ('PLACED','COLLECTED'))""",
-                (self.wall_clock(),),
+                (self.wall_clock(), self.wall_clock()),
             )
             db.execute(
                 "UPDATE inventory_items SET state='RETIRED',executing=0 WHERE state NOT IN ('PLACED','COLLECTED')"
@@ -258,21 +263,27 @@ class InventoryRepository:
                         item.state = other.state = "UNKNOWN"
                         item.verification = other.verification = "AMBIGUOUS"
             self._write(items)
-            for identity in identities:
-                item = items[identity]
+            if self.record_observations:
+                for identity in identities:
+                    item = items[identity]
+                    db.execute(
+                        """INSERT INTO inventory_observations(item_id,sku,frame_id,x,y,z,observed,run_id,epoch,source)
+                        VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            identity,
+                            sku,
+                            frame_id,
+                            *item.position,
+                            item.observed_unix_sec,
+                            self.run_id,
+                            self.epoch,
+                            "rgbd_detection_segmentation_depth_tf",
+                        ),
+                    )
                 db.execute(
-                    """INSERT INTO inventory_observations(item_id,sku,frame_id,x,y,z,observed,run_id,epoch,source)
-                    VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                    (
-                        identity,
-                        sku,
-                        frame_id,
-                        *item.position,
-                        item.observed_unix_sec,
-                        self.run_id,
-                        self.epoch,
-                        "rgbd_detection_segmentation_depth_tf",
-                    ),
+                    "DELETE FROM inventory_observations WHERE observation_id NOT IN "
+                    "(SELECT observation_id FROM inventory_observations ORDER BY observation_id DESC LIMIT ?)",
+                    (self.observation_limit,),
                 )
             return identities
 
@@ -570,13 +581,11 @@ class InventoryRepository:
                 (order.order_id, bin_id),
             ).fetchone():
                 raise ValueError("Placement bin is not owned by this order")
-            if (
-                db.execute(
-                    "UPDATE order_lines SET completed=completed+1 WHERE order_id=? AND sku=? AND completed<quantity",
-                    (order.order_id, item.sku),
-                ).rowcount
-                != 1
-            ):
+            demand = db.execute(
+                "SELECT completed,quantity FROM order_progress WHERE order_id=? AND sku=?",
+                (order.order_id, item.sku),
+            ).fetchone()
+            if not demand or demand["completed"] >= demand["quantity"]:
                 raise ValueError("Placement exceeds remaining demand")
             db.execute(
                 "INSERT INTO placed_items VALUES(?,?,?,?,?,?,?,?,?)",
@@ -597,7 +606,7 @@ class InventoryRepository:
             progress = {
                 row["sku"]: row["completed"]
                 for row in db.execute(
-                    "SELECT sku,completed FROM order_lines WHERE order_id=?",
+                    "SELECT sku,completed FROM order_progress WHERE order_id=?",
                     (order.order_id,),
                 )
             }
@@ -607,7 +616,6 @@ class InventoryRepository:
                 remaining=order.total_items - sum(progress.values()),
                 detection_id="",
                 request_detection_id=detection_id,
-                completed_by_sku=progress,
             )
             self.store.finish_operation(operation_id, "VERIFIED", result)
             db.execute(

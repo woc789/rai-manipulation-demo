@@ -55,7 +55,6 @@ def test_schema_and_foreign_keys_replace_snapshots(state):
         "orders",
         "order_lines",
         "inventory_items",
-        "inventory_observations",
         "reservations",
         "bins",
         "bin_allocations",
@@ -138,7 +137,9 @@ def test_independent_connections_cannot_double_reserve_stock_or_bins(state):
                 )
             )
         assert sum(job is not None for job in jobs) == 1
-        assert len(store.rows("SELECT * FROM reservations WHERE state='HELD'")) == 1
+        assert (
+            len(store.rows("SELECT * FROM reservation_status WHERE state='HELD'")) == 1
+        )
         assert (
             len(store.rows("SELECT * FROM bin_allocations WHERE released IS NULL")) == 1
         )
@@ -213,7 +214,7 @@ def test_failed_placement_commit_preserves_intent_not_false_completion(state):
     job, item, operation = carrying(state)
     with store.transaction() as db:
         db.execute(
-            "CREATE TRIGGER reject_progress BEFORE UPDATE OF completed ON order_lines BEGIN SELECT RAISE(ABORT,'disk failure');END"
+            "CREATE TRIGGER reject_progress BEFORE INSERT ON placed_items BEGIN SELECT RAISE(ABORT,'disk failure');END"
         )
     with pytest.raises(sqlite3.IntegrityError):
         inventory.record_placement(

@@ -206,7 +206,7 @@ def test_restart_preserves_queue_and_quarantines_physical_tasks(tmp_path):
     resources.submit(placed)
     resources.allocate(placed)
     with store.transaction() as db:
-        db.execute("UPDATE order_lines SET completed=1 WHERE order_id='placed'")
+        db.execute("UPDATE order_lines SET legacy_completed=1 WHERE order_id='placed'")
     resources.allocation_state("placed", "WAITING_PICKUP")
     resources.update("placed", state="WAITING_PICKUP")
     s = SimpleNamespace(store=store, resources=resources, _startup_review=False)

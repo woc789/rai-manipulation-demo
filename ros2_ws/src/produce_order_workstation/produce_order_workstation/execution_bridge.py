@@ -367,7 +367,6 @@ class ExecutionBridge:
                     }
                     result.update(
                         request_detection_id=request.detection_id,
-                        completed_by_sku=dict(self.station._completed_by_sku),
                     )
                     try:
                         saved = self.server.store.operation(operation)

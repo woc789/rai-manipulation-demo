@@ -4,6 +4,10 @@ execution:
   backend: behavior_tree
 persistence:
   path: ~/.local/share/produce_order_workstation/workcell-mcp.sqlite3
+  record_observations: false
+  max_observations: 1000
+  max_events: 5000
+  event_retention_days: 7
 scene_service_timeout_s: 20.0
 scheduler:
   accept_timeout_s: 15.0

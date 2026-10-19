@@ -362,7 +362,7 @@ def test_restart_partial_order_keeps_progress_and_quarantines_coordinates(tmp_pa
     resources.submit(job)
     resources.allocate(job)
     with store.transaction() as db:
-        db.execute("UPDATE order_lines SET completed=1 WHERE order_id='partial'")
+        db.execute("UPDATE order_lines SET legacy_completed=1 WHERE order_id='partial'")
     inventory.observe("corn", "base", [(0.3, 0.1, 0.04)])
     resources.update("partial", state="RUNNING")
     store.begin_operation("partial", "PICK", "unconfirmed")
@@ -505,7 +505,7 @@ def test_clock_missing_disconnected_and_frozen_are_detected(mode):
     assert bool(OrderActionServer._clock_problem(s)) == (mode != "healthy")
 
 
-def test_restart_uses_verified_operation_evidence(tmp_path):
+def test_restart_never_promotes_operation_json_into_new_progress(tmp_path):
     store = WorkcellDatabase(tmp_path / "gap.db")
     resources = make_resources(CONFIG, store=store)
     resources.submit(order("partial", count=2))
@@ -514,7 +514,7 @@ def test_restart_uses_verified_operation_evidence(tmp_path):
     store.finish_operation(identifier, "VERIFIED", {"completed_by_sku": {"corn": 1}})
     s = S(store=store, resources=resources, _startup_review=False)
     OrderActionServer._restore_business_state(s)
-    assert resources.get("partial").completed == 1
+    assert resources.get("partial").completed == 0
     assert resources.get("partial").state == "RECOVERY_REQUIRED"
     store.close()
 
@@ -523,7 +523,7 @@ def test_restart_uses_verified_operation_evidence(tmp_path):
 def test_scene_reset_clears_review_only_after_physical_success(business, failure):
     job = business.resources.submit(order("old", count=2))
     with business.store.transaction() as db:
-        db.execute("UPDATE order_lines SET completed=1 WHERE order_id='old'")
+        db.execute("UPDATE order_lines SET legacy_completed=1 WHERE order_id='old'")
     business.resources.update("old", state="RECOVERY_REQUIRED", review_required=True)
     business._startup_review = True
     business.scene_path = Path("unused")

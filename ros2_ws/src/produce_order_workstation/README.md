@@ -11,6 +11,11 @@ one-by-one in response to order lines.
 
 ## Modules and data path
 
+**2026-10-19 schema v2:** new-order progress is derived from verified placements,
+reservation phases are a query view, and full observation history is off by
+default. See [the simplification and current SQL guide](../../../docs/DATABASE_SIMPLIFICATION_2026-10-19.md).
+Older v1 table/column examples below and in dated handoffs are historical.
+
 **2026-10-15 database refactor:** authoritative orders, inventory, reservations,
 bin ownership and verified progress now live in normalized SQLite tables.
 The older dated architecture sections below describe historical baselines;
