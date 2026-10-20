@@ -9,4 +9,5 @@ source /opt/ros/jazzy/setup.bash
 source src/examples/rai-manipulation-demo/ros2_ws/install/local_setup.bash
 set -u
 export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
+export ROS_DOMAIN_ID="${PRODUCE_ROS_DOMAIN_ID:-0}"
 exec ros2 run produce_order_workstation debug_panel

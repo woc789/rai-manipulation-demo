@@ -205,6 +205,16 @@ class Workstation:
             pipeline = (
                 self._position_tool.gripping_points_tool.point_cloud_from_segmentation
             )
+            from .color_verification import install_color_verification
+
+            pipeline = install_color_verification(
+                pipeline,
+                self.config.get("perception", {}).get("color_verification", {}),
+                self.config["aliases"],
+            )
+            self._position_tool.gripping_points_tool.point_cloud_from_segmentation = (
+                pipeline
+            )
             pipeline.check_cancel = self.check_cancel
             pipeline.config.service_timeout = self.config.get("perception", {}).get(
                 "service_timeout_s", 20.0

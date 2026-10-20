@@ -60,6 +60,15 @@ agent:
   max_tool_calls_per_item: 6
   max_consecutive_empty_perceptions: 5
 perception:
+  color_verification:
+    enabled: true
+    profile: brown_apple_red_tomato
+    min_pixels: 50
+    # Actual SAM masks: brown support >= 0.54 on apples, < 0.06 on tomatoes.
+    # Require a majority and a separate 0.20 dominance margin, not top-4 ranking.
+    min_support: 0.52
+    min_margin: 0.20
+    max_area_fraction: 0.02
   # Fresh-scene acceptance only; normal order depletion must not require 4/SKU.
   initial_scan_attempts: 2
   # Normalized ROI for fixed RGBDCamera5. Boxes are mapped back to full-frame

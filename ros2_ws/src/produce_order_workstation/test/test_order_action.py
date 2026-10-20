@@ -101,6 +101,13 @@ def test_filtered_candidates_are_distinguished_from_detector_misses():
 
 def test_startup_configures_wrapped_perception_component(monkeypatch):
     import rai_perception.tools
+    import produce_order_workstation.color_verification as color_verification
+
+    # This case tests timeout/cancellation setup using a component double;
+    # real color-mask integration is tested separately with the actual adapter.
+    monkeypatch.setattr(
+        color_verification, "install_color_verification", lambda pipeline, *_: pipeline
+    )
 
     component = SimpleNamespace(config=SimpleNamespace(service_timeout=60.0))
     tool = SimpleNamespace(

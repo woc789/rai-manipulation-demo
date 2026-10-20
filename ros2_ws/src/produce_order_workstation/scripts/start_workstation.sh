@@ -6,14 +6,15 @@ cd "$workstation_root"
 
 # The desktop session exports Kilted paths. Mixing them with Jazzy makes
 # MoveIt/O3DE fail at dynamic linking, so build this process environment anew.
-unset AMENT_PREFIX_PATH COLCON_PREFIX_PATH CMAKE_PREFIX_PATH LD_LIBRARY_PATH PYTHONPATH ROS_DISTRO
+unset AMENT_PREFIX_PATH COLCON_PREFIX_PATH CMAKE_PREFIX_PATH LD_LIBRARY_PATH PYTHONPATH ROS_DISTRO ALL_PROXY all_proxy
 export PATH=/usr/local/bin:/usr/bin:/bin
 source /opt/ros/jazzy/setup.bash
 bt_prefix=/home/wang/.local/share/rai-deps/behaviortree-jazzy/prefix/opt/ros/jazzy
 export LD_LIBRARY_PATH="$bt_prefix/lib:${LD_LIBRARY_PATH:-}"
 source /home/wang/miniconda3/etc/profile.d/conda.sh
 conda activate rai-jazzy
-source install/setup.bash
+# Do not replay stale chained overlays from other workspaces.
+source install/local_setup.bash
 source src/examples/rai-manipulation-demo/ros2_ws/install/local_setup.bash
 set -u
 
@@ -22,6 +23,7 @@ set -u
 # A remote robot deployment must explicitly configure a different discovery
 # range for every participant, including the simulator bridge.
 export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
+export ROS_DOMAIN_ID="${PRODUCE_ROS_DOMAIN_ID:-0}"
 
 # Keep C/C++ and BLAS worker arenas bounded while O3DE and the two vision
 # models share a 16 GiB workstation. The API key remains in the private file.
