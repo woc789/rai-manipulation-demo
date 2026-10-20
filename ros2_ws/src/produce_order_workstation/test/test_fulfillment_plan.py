@@ -1,6 +1,7 @@
 """The LLM may propose strategy, never arbitrary executable BT nodes."""
 
 import json
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from xml.etree import ElementTree as ET
@@ -9,7 +10,7 @@ import pytest
 
 from produce_order_workstation.agent import ProduceAgent
 from produce_order_workstation.fulfillment_plan import (
-    compile_tree, context_digest, planning_context, validate_plan,
+    compile_tree, context_digest, planning_context, validate_plan, execution_contract_digest,
 )
 from produce_order_workstation.order import Order, OrderError, OrderLine
 
@@ -28,6 +29,32 @@ def context():
 
 def proposal(context, items):
     return {"version": 1, "context_digest": context_digest(context), "items": items}
+
+
+def test_passive_observation_age_does_not_invalidate_sku_only_strategy(context):
+    aged = deepcopy(context)
+    aged["inventory_observation"]["counts"]["corn"] = {
+        "available": 0, "reserved": 0, "uncertain": 1
+    }
+    assert context_digest(aged) != context_digest(context)
+    assert execution_contract_digest(aged) == execution_contract_digest(context)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("bin_id", "A4"), ("remaining", {"corn": 0, "apple": 1}),
+    ("completed", {"corn": 2, "apple": 0}),
+    ("requested", {"corn": 3, "apple": 1}),
+])
+def test_business_changes_still_invalidate_strategy(context, field, value):
+    changed = deepcopy(context)
+    changed[field] = value
+    assert execution_contract_digest(changed) != execution_contract_digest(context)
+
+
+def test_scene_epoch_change_still_invalidates_strategy(context):
+    changed = deepcopy(context)
+    changed["inventory_observation"]["epoch"] += 1
+    assert execution_contract_digest(changed) != execution_contract_digest(context)
 
 
 def test_context_is_observation_not_hidden_simulator_truth(context):

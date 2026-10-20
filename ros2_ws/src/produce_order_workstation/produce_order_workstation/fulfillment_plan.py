@@ -20,6 +20,20 @@ def context_digest(context):
     return hashlib.sha256(canonical_json(context).encode("utf-8")).hexdigest()
 
 
+def execution_contract_digest(context):
+    """Fence business/scene changes, not passive ageing of visual evidence.
+
+    Plans contain SKU order and retry budgets, never coordinates. Each item
+    must pass fresh perception and reservation interlocks during execution.
+    The full original context digest still binds the model's proposal.
+    """
+    contract = dict(context)
+    contract["inventory_observation"] = {
+        "epoch": context["inventory_observation"]["epoch"]
+    }
+    return context_digest(contract)
+
+
 def planning_context(order, station, max_attempts):
     completed = dict(station._completed_by_sku)
     observations = station.inventory.snapshot()

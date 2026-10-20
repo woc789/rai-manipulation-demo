@@ -2,6 +2,7 @@
 
 import json
 import time
+from math import isfinite
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -388,11 +389,25 @@ class Workstation:
             return
         zone = self.config["zones"][order.zone]
         existing = {e.name for e in self._scene_bridge.spawned_entities}
+        allocation = self.resources.allocation(order.order_id)
+        resuming = bool(
+            allocation
+            and allocation.state in ("ALLOCATED", "PAUSED")
+            and tuple(allocation.bin_indices) == tuple(indices)
+            and allocation.entities
+        )
         for index in indices:
             name = zone["slot_entities"][index]
             if name in existing:
+                if resuming:
+                    self.slot_bin_position(zone, index, tuple(zone["slots"][index]))
+                    continue
                 raise OrderError(
                     f"Allocated empty bin slot {name} already contains a physical bin"
+                )
+            if resuming:
+                raise OrderError(
+                    f"Partially filled order bin {name} is missing; inspect scene"
                 )
             self._scene_bridge._spawn_entity(self._bin_templates[name])
         time.sleep(self.config["stock"]["settle_time_s"])
@@ -516,6 +531,25 @@ class Workstation:
     def detect(self, sku: str) -> list[tuple[float, float, float]]:
         if self._position_tool is None:
             raise RuntimeError("wait_until_ready must be called first")
+        perception = self.config.get("perception", {})
+        thresholds = {
+            "box_threshold": perception.get("box_threshold", 0.35),
+            "text_threshold": perception.get("text_threshold", 0.45),
+        }
+        thresholds.update(perception.get("thresholds_by_sku", {}).get(sku, {}))
+        pipeline = getattr(
+            getattr(self._position_tool, "gripping_points_tool", None),
+            "point_cloud_from_segmentation",
+            None,
+        )
+        for name in ("box_threshold", "text_threshold"):
+            value = float(thresholds[name])
+            if not isfinite(value) or not 0 < value < 1:
+                raise OrderError(f"Invalid detection threshold for {sku}: {name}")
+            if pipeline is not None:
+                # Set BOTH on every SKU; a corn override must not leak into
+                # the next apple/tomato query or alter color verification.
+                setattr(pipeline.config, name, value)
         for alias in self.config["aliases"][sku]:
             self.check_cancel()
             try:

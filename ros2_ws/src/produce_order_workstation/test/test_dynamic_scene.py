@@ -91,6 +91,28 @@ def test_existing_bin_cannot_be_reused_as_empty():
     station._scene_bridge._spawn_entity.assert_not_called()
 
 
+def test_partial_order_reuses_only_its_existing_bound_bin(monkeypatch):
+    monkeypatch.setattr("produce_order_workstation.runtime.time.sleep", lambda _: None)
+    station = Workstation(MagicMock(), CONFIG)
+    station._scene_bridge = MagicMock()
+    station._scene_bridge.spawned_entities = [SimpleNamespace(name="order_bin_A1")]
+    station.resources = MagicMock()
+    station.resources.allocation.return_value = SimpleNamespace(
+        state="ALLOCATED", bin_indices=(0,), entities=[("verified-good",)]
+    )
+    station.event = MagicMock()
+    station.slot_bin_position = MagicMock()
+    station.synchronize_scene = MagicMock()
+    order = Order("resumed", "A", (OrderLine("apple", 2),))
+    station.ensure_order_bins(order, (0,))
+    station.slot_bin_position.assert_called_once()
+    station._scene_bridge._spawn_entity.assert_not_called()
+    station._scene_bridge.spawned_entities = []
+    with pytest.raises(OrderError, match="missing"):
+        station.ensure_order_bins(order, (0,))
+    station._scene_bridge._spawn_entity.assert_not_called()
+
+
 def test_remove_box_only_affects_selected_order_and_syncs():
     station = Workstation(MagicMock(), CONFIG)
     station._scene_bridge = MagicMock()

@@ -20,6 +20,7 @@ from produce_order_workstation.order import (
     PerceptionMismatch,
 )
 from produce_order_workstation.runtime import Workstation
+from produce_order_workstation.order_server import preserve_partial_result
 from db_support import make_resources
 
 CONFIG = yaml.safe_load(
@@ -33,6 +34,47 @@ def station():
 
 def test_workstation_passes_association_gate_to_inventory():
     assert station().inventory.radius == CONFIG["perception"]["association_radius_m"]
+
+
+@pytest.mark.parametrize("status", ["FAILED", "CANCELLED"])
+def test_setup_failure_with_goods_preserves_bin_and_requires_review(status):
+    result = dict(status=status, completed=2, error="existing bin")
+    preserve_partial_result(result, False)
+    assert result["status"] == "PAUSED"
+    assert result["completed"] == 2
+    assert result["error"].startswith("[REVIEW_REQUIRED]")
+
+
+@pytest.mark.parametrize("completed,uncertain", [(0, False), (2, True)])
+def test_partial_guard_does_not_hide_empty_or_uncertain_failure(completed, uncertain):
+    result = dict(status="FAILED", completed=completed, error="failure")
+    preserve_partial_result(result, uncertain)
+    assert result["status"] == "FAILED"
+
+
+def test_corn_threshold_override_does_not_leak_to_other_skus():
+    work = station()
+    tool = MagicMock()
+    pipeline = tool.gripping_points_tool.point_cloud_from_segmentation
+    tool.invoke.return_value = "No objects detected."
+    work._position_tool = tool
+    work._record_perception_pipeline = MagicMock()
+    work.detect("corn")
+    assert pipeline.config.box_threshold == 0.35
+    assert pipeline.config.text_threshold == 0.35
+    work.detect("apple")
+    assert pipeline.config.box_threshold == 0.35
+    assert pipeline.config.text_threshold == 0.45
+
+
+@pytest.mark.parametrize("value", [0, 1, float("nan"), -1])
+def test_invalid_per_sku_threshold_never_calls_detector(value):
+    work = station()
+    work.config["perception"]["thresholds_by_sku"]["corn"]["text_threshold"] = value
+    work._position_tool = MagicMock()
+    with pytest.raises(OrderError, match="Invalid detection threshold"):
+        work.detect("corn")
+    work._position_tool.invoke.assert_not_called()
 
 
 def test_visible_alternative_exchanges_reservation_without_overpromising():
@@ -62,8 +104,26 @@ def test_alternative_cannot_steal_or_replace_unknown_physical_state():
     reserve(book, first, "owner")
     book.observe("corn", "base", [])
     book.observe("corn", "base", [(0.3, 0.3, 0.03)])
+    with book.store.transaction():
+        items = book._read()
+        items[first].verification = "REVIEW"
+        book._write(items)
     with pytest.raises(ValueError, match="untouched"):
         book.select_for_order(alternative, order)
+
+
+def test_unseen_untouched_reservation_can_exchange_without_inventing_stock():
+    book = make_inventory()
+    first, alternative = book.observe(
+        "corn", "base", [(0.3, -0.3, 0.03), (0.3, 0.3, 0.03)]
+    )
+    order = Order("owner", "A", (OrderLine("corn", 1),))
+    reserve(book, first, "owner")
+    book.observe("corn", "base", [(0.3, 0.3, 0.03)])
+    book.select_for_order(alternative, order)
+    items = book._read()
+    assert items[first].state == "UNKNOWN" and not items[first].order_id
+    assert items[alternative].order_id == "owner"
 
 
 def test_refresh_obeys_configured_association_radius():
@@ -318,7 +378,7 @@ def test_uncertain_motion_failure_cannot_become_safe_pause(monkeypatch):
 
 def test_review_pause_never_automatically_restarts():
     queue = make_resources()
-    job = queue.submit(Order("a", "A", (OrderLine("corn", 2),)))
+    queue.submit(Order("a", "A", (OrderLine("corn", 2),)))
     with queue.store.transaction() as db:
         db.execute("UPDATE order_lines SET legacy_completed=1 WHERE order_id='a'")
     queue.finish("a", "PAUSED", 1, "[REVIEW_REQUIRED] detection exhausted")

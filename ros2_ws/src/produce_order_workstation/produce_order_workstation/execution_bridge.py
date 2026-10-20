@@ -19,7 +19,7 @@ from .order import OrderError, OrderCancelled, OrderPaused, PerceptionMismatch
 from .execution_gate import execution_gate
 from .fulfillment_plan import (
     compile_tree,
-    context_digest,
+    execution_contract_digest,
     planning_context,
     validate_plan,
 )
@@ -80,8 +80,10 @@ class ExecutionBridge:
             except (ValueError, TypeError) as exc:
                 raise OrderError("Agent returned malformed fulfillment plan") from exc
             if (
-                context_digest(planning_context(order, self.station, max_attempts))
-                != plan["context_digest"]
+                execution_contract_digest(
+                    planning_context(order, self.station, max_attempts)
+                )
+                != execution_contract_digest(context)
             ):
                 raise OrderError(
                     "Workstation state changed during planning; submit a fresh plan before motion"

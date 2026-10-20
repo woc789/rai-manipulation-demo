@@ -421,13 +421,24 @@ class InventoryRepository:
                     (
                         other
                         for other in owned
-                        if other.state == "RESERVED" and not other.executing
+                        if not other.executing
+                        and (
+                            other.state == "RESERVED"
+                            or (
+                                other.state == "UNKNOWN"
+                                and other.verification in ("STALE", "UNSEEN")
+                            )
+                        )
                     ),
                     None,
                 )
                 if replaceable is None:
                     raise ValueError("Order has no untouched reservation to exchange")
-                replaceable.state, replaceable.order_id = "AVAILABLE", ""
+                # Losing a visual observation is not evidence that a physical
+                # action occurred. Release that promise, but keep it UNKNOWN.
+                if replaceable.state == "RESERVED":
+                    replaceable.state = "AVAILABLE"
+                replaceable.order_id = ""
             item.state, item.order_id = "RESERVED", order.order_id
             self._write(items)
 

@@ -48,6 +48,19 @@ def order_from_goal(goal: ExecuteOrder.Goal) -> Order:
     )
 
 
+def preserve_partial_result(result: dict, physical_uncertain: bool) -> None:
+    """Keep verified goods and require review, including setup failures on resume."""
+    if (
+        result["status"] not in ("COMPLETED", "PAUSED")
+        and result["completed"] > 0
+        and not physical_uncertain
+    ):
+        result["status"] = "PAUSED"
+        result["error"] = "[REVIEW_REQUIRED] " + (
+            result["error"] or "Partial order stopped"
+        )
+
+
 def state_after_order(status: str, physical_uncertain: bool) -> tuple[str, str, bool]:
     """Require recovery for uncertain physical state, not every attempted plan."""
     if status == "COMPLETED":
@@ -1215,6 +1228,9 @@ class OrderActionServer(Node):
         allocation = self.resources.allocation(order.order_id)
         scene_uncertain = False
         physical_uncertain = self.workstation.physical_state_uncertain
+        # Setup failures happen outside Workstation.run as well. Never remove
+        # or release a bin containing verified goods on those paths.
+        preserve_partial_result(result, physical_uncertain)
         if result["status"] not in ("COMPLETED", "PAUSED") and not physical_uncertain:
             try:
                 self.workstation.remove_order_bins(order, allocation.bin_indices)
