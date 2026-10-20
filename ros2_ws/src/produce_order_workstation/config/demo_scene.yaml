@@ -19,18 +19,12 @@ entities:
     pose:
       translation: {x: 0.50, y: 0.48, z: 0.05}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
-  # Real wooden crate awaiting return, laid on its side at the table edge.
-  # Receiving-bin entries above are templates; fulfillment startup does not spawn them.
-  - name: packing_return_crate
-    prefab_name: toy_box
-    pose:
-      translation: {x: 0.26, y: 0.0, z: 0.115}
-      rotation: {x: 0.0, y: 0.7071067811865476, z: 0.0, w: 0.7071067811865476}
+  # No central obstacle. Receiving bins above are templates, spawned on admission.
   # Sixteen mixed objects exist before the Agent sees the order. Names are stable
   # entity IDs; TF positions are measured again before each pick.
   # Two staggered mixed banks, spaced for the fixed RGBDCamera5 view.
   # >= 10 cm centre spacing, >= 17 cm from future bin centres, >= 40 cm
-  # from panda_link0. Leave the crate footprint clear; do not change box slots.
+  # from panda_link0. Preserve future receiving-bin clearance.
   # Four corn cobs use a staggered foreground patch between A2/A3. This
   # measured layout improves corn detection from 2 to 3, not a 4/4 guarantee.
   # More compact rows and tilted apples were tested and rejected.

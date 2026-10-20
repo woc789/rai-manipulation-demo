@@ -162,6 +162,8 @@ def build_collision_objects(
                         (2 * half_x, wall_thickness, wall_height))
             objects.append(obj)
     barrier = scene["barrier"]
+    if not barrier.get("enabled", True):
+        return objects
     if barrier.get("kind") == "return_crate":
         objects.append(crate_collision_object(config, barrier_poses))
         return objects

@@ -14,6 +14,7 @@ from produce_order_workstation.runtime import Workstation
 
 PACKAGE = Path(__file__).resolve().parents[1]
 CONFIG = yaml.safe_load((PACKAGE / "config/workstation.yaml").read_text())
+CONFIG["planning_scene"]["barrier"]["enabled"] = True
 EXPECTED = CONFIG["planning_scene"]["barrier"]["expected_pose"]
 CRATE = Pose(position=Point(x=EXPECTED["position"][0], y=EXPECTED["position"][1], z=EXPECTED["position"][2]),
              orientation=Quaternion(x=EXPECTED["orientation"][0], y=EXPECTED["orientation"][1],
@@ -125,9 +126,11 @@ def test_remove_box_only_affects_selected_order_and_syncs():
     station.synchronize_scene.assert_called_once()
 
 
-def test_actual_startup_spawns_stock_and_obstacle_but_no_order_boxes(monkeypatch):
+def test_actual_startup_spawns_stock_without_obstacle_or_order_boxes(monkeypatch):
     monkeypatch.setattr("produce_order_workstation.runtime.time.sleep", lambda _: None)
-    station = Workstation(MagicMock(), CONFIG)
+    config = deepcopy(CONFIG)
+    config["planning_scene"]["barrier"]["enabled"] = False
+    station = Workstation(MagicMock(), config)
     bridge = MagicMock()
     bridge.spawned_entities = []
     bridge.setup_scene.side_effect = lambda scene: bridge.spawned_entities.extend(scene.entities)
@@ -135,10 +138,21 @@ def test_actual_startup_spawns_stock_and_obstacle_but_no_order_boxes(monkeypatch
     bridge.get_object_pose.side_effect = lambda entity: SimpleNamespace(pose=entity.pose.pose)
     station._scene_bridge = bridge
     station._planning_scene = MagicMock()
-    station._planning_scene.synchronize.return_value = ["produce_workstation/table", "produce_workstation/route_barrier"]
+    station._planning_scene.synchronize.return_value = ["produce_workstation/table"]
     station.prepare_scene(PACKAGE / "config/demo_scene.yaml")
     assert station._scene_prepared
-    assert len(bridge.spawned_entities) == 17
+    assert len(bridge.spawned_entities) == 16
+    assert not any(e.name == "packing_return_crate" for e in bridge.spawned_entities)
     assert not any(e.name.startswith("order_bin_") for e in bridge.spawned_entities)
     assert len(station._bin_templates) == 4
     assert station._planning_scene.synchronize.call_args.args[1] == {}
+    assert station._planning_scene.synchronize.call_args.args[2] == []
+
+
+def test_disabled_obstacle_keeps_table_and_order_bin_collision_checks():
+    config = deepcopy(CONFIG)
+    config["planning_scene"]["barrier"]["enabled"] = False
+    objects = build_collision_objects(config, {"order_bin_A2": (.57, -.23, .05)}, [])
+    assert {obj.id for obj in objects} == {
+        "produce_workstation/table", "produce_workstation/order_bin_A2"
+    }

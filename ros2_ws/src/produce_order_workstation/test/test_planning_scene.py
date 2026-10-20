@@ -172,6 +172,24 @@ def test_sync_fails_closed_when_moveit_does_not_confirm_objects(monkeypatch):
         sync.synchronize(CONFIG, BIN_POSITIONS, BARRIER_POSES)
 
 
+def test_disabling_obstacle_removes_old_proxy_without_removing_bins():
+    config = deepcopy(ACTUAL_CONFIG)
+    config["planning_scene"]["barrier"]["enabled"] = False
+    desired = planning_scene.build_collision_objects(config, BIN_POSITIONS, [])
+    existing = {obj.id: obj for obj in desired}
+    stale = CollisionObject(id="produce_workstation/route_barrier")
+    existing[stale.id] = stale
+    sync = planning_scene.PlanningSceneSync(MagicMock())
+    sync._current_objects = MagicMock(side_effect=[existing, {obj.id: obj for obj in desired}])
+    sync._current_attached = MagicMock(return_value={})
+    sync._apply_diff = MagicMock()
+    sync.synchronize(config, BIN_POSITIONS, [])
+    changes = sync._apply_diff.call_args.args[0].world.collision_objects
+    removed = {obj.id for obj in changes if obj.operation == CollisionObject.REMOVE}
+    assert removed == {stale.id}
+    assert all("order_bin" not in identifier for identifier in removed)
+
+
 def test_carried_object_is_attached_and_removed_with_readback(monkeypatch):
     apply_client = MagicMock()
     get_client = MagicMock()

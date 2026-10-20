@@ -111,6 +111,7 @@ planning_scene:
   # A real existing wooden-crate asset, temporarily returned on its side.
   # Collider parts below match Project/Prefabs/toy_box.prefab, not an invented solid block.
   barrier:
+    enabled: false
     kind: return_crate
     entity: route_barrier
     prefab_name: toy_box

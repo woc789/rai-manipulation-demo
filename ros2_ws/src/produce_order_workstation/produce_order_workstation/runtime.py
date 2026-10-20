@@ -274,8 +274,13 @@ class Workstation:
         if set(self._bin_templates) != bin_names:
             raise OrderError("Receiving-bin templates are incomplete")
         barrier_config = self.config["planning_scene"]["barrier"]
+        configured_barrier_names = (
+            barrier_config.get("entities") or barrier_config.get("cube_entities", [])
+        )
         barrier_names = (
-            barrier_config.get("entities") or barrier_config["cube_entities"]
+            configured_barrier_names
+            if barrier_config.get("enabled", True)
+            else []
         )
         barrier_entities = [
             item for item in scene.entities if item.name in barrier_names
@@ -290,7 +295,7 @@ class Workstation:
                 entities=[
                     item
                     for item in scene.entities
-                    if item.name not in barrier_names
+                    if item.name not in configured_barrier_names
                     and (
                         fulfillment_mode(self.config) != "fulfillment"
                         or item.name not in bin_names
@@ -361,7 +366,12 @@ class Workstation:
                 bin_positions[name] = (xy[0], xy[1], pose.z)
         barrier_poses = []
         barrier_config = self.config["planning_scene"]["barrier"]
-        for name in barrier_config.get("entities") or barrier_config["cube_entities"]:
+        barrier_names = (
+            (barrier_config.get("entities") or barrier_config.get("cube_entities", []))
+            if barrier_config.get("enabled", True)
+            else []
+        )
+        for name in barrier_names:
             entity = next(
                 (
                     item
