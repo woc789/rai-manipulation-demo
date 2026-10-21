@@ -1115,5 +1115,50 @@ class OperatorPanelTests(unittest.TestCase):
         self.assertEqual(self.panel.business_output.toPlainText(), "等待复查")
 
 
+    def test_queue_fifo_uses_registration_sequence_not_packet_or_id_order(self):
+        jobs = [
+            dict(order_id=identifier, sequence=sequence, priority=priority,
+                 state="QUEUED", completed=0, total=1, reason="")
+            for identifier, sequence, priority in (
+                ("a-newer", 30, 0), ("z-older", 10, 0), ("urgent", 40, 8)
+            )
+        ]
+        self.panel._render_queue(jobs)
+        self.assertEqual(
+            [self.panel.queue_table.item(r, 0).text() for r in range(3)],
+            ["urgent", "z-older", "a-newer"],
+        )
+        self.panel.queue_table.selectRow(1)
+        self.panel._render_queue(list(reversed(jobs)))
+        self.assertEqual(self.panel.queue_table.item(1, 0).text(), "z-older")
+        self.assertEqual(self.panel.queue_table.item(1, 5).text(), "2")
+        self.assertEqual(self.panel.queue_table.currentRow(), 1)
+
+    def test_queue_excludes_history_but_keeps_failed_occupied_bin(self):
+        self.panel._bins = [dict(bin_id="A1", state="RECOVERY_REQUIRED", order_id="blocked")]
+        jobs = [
+            dict(order_id=identifier, sequence=index, priority=0, state=state,
+                 completed=0, total=1, reason="")
+            for index, (identifier, state) in enumerate((
+                ("collected", "COLLECTED"), ("failed", "FAILED"),
+                ("blocked", "FAILED"), ("waiting", "QUEUED"),
+            ))
+        ]
+        self.panel._render_queue(jobs)
+        self.assertEqual(
+            [self.panel.queue_table.item(r, 0).text() for r in range(2)],
+            ["waiting", "blocked"],
+        )
+        self.assertEqual(len(self.panel._queue_jobs), 4)
+
+    def test_queue_removal_does_not_silently_select_another_order(self):
+        jobs = [dict(order_id=name, priority=0, state="QUEUED", completed=0,
+                     total=1, reason="") for name in ("first", "second")]
+        self.panel._render_queue(jobs)
+        self.panel.queue_table.selectRow(0)
+        self.panel._render_queue(jobs[1:])
+        self.assertEqual(self.panel.queue_table.currentRow(), -1)
+
+
 if __name__ == "__main__":
     unittest.main()

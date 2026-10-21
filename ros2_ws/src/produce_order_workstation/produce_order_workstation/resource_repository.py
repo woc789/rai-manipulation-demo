@@ -292,6 +292,7 @@ class ResourceRepository:
                 order_id=job.order.order_id,
                 zone=job.order.zone,
                 priority=job.priority,
+                sequence=job.sequence,
                 state=job.state,
                 state_label=STATE_LABELS.get(job.state, job.state),
                 reason=job.reason,

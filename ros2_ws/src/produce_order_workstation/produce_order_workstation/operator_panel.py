@@ -413,7 +413,11 @@ class OperatorPanel(QWidget):
         queue_layout.addWidget(self.queue_summary)
         self.queue_table = QTableWidget(0, 7)
         self.queue_table.setHorizontalHeaderLabels(
-            ["订单", "优先级", "状态", "进度", "等待原因", "顺位", "商品"]
+            ["订单", "优先级", "状态", "进度", "等待原因", "等待顺位", "商品"]
+        )
+        self.queue_table.horizontalHeaderItem(5).setToolTip(
+            "待执行订单按优先级从高到低、同级按登记序号排列。"
+            "库存或箱位不足时可跳过等待；不会中断正在搬运的物品。"
         )
         self.queue_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.queue_table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -1016,41 +1020,61 @@ class OperatorPanel(QWidget):
             "EXECUTION_UNCERTAIN": "执行结果不明 · 待核对",
             "RECOVERY_REQUIRED": "需要现场核对",
         }
+        pending_states = ("QUEUED", "WAITING_STOCK", "WAITING_BIN", "PAUSED")
+        running_states = ("RUNNING", "DISPATCHING", "EXECUTION_UNCERTAIN")
+        live_states = (*pending_states, *running_states, "WAITING_PICKUP", "RECOVERY_REQUIRED")
+        # Old servers send rows in registration order without an explicit
+        # sequence. Preserve that fallback; never sort timestamp-like IDs.
+        registration_order = {
+            job["order_id"]: job.get("sequence", index)
+            for index, job in enumerate(orders)
+        }
+
+        def pending_key(job):
+            return (-job["priority"], registration_order[job["order_id"]], job["order_id"])
+
         visible_orders = [
             job
             for job in orders
             if job["state"] not in ("CANCELED", "CANCELLED")
             and (
+                job["state"] in live_states
+                or self._history_protected(job["order_id"], job["state"])
+            )
+            and (
                 job["order_id"] not in self._hidden_history
                 or self._history_protected(job["order_id"], job["state"])
             )
         ]
-        pending_states = ("QUEUED", "WAITING_STOCK", "WAITING_BIN", "PAUSED")
         waiting_jobs = sorted(
             (
                 job
                 for job in orders
                 if job["state"] in pending_states and not job.get("review_required")
             ),
-            key=lambda job: -job["priority"],
+            key=pending_key,
         )
         ranks = {
             job["order_id"]: str(index + 1) for index, job in enumerate(waiting_jobs)
         }
-        running_states = ("RUNNING", "DISPATCHING", "EXECUTION_UNCERTAIN")
         visible_orders.sort(
             key=lambda job: (
                 0
                 if job["state"] in running_states
                 else 1
-                if job["state"] in pending_states
+                if job["state"] in pending_states and not job.get("review_required")
+                else 3
+                if job["state"] == "WAITING_PICKUP"
                 else 2,
-                -job["priority"] if job["state"] in pending_states else 0,
+                *pending_key(job),
             )
         )
         self.queue_summary.setText(
             f"订单队列 · 执行 {sum(j['state'] in running_states for j in orders)} · 等待 {len(waiting_jobs)}"
         )
+        blocked = self.queue_table.blockSignals(True)
+        self.queue_table.clearSelection()
+        self.queue_table.setCurrentCell(-1, -1)
         self.queue_table.setRowCount(len(visible_orders))
         for row, job in enumerate(visible_orders):
             reason = job.get("reason", "")
@@ -1088,6 +1112,7 @@ class OperatorPanel(QWidget):
                 self.queue_table.setItem(row, col, cell)
             if job["order_id"] == selected_id:
                 self.queue_table.selectRow(row)
+        self.queue_table.blockSignals(blocked)
         self.history_clear_button.setEnabled(self.history.rowCount() > 0)
         if not self._queue_enabled:
             return

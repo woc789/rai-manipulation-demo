@@ -124,6 +124,15 @@ def test_priority_and_fifo_only_select_admissible_jobs():
     assert queue.select_next(book).order.order_id == "new-urgent"
 
 
+def test_order_snapshot_exposes_durable_registration_sequence():
+    queue = make_resources()
+    first = queue.submit(order("z-first"))
+    second = queue.submit(order("a-second"))
+    snapshot = queue.snapshot_orders()
+    assert [row["sequence"] for row in snapshot] == [first.sequence, second.sequence]
+    assert first.sequence < second.sequence
+
+
 def test_unknown_stock_waits_without_holding_partial_inventory():
     queue, book, bins = make_resources(), stocked(), make_resources(CONFIG)
     queue.submit(order("unobserved", 2, 2), 10)
