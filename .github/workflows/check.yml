@@ -1,0 +1,25 @@
+name: Source and release checks
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  source-contracts:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: false
+      - name: Shell syntax
+        run: |
+          for script in start.sh ros2_ws/src/produce_order_workstation/scripts/*.sh; do
+            bash -n "$script" || exit 1
+          done
+      - name: Release checks (no ROS, LLM or simulator)
+        run: |
+          python3 -m unittest discover -s tests_release -v
+          python3 scripts/release_audit.py --history
+      - name: Launcher command contracts (fake systemd only)
+        run: |
+          python3 -m pip install 'pytest>=8,<9'
+          python3 -m pytest --noconftest -q -o addopts='' ros2_ws/src/produce_order_workstation/test/test_start_launcher.py

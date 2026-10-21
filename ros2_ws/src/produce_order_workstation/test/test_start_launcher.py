@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
 
 
 LAUNCHER = Path(__file__).resolve().parents[4] / "start.sh"
@@ -22,11 +23,29 @@ if tool == "systemctl" and "show" in args:
     if "Environment" in args:
         print(shlex.quote("PRODUCE_STATE_DB=" + os.environ["FAKE_PREVIOUS_DB"]) if os.getenv("FAKE_PREVIOUS_DB") else "")
     else:
-        print("loaded" if args[1] in active else "not-found")
+        unit = next((word for word in args if word.endswith(".service")), "")
+        print("loaded" if unit in active else "not-found")
 """
 
 
 def run_launcher(tmp_path, command, **extra):
+    # Copy the launcher plus harmless profile helper, stub preflight/health.
+    # Tests must never import model environments or inspect live ROS state.
+    app = tmp_path / "app"
+    app.mkdir()
+    launcher = app / "start.sh"
+    shutil.copyfile(LAUNCHER, launcher)
+    scripts = app / "ros2_ws/src/produce_order_workstation/scripts"
+    scripts.mkdir(parents=True)
+    shutil.copyfile(
+        LAUNCHER.parent
+        / "ros2_ws/src/produce_order_workstation/scripts/runtime_env.sh",
+        scripts / "runtime_env.sh",
+    )
+    (scripts / "doctor.sh").write_text('#!/bin/bash\nexit "${FAKE_DOCTOR_STATUS:-0}"\n')
+    (scripts / "check_runtime.sh").write_text(
+        '#!/bin/bash\nexit "${FAKE_READY_STATUS:-0}"\n'
+    )
     tools = tmp_path / "bin"
     tools.mkdir()
     for name in ("systemctl", "systemd-run", "pgrep"):
@@ -34,13 +53,23 @@ def run_launcher(tmp_path, command, **extra):
         file.write_text(FAKE)
         file.chmod(0o755)
     log = tmp_path / "calls.jsonl"
+    profile = tmp_path / "launch.env"
+    profile.write_text(extra.pop("FAKE_PROFILE_BODY", ""))
     env = dict(
-        os.environ, PATH=f"{tools}:/usr/bin:/bin", FAKE_LOG=str(log), DISPLAY=":99"
+        os.environ,
+        PATH=f"{tools}:/usr/bin:/bin",
+        FAKE_LOG=str(log),
+        DISPLAY=":99",
+        PRODUCE_LAUNCH_CONFIG=str(profile),
     )
-    env.pop("PRODUCE_STATE_DB", None)
+    # A full-suite runner exports a real profile/domain; this fake systemd
+    # fixture must not accidentally inherit that machine's configuration.
+    for name in tuple(env):
+        if name.startswith("PRODUCE_") and name != "PRODUCE_LAUNCH_CONFIG":
+            env.pop(name)
     env.update(extra)
     result = subprocess.run(
-        ["/bin/bash", str(LAUNCHER), command],
+        ["/bin/bash", str(launcher), command],
         cwd=tmp_path,
         env=env,
         capture_output=True,
@@ -96,3 +125,63 @@ def test_explicit_database_wins_on_restart(tmp_path):
     assert all(
         "--setenv=PRODUCE_STATE_DB=/tmp/chosen.sqlite3" in args for args in launched
     )
+
+
+def test_failed_preflight_does_not_start_heavy_processes(tmp_path):
+    result, launched = run_launcher(tmp_path, "start", FAKE_DOCTOR_STATUS="1")
+    assert result.returncode == 1 and not launched
+
+
+def test_business_not_ready_is_not_reported_as_launch_success(tmp_path):
+    result, launched = run_launcher(tmp_path, "start", FAKE_READY_STATUS="2")
+    assert result.returncode == 2 and len(launched) == 2
+
+
+def test_profile_reaches_systemd_but_terminal_settings_win_and_key_is_not_forwarded(
+    tmp_path,
+):
+    result, launched = run_launcher(
+        tmp_path,
+        "start",
+        FAKE_PROFILE_BODY="PRODUCE_AGENT_MODEL=profile-model\nPRODUCE_ROS_DOMAIN_ID=7\n",
+        PRODUCE_ROS_DOMAIN_ID="8",
+        DASHSCOPE_API_KEY="not-a-live-key",
+    )
+    assert result.returncode == 0
+    assert all(
+        "--setenv=PRODUCE_AGENT_MODEL=profile-model" in args for args in launched
+    )
+    assert all("--setenv=PRODUCE_ROS_DOMAIN_ID=8" in args for args in launched)
+    assert all(
+        "DASHSCOPE_API_KEY" not in str(args) and "not-a-live-key" not in str(args)
+        for args in launched
+    )
+
+
+def test_missing_explicit_profile_fails_before_launch(tmp_path):
+    result, launched = run_launcher(
+        tmp_path, "start", PRODUCE_LAUNCH_CONFIG=str(tmp_path / "missing.env")
+    )
+    assert result.returncode == 1 and not launched
+
+
+def test_start_cannot_silently_switch_a_running_database(tmp_path):
+    result, launched = run_launcher(
+        tmp_path,
+        "start",
+        FAKE_ACTIVE="produce-order-workstation.service",
+        FAKE_PREVIOUS_DB="/tmp/old.sqlite3",
+        PRODUCE_STATE_DB="/tmp/new.sqlite3",
+    )
+    assert result.returncode == 1 and not launched
+    assert "restart" in result.stderr
+
+
+def test_stop_does_not_require_valid_config_and_stops_test_controller(tmp_path):
+    result, launched = run_launcher(
+        tmp_path, "stop", PRODUCE_LAUNCH_CONFIG=str(tmp_path / "missing.env"),
+        FAKE_ACTIVE="produce-four-bin-pressure.service,produce-order-workstation.service,produce-order-panel.service",
+    )
+    assert result.returncode == 0 and not launched
+    calls = [json.loads(line) for line in (tmp_path / "calls.jsonl").read_text().splitlines()]
+    assert ["systemctl", ["--user", "stop", "produce-four-bin-pressure.service"]] in calls

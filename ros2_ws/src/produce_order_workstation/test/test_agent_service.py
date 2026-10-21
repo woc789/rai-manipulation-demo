@@ -25,7 +25,8 @@ def request(**updates):
 
 def runtime():
     return SimpleNamespace(config=CONFIG, model=MagicMock(), _busy=False,
-        _active_order="", _lock=Lock(), _stopping=Event(), publish_status=MagicMock())
+        _active_order="", _lock=Lock(), _stopping=Event(), publish_status=MagicMock(),
+        get_logger=MagicMock())
 
 
 @pytest.mark.parametrize("url", ["http://example.com/mcp", "file:///tmp/robot",

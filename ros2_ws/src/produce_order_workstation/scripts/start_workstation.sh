@@ -1,44 +1,9 @@
 #!/usr/bin/env bash
 set -eo pipefail
-
-workstation_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../../../../../.." && pwd)
-cd "$workstation_root"
-
-# The desktop session exports Kilted paths. Mixing them with Jazzy makes
-# MoveIt/O3DE fail at dynamic linking, so build this process environment anew.
-unset AMENT_PREFIX_PATH COLCON_PREFIX_PATH CMAKE_PREFIX_PATH LD_LIBRARY_PATH PYTHONPATH ROS_DISTRO ALL_PROXY all_proxy
-export PATH=/usr/local/bin:/usr/bin:/bin
-source /opt/ros/jazzy/setup.bash
-bt_prefix=/home/wang/.local/share/rai-deps/behaviortree-jazzy/prefix/opt/ros/jazzy
-export LD_LIBRARY_PATH="$bt_prefix/lib:${LD_LIBRARY_PATH:-}"
-source /home/wang/miniconda3/etc/profile.d/conda.sh
-conda activate rai-jazzy
-# Do not replay stale chained overlays from other workspaces.
-source install/local_setup.bash
-source src/examples/rai-manipulation-demo/ros2_ws/install/local_setup.bash
-set -u
-
-# Every ROS participant in this workcell runs on this host. Keep discovery on
-# loopback so a DHCP/VPN interface change cannot strand long-lived DDS peers.
-# A remote robot deployment must explicitly configure a different discovery
-# range for every participant, including the simulator bridge.
-export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
-export ROS_DOMAIN_ID="${PRODUCE_ROS_DOMAIN_ID:-0}"
-
-# Keep C/C++ and BLAS worker arenas bounded while O3DE and the two vision
-# models share a 16 GiB workstation. The API key remains in the private file.
-export MALLOC_ARENA_MAX=2
-export OMP_NUM_THREADS=2
-export OPENBLAS_NUM_THREADS=2
-export MKL_NUM_THREADS=2
-export HF_HUB_OFFLINE=1
-export TRANSFORMERS_OFFLINE=1
-unset ALL_PROXY all_proxy
-
-# Fail before spawning the heavy simulator if the tool gateway dependency is absent.
-python -c 'from mcp import ClientSession; from mcp.server.fastmcp import FastMCP' || {
-  echo '缺少 MCP SDK：请在 rai-jazzy 环境运行 python -m pip install mcp==1.30.0' >&2
-  exit 1
-}
-
+source "$(dirname -- "${BASH_SOURCE[0]}")/runtime_env.sh"
+load_launch_profile
+resolve_runtime_paths
+setup_ros_environment
+setup_model_environment
+cd "$PRODUCE_RAI_ROOT"
 exec ros2 launch produce_order_workstation workstation.launch.py "$@"

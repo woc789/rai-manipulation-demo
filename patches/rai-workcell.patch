@@ -1,0 +1,554 @@
+diff --git a/src/rai_core/rai/tools/timeout.py b/src/rai_core/rai/tools/timeout.py
+index 6d81485..a094558 100644
+--- a/src/rai_core/rai/tools/timeout.py
++++ b/src/rai_core/rai/tools/timeout.py
+@@ -89,6 +89,11 @@ def timeout(seconds: float, timeout_message: str | None = None) -> Callable[[F],
+                 try:
+                     return future.result(timeout=seconds)
+                 except concurrent.futures.TimeoutError as err:
++                    # Since Python 3.11 this is the same class as built-in
++                    # TimeoutError. A completed worker's service timeout is not
++                    # the outer tool's deadline; preserve its original cause.
++                    if future.done() and future.exception() is err:
++                        raise
+                     message = (
+                         timeout_message
+                         or f"Function '{func.__name__}' timed out after {seconds} seconds"
+@@ -150,6 +155,8 @@ def timeout_method(
+                 try:
+                     return future.result(timeout=seconds)
+                 except concurrent.futures.TimeoutError as err:
++                    if future.done() and future.exception() is err:
++                        raise
+                     message = (
+                         timeout_message
+                         or f"Method '{func.__name__}' of {self.__class__.__name__} timed out after {seconds} seconds"
+diff --git a/src/rai_extensions/rai_perception/rai_perception/algorithms/boxer.py b/src/rai_extensions/rai_perception/rai_perception/algorithms/boxer.py
+index 0ed858e..2ce7290 100644
+--- a/src/rai_extensions/rai_perception/rai_perception/algorithms/boxer.py
++++ b/src/rai_extensions/rai_perception/rai_perception/algorithms/boxer.py
+@@ -113,6 +113,54 @@ class GDBoxer:
+             self.device = "cpu"
+         self.model = Model(self.cfg_path, self.weight_path, device=self.device)
+         self.bridge = CvBridge()
++        self.tiled_classes = set()
++        self.tile_rows = self.tile_columns = 3
++        self.tile_overlap = 0.25
++
++    def configure_tiling(self, classes, rows=3, columns=3, overlap=0.25):
++        """Optional bounded small-object pass. Disabled unless a class is selected."""
++        if (
++            not isinstance(rows, int)
++            or not isinstance(columns, int)
++            or not (1 <= rows <= 3 and 1 <= columns <= 3)
++        ):
++            raise ValueError("Detection tiling requires 1..3 rows and columns")
++        if not 0 <= overlap < 0.5:
++            raise ValueError("Detection tile overlap must be in [0, 0.5)")
++        self.tiled_classes = {name.strip().lower() for name in classes if name.strip()}
++        self.tile_rows, self.tile_columns, self.tile_overlap = rows, columns, overlap
++
++    @staticmethod
++    def tile_windows(width, height, rows, columns, overlap):
++        """Uniform overlapping image windows; no object labels or world positions."""
++        tw = width / (columns - overlap * (columns - 1))
++        th = height / (rows - overlap * (rows - 1))
++        windows = []
++        for row in range(rows):
++            for column in range(columns):
++                left = round(column * tw * (1 - overlap))
++                top = round(row * th * (1 - overlap))
++                right = min(width, round(left + tw))
++                bottom = min(height, round(top + th))
++                if right > left and bottom > top:
++                    windows.append((left, top, right, bottom))
++        return windows
++
++    @staticmethod
++    def box_iou(a, b):
++        ax, ay = a.center
++        bx, by = b.center
++        intersection = max(
++            0,
++            min(ax + a.size_x / 2, bx + b.size_x / 2)
++            - max(ax - a.size_x / 2, bx - b.size_x / 2),
++        ) * max(
++            0,
++            min(ay + a.size_y / 2, by + b.size_y / 2)
++            - max(ay - a.size_y / 2, by - b.size_y / 2),
++        )
++        union = a.size_x * a.size_y + b.size_x * b.size_y - intersection
++        return intersection / union if union > 0 else 0.0
+ 
+     def get_boxes(
+         self,
+@@ -132,12 +180,55 @@ class GDBoxer:
+         Returns:
+             List of Box objects with detections
+         """
+-        # TODO: move this to method, or use RAI canonical one
++        # GroundingDINO Model.predict_with_classes expects BGR and converts
++        # it to RGB internally. Normalize all ROS encodings explicitly.
+         image = self.bridge.imgmsg_to_cv2(
+-            image_msg, desired_encoding=image_msg.encoding
++            image_msg, desired_encoding="bgr8"
++        )
++
++        boxes = self._predict_boxes(image, classes, box_threshold, text_threshold)
++        if not any(
++            name.strip().lower() in getattr(self, "tiled_classes", ())
++            for name in classes
++        ):
++            return boxes
++        height, width = image.shape[:2]
++        windows = self.tile_windows(
++            width, height, self.tile_rows, self.tile_columns, self.tile_overlap
++        )
++        base_count = len(boxes)
++        for left, top, right, bottom in windows:
++            candidates = self._predict_boxes(
++                image[top:bottom, left:right], classes, box_threshold, text_threshold
++            )
++            for box in candidates:
++                x, y = box.center
++                # Reject objects cut by an INTERNAL tile boundary. Another
++                # overlapping tile can see the complete object; a partial SAM
++                # mask would otherwise bias its 3-D centroid.
++                if (
++                    (left > 0 and x - box.size_x / 2 <= 2)
++                    or (top > 0 and y - box.size_y / 2 <= 2)
++                    or (right < width and x + box.size_x / 2 >= right - left - 2)
++                    or (bottom < height and y + box.size_y / 2 >= bottom - top - 2)
++                ):
++                    continue
++                box.center = (x + left, y + top)
++                boxes.append(box)
++        merged = []
++        for box in sorted(boxes, key=lambda b: b.confidence, reverse=True):
++            if not any(
++                box.phrase == old.phrase and self.box_iou(box, old) >= 0.5
++                for old in merged
++            ):
++                merged.append(box)
++        self.logger.info(
++            "GDINO_TILED classes=%s base=%d tiles=%d merged=%d",
++            classes, base_count, len(windows), len(merged),
+         )
+-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
++        return merged
+ 
++    def _predict_boxes(self, image, classes, box_threshold, text_threshold):
+         predictions = self.model.predict_with_classes(
+             image=image,
+             classes=classes,
+diff --git a/src/rai_extensions/rai_perception/rai_perception/components/gripping_points.py b/src/rai_extensions/rai_perception/rai_perception/components/gripping_points.py
+index cb08d0b..df2676e 100644
+--- a/src/rai_extensions/rai_perception/rai_perception/components/gripping_points.py
++++ b/src/rai_extensions/rai_perception/rai_perception/components/gripping_points.py
+@@ -34,17 +34,18 @@ This module provides components for extracting gripping points from segmented ob
+     - GrippingPointEstimatorConfig
+ """
+ 
++import time
+ from typing import List, Literal, Optional, cast
+ 
+ import numpy as np
+ import sensor_msgs.msg
++from cv_bridge import CvBridge
+ from numpy.typing import NDArray
+ from pydantic import BaseModel, Field
+ from rai.communication.ros2.api import (
+     convert_ros_img_to_ndarray,  # type: ignore[reportUnknownVariableType]
+ )
+ from rai.communication.ros2.connectors import ROS2Connector
+-from rai.communication.ros2.ros_async import get_future_result
+ from rclpy import Future
+ 
+ from rai_interfaces.srv import RAIGroundedSam, RAIGroundingDino
+@@ -53,6 +54,9 @@ from rai_perception.components.perception_utils import convert_depth_to_meters
+ 
+ 
+ class PointCloudFromSegmentationConfig(BaseModel):
++    max_rgb_depth_skew_s: Optional[float] = Field(default=None, gt=0)
++    detection_roi: Optional[tuple[float, float, float, float]] = None
++    include_full_frame: bool = False
+     box_threshold: float = Field(
+         default=0.35, description="Box threshold for GDINO object detection"
+     )
+@@ -194,6 +198,12 @@ class PointCloudFromSegmentation:
+         self.target_frame = target_frame
+         self.config = config
+         self.conversion_ratio = conversion_ratio
++        self.check_cancel = lambda: None
++        self._service_clients = {}
++        self._pending_clients = {}
++        self.last_diagnostics = {}
++        self.last_image = None
++        self._detection_offset = (0, 0)
+ 
+     # --------------------- ROS helpers ---------------------
+     def _get_image_message(self, topic: str) -> sensor_msgs.msg.Image:
+@@ -234,22 +244,67 @@ class PointCloudFromSegmentation:
+         return get_segmentation_service_name(self.connector)
+ 
+     def _create_service_client(self, service_type, service_name: str):
+-        """Create a service client for the given service type and name."""
+-        from rai_perception.components.service_utils import create_service_client
+-
+-        return create_service_client(self.connector, service_type, service_name)
++        """Reuse bounded clients instead of accumulating DDS endpoints per image."""
++        key = (service_type, service_name)
++        if key not in self._service_clients:
++            self._service_clients[key] = self.connector.node.create_client(service_type, service_name)
++        client = self._service_clients[key]
++        deadline = time.monotonic() + min(5.0, self.config.service_timeout)
++        while not client.wait_for_service(timeout_sec=0.1):
++            self.check_cancel()
++            if time.monotonic() >= deadline:
++                raise TimeoutError(f"Perception service {service_name} is unavailable")
++        self.check_cancel()
++        return client
++
++    def _await_response(self, future):
++        """Cooperative cancellation while waiting; timeout is not an empty detection."""
++        client = self._pending_clients[future]
++        deadline = time.monotonic() + self.config.service_timeout
++        try:
++            while not future.done():
++                self.check_cancel()
++                if time.monotonic() >= deadline:
++                    raise TimeoutError("Perception service response timed out")
++                time.sleep(0.05)
++            self.check_cancel()
++            response = future.result()
++            if response is None:
++                raise TimeoutError("Perception service returned no response")
++            return response
++        finally:
++            self._pending_clients.pop(future, None)
++            client.remove_pending_request(future)
++            if not future.done():
++                future.cancel()
+ 
+     def _call_gdino_node(
+-        self, camera_img_message: sensor_msgs.msg.Image, object_name: str
++        self, camera_img_message: sensor_msgs.msg.Image, object_name: str, *, use_roi=True
+     ) -> Future:
+         service_name = self._get_detection_service_name()
+         cli = self._create_service_client(RAIGroundingDino, service_name)  # type: ignore[reportUnknownMemberType]
+         req = RAIGroundingDino.Request()
+         req.source_img = camera_img_message
++        self._detection_offset = (0, 0)
++        roi = self.config.detection_roi if use_roi else None
++        if roi is not None:
++            x0, y0, x1, y1 = roi
++            if not (0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1):
++                raise ValueError("detection_roi must be normalized [left, top, right, bottom]")
++            image = CvBridge().imgmsg_to_cv2(camera_img_message, desired_encoding="bgr8")
++            height, width = image.shape[:2]
++            left, top, right, bottom = int(x0 * width), int(y0 * height), int(x1 * width), int(y1 * height)
++            if right <= left or bottom <= top:
++                raise ValueError("detection_roi contains no pixels")
++            req.source_img = CvBridge().cv2_to_imgmsg(image[top:bottom, left:right], encoding="bgr8")
++            req.source_img.header = camera_img_message.header
++            self._detection_offset = (left, top)
+         req.classes = object_name
+         req.box_threshold = self.config.box_threshold
+         req.text_threshold = self.config.text_threshold
+-        return cli.call_async(req)
++        future = cli.call_async(req)
++        self._pending_clients[future] = cli
++        return future
+ 
+     def _call_gsam_node(
+         self, camera_img_message: sensor_msgs.msg.Image, data: RAIGroundingDino.Response
+@@ -259,7 +314,9 @@ class PointCloudFromSegmentation:
+         req = RAIGroundedSam.Request()
+         req.detections = data.detections  # type: ignore[reportUnknownMemberType]
+         req.source_img = camera_img_message
+-        return cli.call_async(req)
++        future = cli.call_async(req)
++        self._pending_clients[future] = cli
++        return future
+ 
+     # --------------------- Geometry helpers ---------------------
+ 
+@@ -286,35 +343,116 @@ class PointCloudFromSegmentation:
+ 
+         return transformed
+ 
++    def _validate_rgb_depth_pair(self, rgb, depth):
++        """Fail closed before backprojection if registered inputs disagree.
++
++        Opt-in for workcells using aligned RGB-D streams. This is a consistency
++        gate, not synchronization: a bad pair requires a later fresh observation.
++        """
++        limit = self.config.max_rgb_depth_skew_s
++        if limit is None:
++            return
++        rgb_time = rgb.header.stamp.sec + rgb.header.stamp.nanosec * 1e-9
++        depth_time = depth.header.stamp.sec + depth.header.stamp.nanosec * 1e-9
++        if abs(rgb_time - depth_time) > limit:
++            self.last_diagnostics["invalid_stage"] = "rgb_depth_time_mismatch"
++            raise ValueError("RGB/depth timestamps disagree; no 3D targets produced")
++        if (rgb.width, rgb.height) != (depth.width, depth.height):
++            self.last_diagnostics["invalid_stage"] = "rgb_depth_size_mismatch"
++            raise ValueError("RGB/depth dimensions disagree; registered depth is required")
++
++    def _get_rgb_depth_pair(self):
++        """Bounded re-sampling of the older stream, before any model inference."""
++        rgb = self._get_image_message(self.camera_topic)
++        depth = self._get_image_message(self.depth_topic)
++        limit = self.config.max_rgb_depth_skew_s
++        if limit is not None:
++            deadline = time.monotonic() + min(2.0, self.config.service_timeout)
++            while True:
++                rgb_time = rgb.header.stamp.sec + rgb.header.stamp.nanosec * 1e-9
++                depth_time = depth.header.stamp.sec + depth.header.stamp.nanosec * 1e-9
++                if abs(rgb_time - depth_time) <= limit:
++                    break
++                self.check_cancel()
++                if time.monotonic() >= deadline:
++                    break
++                time.sleep(.02)
++                if rgb_time < depth_time:
++                    rgb = self._get_image_message(self.camera_topic)
++                else:
++                    depth = self._get_image_message(self.depth_topic)
++        return rgb, depth
++
+     # --------------------- Public API ---------------------
+     def run(self, object_name: str) -> list[NDArray[np.float32]]:
+         """Return Nx3 numpy array [X, Y, Z] of the object's masked point cloud in target frame."""
+         logger = self.connector.node.get_logger()
+ 
+-        camera_img_msg = self._get_image_message(self.camera_topic)
+-        depth_msg = self.connector.receive_message(self.depth_topic).payload
++        camera_img_msg, depth_msg = self._get_rgb_depth_pair()
++        self.last_image = camera_img_msg
++        self.last_diagnostics = {
++            "prompt": object_name, "image_encoding": camera_img_msg.encoding,
++            "image_size": [camera_img_msg.width, camera_img_msg.height],
++            "frame_id": camera_img_msg.header.frame_id,
++            "box_threshold": self.config.box_threshold, "text_threshold": self.config.text_threshold,
++            "detection_roi": self.config.detection_roi,
++            "box_count": 0, "mask_count": 0, "cloud_count": 0,
++        }
++        rgb_stamp, depth_stamp = camera_img_msg.header.stamp, depth_msg.header.stamp
++        self.last_diagnostics["rgb_stamp_s"] = rgb_stamp.sec + rgb_stamp.nanosec * 1e-9
++        self.last_diagnostics["depth_stamp_s"] = depth_stamp.sec + depth_stamp.nanosec * 1e-9
++        self.last_diagnostics["rgb_depth_delta_s"] = abs(
++            (rgb_stamp.sec - depth_stamp.sec) + (rgb_stamp.nanosec - depth_stamp.nanosec) * 1e-9
++        )
++        self._validate_rgb_depth_pair(camera_img_msg, depth_msg)
+         camera_info = self._get_camera_info_message(self.camera_info_topic)
+ 
+         fx, fy, cx, cy = self._get_intrinsic_from_camera_info(camera_info)
+ 
+         gdino_future = self._call_gdino_node(camera_img_msg, object_name)
+-        gdino_resolved = get_future_result(
+-            gdino_future, timeout_sec=self.config.service_timeout
+-        )
++        gdino_resolved = self._await_response(gdino_future)
+         if gdino_resolved is None:
+             logger.warning("Detection service returned None")
+             return []
+ 
++        # Detection used a cropped image, but SAM and depth keep the full frame.
++        # Restore full-frame pixel coordinates BEFORE segmentation/backprojection.
++        left, top = self._detection_offset
++        for detection in gdino_resolved.detections.detections:
++            detection.bbox.center.position.x += left
++            detection.bbox.center.position.y += top
++        self.last_diagnostics["roi_box_count"] = len(gdino_resolved.detections.detections)
++        if self.config.detection_roi is not None and self.config.include_full_frame:
++            full_response = self._await_response(self._call_gdino_node(camera_img_msg, object_name, use_roi=False))
++            full_boxes = full_response.detections.detections
++            self.last_diagnostics["full_frame_box_count"] = len(full_boxes)
++            merged = list(gdino_resolved.detections.detections)
++            for candidate in full_boxes:
++                if not any(self._box_iou(candidate.bbox, existing.bbox) >= .5 for existing in merged):
++                    merged.append(candidate)
++            gdino_resolved.detections.detections = merged
++        self.last_diagnostics["box_count"] = len(gdino_resolved.detections.detections)
++        self.last_diagnostics["boxes"] = [
++            {"center": [d.bbox.center.position.x, d.bbox.center.position.y],
++             "size": [d.bbox.size_x, d.bbox.size_y],
++             "labels": [{"class": h.hypothesis.class_id, "score": h.hypothesis.score} for h in d.results]}
++            for d in gdino_resolved.detections.detections
++        ]
++        if not gdino_resolved.detections.detections:
++            self.last_diagnostics["empty_stage"] = "detection"
++            return []
++
+         gsam_future = self._call_gsam_node(camera_img_msg, gdino_resolved)
+-        gsam_resolved = get_future_result(
+-            gsam_future, timeout_sec=self.config.service_timeout
+-        )
++        gsam_resolved = self._await_response(gsam_future)
+         if gsam_resolved is None:
+             logger.warning("Segmentation service returned None")
+             return []
+ 
++        self.last_diagnostics["mask_count"] = len(gsam_resolved.masks)
++
+         if not gsam_resolved.masks or len(gsam_resolved.masks) == 0:
+             logger.warning("No masks returned from segmentation service")
++            self.last_diagnostics["empty_stage"] = "segmentation"
+             return []
+ 
+         depth_raw = convert_ros_img_to_ndarray(depth_msg)
+@@ -353,6 +491,7 @@ class PointCloudFromSegmentation:
+                 all_points.append(points_camera)
+ 
+         if not all_points:
++            self.last_diagnostics["empty_stage"] = "depth_projection"
+             logger.warning("No valid point clouds extracted from masks")
+             return []
+ 
+@@ -361,8 +500,21 @@ class PointCloudFromSegmentation:
+             for points_source in all_points
+         ]
+ 
++        self.last_diagnostics["cloud_count"] = len(points_target)
++
+         return points_target
+ 
++    @staticmethod
++    def _box_iou(first, second):
++        def edges(box):
++            x, y = box.center.position.x, box.center.position.y
++            return x - box.size_x / 2, y - box.size_y / 2, x + box.size_x / 2, y + box.size_y / 2
++        ax, ay, ar, ab = edges(first)
++        bx, by, br, bb = edges(second)
++        intersection = max(0, min(ar, br) - max(ax, bx)) * max(0, min(ab, bb) - max(ay, by))
++        union = first.size_x * first.size_y + second.size_x * second.size_y - intersection
++        return intersection / union if union > 0 else 0.0
++
+ 
+ class GrippingPointEstimator:
+     """Estimate gripping points from segmented point clouds using different strategies.
+diff --git a/src/rai_extensions/rai_perception/rai_perception/scripts/run_perception_services.py b/src/rai_extensions/rai_perception/rai_perception/scripts/run_perception_services.py
+index 2b2772e..5171f83 100644
+--- a/src/rai_extensions/rai_perception/rai_perception/scripts/run_perception_services.py
++++ b/src/rai_extensions/rai_perception/rai_perception/scripts/run_perception_services.py
+@@ -14,7 +14,6 @@
+ 
+ 
+ import os
+-import threading
+ 
+ import rclpy
+ from rai.agents import wait_for_shutdown
+@@ -46,34 +45,20 @@ def main():
+     segmentation_connector.node.declare_parameter(
+         "enable_legacy_service_names", enable_legacy
+     )
+-
+-    # Use threading to initialize and download weights concurrently
+-    detection_service = None
+-    segmentation_service = None
+-
+-    def init_detection():
+-        nonlocal detection_service
+-        detection_service = DetectionService(ros2_connector=detection_connector)
+-
+-    def init_segmentation():
+-        nonlocal segmentation_service
+-        segmentation_service = SegmentationService(
+-            ros2_connector=segmentation_connector
+-        )
+-
+-    t1 = threading.Thread(target=init_detection)
+-    t2 = threading.Thread(target=init_segmentation)
+-
+-    t1.start()
+-    t2.start()
+-
+-    t1.join()
+-    t2.join()
+-
+-    if detection_service is not None:
+-        detection_service.run()
+-    if segmentation_service is not None:
+-        segmentation_service.run()
++    # Workcell opt-in; other demos keep the original single-image detector.
++    detection_connector.node.declare_parameter("tile_classes", os.getenv("RAI_GDINO_TILE_CLASSES", ""))
++    detection_connector.node.declare_parameter("tile_rows", 3)
++    detection_connector.node.declare_parameter("tile_columns", 3)
++    detection_connector.node.declare_parameter("tile_overlap", 0.25)
++
++    # Load sequentially: concurrent PyTorch/Hydra initialization can leave SAM2
++    # parameters on the meta device. An exception must also stop startup rather
++    # than silently leaving one of the services unavailable.
++    detection_service = DetectionService(ros2_connector=detection_connector)
++    segmentation_service = SegmentationService(ros2_connector=segmentation_connector)
++
++    detection_service.run()
++    segmentation_service.run()
+ 
+     wait_for_shutdown([detection_service, segmentation_service])
+     rclpy.shutdown()
+diff --git a/src/rai_extensions/rai_perception/rai_perception/services/detection_service.py b/src/rai_extensions/rai_perception/rai_perception/services/detection_service.py
+index 9ab73fb..0199f70 100644
+--- a/src/rai_extensions/rai_perception/rai_perception/services/detection_service.py
++++ b/src/rai_extensions/rai_perception/rai_perception/services/detection_service.py
+@@ -31,6 +31,7 @@ from typing import Optional
+ from rai.communication.ros2 import ROS2Connector
+ 
+ from rai_interfaces.srv import RAIGroundingDino
++from rai_perception.algorithms.boxer import GDBoxer
+ from rai_perception.models.detection import get_model
+ from rai_perception.services.base_vision_service import BaseVisionService
+ 
+@@ -136,6 +137,14 @@ class DetectionService(BaseVisionService):
+             if self._boxer is None:
+                 raise RuntimeError("Detection model not initialized")
+ 
++            if isinstance(self._boxer, GDBoxer):
++                self._boxer.configure_tiling(
++                    self._get_param_value("tile_classes", "").split(","),
++                    self._get_param_value("tile_rows", 3),
++                    self._get_param_value("tile_columns", 3),
++                    self._get_param_value("tile_overlap", 0.25),
++                )
++
+             boxes = self._boxer.get_boxes(
+                 request.source_img,
+                 class_array,
+diff --git a/src/rai_sim/rai_sim/o3de/o3de_bridge.py b/src/rai_sim/rai_sim/o3de/o3de_bridge.py
+index 0de3159..464d342 100644
+--- a/src/rai_sim/rai_sim/o3de/o3de_bridge.py
++++ b/src/rai_sim/rai_sim/o3de/o3de_bridge.py
+@@ -73,6 +73,7 @@ class O3DExROS2Bridge(SimulationBridge):
+         self.current_sim_process = None
+         self.current_binary_path = None
+         self._static_tf_broadcaster = None
++        self.service_timeout_sec = 5.0
+ 
+     def init_simulation(self, simulation_config: O3DExROS2SimulationConfig):
+         if self.current_binary_path != simulation_config.binary_path:
+@@ -432,12 +433,22 @@ class O3DExROS2Bridge(SimulationBridge):
+         for _ in range(n_retries):
+             try:
+                 response = self.connector.service_call(
+-                    msg, target=target, msg_type=msg_type
++                    msg,
++                    target=target,
++                    msg_type=msg_type,
++                    timeout_sec=self.service_timeout_sec,
+                 )
+             except Exception as e:
+                 error_message = f"Error while calling service {target} with msg_type {msg_type}: {e}"
+                 self.logger.error(error_message)
+                 raise RuntimeError(error_message)
++            if response is None or response.payload is None:
++                # A timed-out spawn/delete may still have executed. Never blindly
++                # resend it or remove tracking as if cleanup had succeeded.
++                raise RuntimeError(
++                    f"Scene service {target} returned no response within {self.service_timeout_sec}s; "
++                    "outcome is unknown, entity tracking preserved; check simulator before retrying"
++                )
+             if response.payload.success:
+                 return response
+             self.logger.warning(

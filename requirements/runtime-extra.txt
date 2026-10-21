@@ -1,0 +1,5 @@
+# Workstation SDK additions. RAI/perception dependencies come from the pinned RAI source.
+mcp==1.30.0
+openai==2.29.0
+httpx==0.28.1
+PyYAML==6.0.3

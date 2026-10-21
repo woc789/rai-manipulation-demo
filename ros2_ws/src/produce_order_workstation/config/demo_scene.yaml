@@ -22,91 +22,89 @@ entities:
   # No central obstacle. Receiving bins above are templates, spawned on admission.
   # Sixteen mixed objects exist before the Agent sees the order. Names are stable
   # entity IDs; TF positions are measured again before each pick.
-  # Two staggered mixed banks, spaced for the fixed RGBDCamera5 view.
-  # >= 10 cm centre spacing, >= 17 cm from future bin centres, >= 40 cm
-  # from panda_link0. Preserve future receiving-bin clearance.
-  # Four corn cobs use a staggered foreground patch between A2/A3. This
-  # measured layout improves corn detection from 2 to 3, not a 4/4 guarantee.
-  # More compact rows and tilted apples were tested and rejected.
-  # Keep >= 10 cm between centres and >= 17 cm from all future bin centres.
+  # Central mixed patch with short side lanes. Six fruit positions stay
+  # within |Y| <= 10 cm; avoid the failed near-base on-axis lift position.
+  # >= 10 cm centre spacing, >= 17 cm from all four bin centres, >= 26 cm
+  # from panda_link0. Check whole vertical lift paths, not just endpoint IK.
+  # Visibility and real grasp validation are separate from these setup checks.
   # Template positions are NOT perception results.
   - name: stock_carrot_1
     prefab_name: carrot
     pose:
-      translation: {x: 0.399, y: -0.337, z: 0.05}
+      translation: {x: 0.240, y: -0.210, z: 0.05}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
   - name: stock_corn_1
     prefab_name: corn
     pose:
-      translation: {x: 0.560, y: -0.0525, z: 0.05}
-      rotation: {x: 0.6532814824381883, y: 0.2705980500730985, z: 0.2705980500730985, w: 0.6532814824381883}
+      translation: {x: 0.460, y: -0.100, z: 0.05}
+      rotation: {x: 0.5, y: 0.5, z: 0.5, w: 0.5}
   - name: stock_apple_1
     prefab_name: apple
     pose:
-      translation: {x: 0.332, y: -0.429, z: 0.05}
+      translation: {x: 0.340, y: 0.320, z: 0.05}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
   - name: stock_tomato_1
     prefab_name: tomato
     pose:
-      translation: {x: 0.395, y: -0.235, z: 0.05}
+      translation: {x: 0.350, y: -0.100, z: 0.05}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
   - name: stock_tomato_2
     prefab_name: tomato
     pose:
-      translation: {x: 0.306, y: -0.294, z: 0.05}
+      translation: {x: 0.340, y: -0.320, z: 0.05}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
   - name: stock_apple_2
     prefab_name: apple
     pose:
-      translation: {x: 0.332, y: 0.429, z: 0.05}
+      translation: {x: 0.350, y: 0.0, z: 0.05}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
   - name: stock_corn_2
     prefab_name: corn
     pose:
-      translation: {x: 0.450, y: 0.090, z: 0.05}
-      rotation: {x: 0.6532814824381883, y: 0.2705980500730985, z: 0.2705980500730985, w: 0.6532814824381883}
+      translation: {x: 0.460, y: 0.100, z: 0.05}
+      rotation: {x: 0.5, y: 0.5, z: 0.5, w: 0.5}
   - name: stock_carrot_2
     prefab_name: carrot
     pose:
-      translation: {x: 0.399, y: 0.337, z: 0.05}
+      translation: {x: 0.240, y: 0.210, z: 0.05}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
   - name: stock_apple_3
     prefab_name: apple
     pose:
-      translation: {x: 0.326, y: -0.539, z: 0.05}
+      translation: {x: 0.350, y: 0.100, z: 0.05}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
   - name: stock_carrot_3
     prefab_name: carrot
     pose:
-      translation: {x: 0.230, y: -0.448, z: 0.05}
+      translation: {x: 0.230, y: -0.330, z: 0.05}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
   - name: stock_corn_3
     prefab_name: corn
     pose:
-      translation: {x: 0.450, y: -0.090, z: 0.05}
+      translation: {x: 0.350, y: -0.210, z: 0.05}
       rotation: {x: 0.5, y: 0.5, z: 0.5, w: 0.5}
   - name: stock_tomato_3
     prefab_name: tomato
     pose:
-      translation: {x: 0.220, y: 0.347, z: 0.05}
+      translation: {x: 0.460, y: 0.0, z: 0.05}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
   - name: stock_apple_4
     prefab_name: apple
     pose:
-      translation: {x: 0.395, y: 0.235, z: 0.05}
+      translation: {x: 0.570, y: 0.0, z: 0.05}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
   - name: stock_corn_4
     prefab_name: corn
     pose:
-      translation: {x: 0.560, y: 0.0525, z: 0.05}
+      translation: {x: 0.350, y: 0.210, z: 0.05}
       rotation: {x: 0.5, y: 0.5, z: 0.5, w: 0.5}
   - name: stock_carrot_4
     prefab_name: carrot
     pose:
-      translation: {x: 0.230, y: 0.448, z: 0.05}
+      translation: {x: 0.230, y: 0.330, z: 0.05}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
   - name: stock_tomato_4
     prefab_name: tomato
     pose:
-      translation: {x: 0.306, y: 0.294, z: 0.05}
+      translation: {x: 0.240, y: 0.100, z: 0.05}
       rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}

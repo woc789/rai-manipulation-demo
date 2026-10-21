@@ -47,7 +47,8 @@ public:
   bool ExecutePlan(const ArmPlan & plan);
   std::string GetLastMotionError() const {return m_lastMotionError;}
   bool PlanTransitWithApproach(const geometry_msgs::msg::Pose & above,
-    geometry_msgs::msg::Pose & contact, ArmPlan & plan, bool allow_axial_rotation = false);
+    geometry_msgs::msg::Pose & contact, ArmPlan & plan, bool allow_axial_rotation = false,
+    double required_lift_z = 0.0);
 
   bool Open();
   bool Close();

@@ -165,9 +165,16 @@ void ArmController::DiagnoseCartesianFailure(const moveit::core::RobotState & st
 }
 
 bool ArmController::PlanTransitWithApproach(const geometry_msgs::msg::Pose & above,
-  geometry_msgs::msg::Pose & contact, ArmPlan & plan, bool allow_axial_rotation)
+  geometry_msgs::msg::Pose & contact, ArmPlan & plan, bool allow_axial_rotation,
+  double required_lift_z)
 {
   m_lastMotionError.clear();
+  if (!std::isfinite(required_lift_z) || required_lift_z < 0.0 ||
+    (required_lift_z > 0.0 && required_lift_z < above.position.z))
+  {
+    m_lastMotionError = "Invalid required post-grasp lift height";
+    return false;
+  }
   auto start = WaitForStableState();
   if (!start) return false;
   std::vector<double> current_joints;
@@ -285,6 +292,32 @@ bool ArmController::PlanTransitWithApproach(const geometry_msgs::msg::Pose & abo
       }
       if (!std::all_of(forward.joint_trajectory.points.begin(), forward.joint_trajectory.points.end(),
           [&](const auto & point) {return safe_positions(forward.joint_trajectory.joint_names, point.positions);})) continue;
+      if (required_lift_z > 0.0) {
+        // Endpoint IK and a short descent do not prove the later lift is
+        // reachable on this elbow/wrist branch. Check the whole lift before
+        // executing any transit/contact/closing. This is planning only.
+        if (forward.joint_trajectory.points.empty()) continue;
+        auto at_contact = hover;
+        const auto & names = forward.joint_trajectory.joint_names;
+        const auto & positions = forward.joint_trajectory.points.back().positions;
+        if (names.size() != positions.size()) continue;
+        for (std::size_t j = 0; j < names.size(); ++j) {
+          at_contact.setVariablePosition(names[j], positions[j]);
+        }
+        at_contact.update();
+        auto lift_pose = selected_contact;
+        lift_pose.position.z = required_lift_z;
+        SetMeasuredStartState(at_contact);
+        moveit_msgs::msg::RobotTrajectory lift;
+        const double lift_fraction = m_pandaArm->computeCartesianPath({lift_pose}, 0.01, lift);
+        m_pandaArm->setStartStateToCurrentState();
+        RCLCPP_INFO(m_node->get_logger(), "Post-grasp lift candidate %d/%d: z=%.3f fraction=%.4f",
+          attempt + 1, attempts, required_lift_z, lift_fraction);
+        if (!std::isfinite(lift_fraction) || lift_fraction < 0.999 ||
+          lift.joint_trajectory.points.empty() ||
+          !std::all_of(lift.joint_trajectory.points.begin(), lift.joint_trajectory.points.end(),
+            [&](const auto & point) {return safe_positions(lift.joint_trajectory.joint_names, point.positions);})) continue;
+      }
     }
     std::vector<double> hover_joints;
     hover.copyJointGroupPositions("panda_arm", hover_joints);

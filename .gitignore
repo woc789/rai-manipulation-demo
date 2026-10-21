@@ -13,3 +13,26 @@ cmake-*
 .command_settings
 *.bak*
 *.swp
+
+# Private machine configuration, credentials and runtime evidence.
+.env
+.env.*
+!.env.example
+config/launch.env
+*.pem
+*.key
+*.sqlite*
+*.db
+*.db-*
+reports/
+release-artifacts/
+.pytest_cache/
+.ruff_cache/
+.venv/
+demo_assets/
+weights/
+*.pth
+*.pt
+backtrace.log
+core
+core.*

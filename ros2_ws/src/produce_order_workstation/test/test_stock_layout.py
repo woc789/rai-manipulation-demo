@@ -28,16 +28,25 @@ def test_new_mixed_layout_passes_and_keeps_four_of_every_sku():
         assert sum(entity.prefab_name == sku for entity in scene.entities) == 4
 
 
-def test_layout_keeps_both_banks_mixed_and_stronger_clearances():
+def test_layout_moves_fruit_to_central_patch_without_relaxing_bin_spacing():
     config, scene = fixtures()
     policy = config["stock"]["layout"]
-    assert policy["min_center_spacing_m"] >= .10
-    assert policy["min_bin_distance_m"] >= .17
-    assert policy["min_base_radius_m"] >= .40
-    for sign in (-1, 1):
-        bank = [item for item in scene.entities if item.prefab_name in config["aliases"]
-                and item.pose.pose.position.y * sign > 0]
-        assert Counter(item.prefab_name for item in bank) == dict.fromkeys(config["aliases"], 2)
+    assert policy["min_center_spacing_m"] >= 0.10
+    assert policy["min_bin_distance_m"] >= 0.17
+    assert policy["min_base_radius_m"] >= 0.26
+    fruit = [item for item in scene.entities if item.prefab_name in ("apple", "tomato")]
+    assert Counter(item.prefab_name for item in fruit) == {"apple": 4, "tomato": 4}
+    assert all(
+        abs(item.pose.pose.position.y) <= 0.32
+        for item in fruit
+        if item.prefab_name == "apple"
+    )
+    assert sum(abs(item.pose.pose.position.y) <= 0.10 for item in fruit) >= 6
+    assert all(
+        abs(item.pose.pose.position.y) <= 0.33
+        for item in scene.entities
+        if item.prefab_name in config["aliases"]
+    )
     validate_stock_layout(scene, config)
 
 
@@ -47,19 +56,19 @@ def test_corn_orientations_are_normalized_and_long_axis_stays_horizontal():
         if item.prefab_name != "corn":
             continue
         q = item.pose.pose.orientation
-        assert q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w == pytest.approx(1.0)
+        assert q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w == pytest.approx(1.0)
         # The prefab's long axis is local Z. Rotation must keep it parallel
         # to the tabletop rather than standing corn up to game detection.
-        assert 1 - 2*(q.x*q.x + q.y*q.y) == pytest.approx(0.0, abs=1e-8)
+        assert 1 - 2 * (q.x * q.x + q.y * q.y) == pytest.approx(0.0, abs=1e-8)
 
 
-def test_corn_uses_verified_foreground_patch_not_distant_side_extremes():
+def test_corn_uses_central_horizontal_lanes_not_distant_side_extremes():
     _, scene = fixtures()
     for item in scene.entities:
         if item.prefab_name == "corn":
             p = item.pose.pose.position
-            assert .450 <= p.x <= .560
-            assert abs(p.y) <= .090
+            assert 0.350 <= p.x <= 0.460
+            assert abs(p.y) <= 0.210
 
 
 def test_corn_templates_leave_room_for_observed_settling_displacement():
@@ -70,16 +79,19 @@ def test_corn_templates_leave_room_for_observed_settling_displacement():
         p = item.pose.pose.position
         # Observed roll/settling can shift X by about 12 mm. Guard both
         # workspace edges; actual settled positions still need a live audit.
-        assert .215 <= p.x <= .560
-        assert abs(p.y) <= .540
+        assert 0.215 <= p.x <= 0.560
+        assert abs(p.y) <= 0.540
 
 
-@pytest.mark.parametrize("position, reason", [
-    ((.22, -.12), "arm base"),
-    ((.57, -.23), "order-bin area"),
-    ((.70, -.30), "workspace"),
-    ((float("nan"), -.30), "nonfinite"),
-])
+@pytest.mark.parametrize(
+    "position, reason",
+    [
+        ((0.20, 0.0), "arm base"),
+        ((0.57, -0.23), "order-bin area"),
+        ((0.70, -0.30), "workspace"),
+        ((float("nan"), -0.30), "nonfinite"),
+    ],
+)
 def test_invalid_stock_position_fails_closed(position, reason):
     config, scene = fixtures()
     entity = next(item for item in scene.entities if item.name == "stock_tomato_2")

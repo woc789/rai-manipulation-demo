@@ -32,6 +32,7 @@ RaiManipulationInterfaceNode::RaiManipulationInterfaceNode()
 : m_node(rclcpp::Node::make_shared("state_controller"))
 {
   m_node->set_parameter(rclcpp::Parameter("use_sim_time", true));
+  m_node->declare_parameter<double>("post_grasp_lift_z_m", 0.30);
 }
 
 RaiManipulationInterfaceNode::~RaiManipulationInterfaceNode()
@@ -145,7 +146,8 @@ bool RaiManipulationInterfaceNode::RunMove(
     publish_stage("PLANNING_TRANSIT");
     const bool has_approach = std::abs(above_target.position.z - pose.position.z) > 0.005;
     const bool axial_freedom = step == "grab" || step == "place";
-    if (!(has_approach ? arm.PlanTransitWithApproach(above_target, pose, plan, axial_freedom) :
+    const double lift_z = step == "grab" ? m_node->get_parameter("post_grasp_lift_z_m").as_double() : 0.0;
+    if (!(has_approach ? arm.PlanTransitWithApproach(above_target, pose, plan, axial_freedom, lift_z) :
       arm.PlanFreeSpaceToPose(above_target, plan, axial_freedom))) {
       error = "MoveIt transit/approach planning failed: " + arm.GetLastMotionError();
       return false;

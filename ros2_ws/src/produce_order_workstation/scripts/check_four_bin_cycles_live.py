@@ -30,12 +30,29 @@ PLAN = (
 )
 
 
+def ready_for_pickup(jobs):
+    """Also allow resuming a cycle interrupted between confirmed pickups."""
+    return len(jobs) == 4 and all(
+        job["state"] in {"WAITING_PICKUP", "COLLECTED"} for job in jobs.values()
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database", type=Path, required=True)
     parser.add_argument("--log", type=Path, required=True)
     parser.add_argument("--prefix", required=True)
-    parser.add_argument("--collect-existing", default="")
+    parser.add_argument(
+        "--collect-existing",
+        action="append",
+        default=[],
+        help="Repeat for named setup orders; wait for verified completion before pickup",
+    )
+    parser.add_argument(
+        "--replenish-first",
+        action="store_true",
+        help="Apply revised source templates via idle replenishment; retain boxes and progress",
+    )
     args = parser.parse_args()
     if not args.database.is_file():
         parser.error("The active database must already exist")
@@ -87,7 +104,8 @@ def main():
         try:
             if not client.wait_for_service(timeout_sec=5):
                 raise RuntimeError(name + " unavailable")
-            for attempt in range(10 if retry_busy else 1):
+            deadline = time.monotonic() + 180
+            while True:
                 future = client.call_async(request)
                 wait(future.done, 30)
                 response = future.result()
@@ -100,7 +118,7 @@ def main():
                 if response.success:
                     return response
                 busy = "忙" in response.message or "只有现场就绪" in response.message
-                if not retry_busy or not busy or attempt == 9:
+                if not retry_busy or not busy or time.monotonic() >= deadline:
                     raise RuntimeError(response.message)
                 spin(2)
         finally:
@@ -178,12 +196,66 @@ def main():
         wait(lambda: bool(status), 30)
         emit("START", prefix=args.prefix, plan=PLAN, database=str(args.database))
         if args.collect_existing:
-            wait(lambda: status.get("can_pickup"), 180)
-            pickup(args.collect_existing)
-        refresh()
+
+            def setup_orders_complete():
+                jobs = {job["order_id"]: job for job in status.get("orders", [])}
+                for identifier in args.collect_existing:
+                    job = jobs.get(identifier)
+                    if job and job["state"] in {
+                        "FAILED",
+                        "CANCELED",
+                        "CANCELLED",
+                        "EXECUTION_UNCERTAIN",
+                    }:
+                        raise RuntimeError(
+                            "Setup order cannot be collected: " + str(job)
+                        )
+                return (
+                    status.get("state") == "READY"
+                    and status.get("can_pickup")
+                    and all(
+                        jobs.get(identifier, {}).get("state")
+                        in {"WAITING_PICKUP", "COLLECTED"}
+                        for identifier in args.collect_existing
+                    )
+                )
+
+            wait(setup_orders_complete, 600)
+            for identifier in args.collect_existing:
+                if rows("SELECT state FROM orders WHERE order_id=?", (identifier,)) != [
+                    ("COLLECTED",)
+                ]:
+                    wait(lambda: status.get("can_pickup"), 180)
+                    pickup(identifier)
+        if args.replenish_first:
+            wait(
+                lambda: status.get("state") == "READY"
+                and status.get("can_pickup")
+                and not any(
+                    job["state"] in {"RUNNING", "DISPATCHING"}
+                    for job in status.get("orders", [])
+                ),
+                300,
+            )
+        refresh(replenish=args.replenish_first)
         completed_cycles = 0
         for cycle, orders in enumerate(PLAN, 1):
             identifiers = [f"{args.prefix}-r{cycle}-o{index}" for index in range(1, 5)]
+            if all(
+                rows("SELECT state FROM orders WHERE order_id=?", (identifier,))
+                == [("COLLECTED",)]
+                for identifier in identifiers
+            ):
+                for identifier, quantities in zip(identifiers, orders):
+                    # A collected reservation still records CONSUMED in the view.
+                    verify_order(identifier, quantities)
+                    assert not rows(
+                        "SELECT bin_id FROM bin_allocations WHERE order_id=? AND released IS NULL",
+                        (identifier,),
+                    )
+                completed_cycles += 1
+                emit("CYCLE_ALREADY_COLLECTED", cycle=cycle)
+                continue
             emit("CYCLE_START", cycle=cycle, orders=dict(zip(identifiers, orders)))
             for identifier, quantities in zip(identifiers, orders):
                 if not rows(
@@ -254,7 +326,7 @@ def main():
                         "Round cannot complete; original orders retained: "
                         + str(failed)
                     )
-                if all(job["state"] == "WAITING_PICKUP" for job in jobs.values()):
+                if ready_for_pickup(jobs):
                     break
                 if status.get("state") in {
                     "SCENE_OFFLINE",
@@ -311,8 +383,18 @@ def main():
             allocations = rows(
                 "SELECT order_id,bin_id FROM bin_allocations WHERE released IS NULL"
             )
-            assert set(row[0] for row in allocations) == set(identifiers)
-            assert len(set(row[1] for row in allocations)) == 4
+            pending_pickup = {
+                identifier
+                for identifier in identifiers
+                if rows("SELECT state FROM orders WHERE order_id=?", (identifier,))
+                == [("WAITING_PICKUP",)]
+            }
+            assert set(row[0] for row in allocations) == pending_pickup
+            history = rows(
+                "SELECT order_id,bin_id FROM bin_allocations WHERE order_id IN (?,?,?,?)",
+                identifiers,
+            )
+            assert len(history) == 4 and len({row[1] for row in history}) == 4
             for identifier, quantities in zip(identifiers, orders):
                 verify_order(identifier, quantities)
             assert rows("PRAGMA integrity_check") == [("ok",)]
@@ -320,7 +402,9 @@ def main():
             emit("FOUR_BINS_VERIFIED", cycle=cycle, allocations=allocations)
             # No pickup occurs until all four original orders are complete.
             for identifier in identifiers:
-                pickup(identifier)
+                if identifier in pending_pickup:
+                    wait(lambda: status.get("can_pickup"), 180)
+                    pickup(identifier)
             refresh()
             completed_cycles += 1
             emit("CYCLE_COMPLETE", cycle=cycle)

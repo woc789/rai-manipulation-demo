@@ -149,21 +149,36 @@ class ProduceAgent:
             "Prefer a sensible SKU sequence using the supplied observations; do not invent SKUs or claim completion. "
             "Only propose the allowed tool arguments; execution will re-perceive and verify every item."},
             {"role": "user", "content": json.dumps(context, ensure_ascii=False)}]
-        reply = self.model.chat.completions.create(model=self.model_name, messages=messages,
-            tools=[tool], tool_choice={"type": "function", "function": {"name": "propose_fulfillment_plan"}},
-            temperature=0)
-        self._check_cancel()
-        calls = reply.choices[0].message.tool_calls or []
-        if len(calls) != 1 or calls[0].function.name != "propose_fulfillment_plan":
-            raise OrderError("Agent did not return exactly one plan proposal")
-        try:
-            proposal = json.loads(calls[0].function.arguments)
-        except (ValueError, TypeError) as exc:
-            raise OrderError("Agent plan is not valid JSON") from exc
-        plan = validate_plan(proposal, context)
-        self._event("AGENT_PLAN_PROPOSED", context_digest=digest,
-                    items=plan["items"])
-        return plan
+        # Retry only malformed proposals, before any physical tool executes.
+        # Network/auth failures still propagate; no scripted plan is substituted.
+        for attempt in range(1, 4):
+            self._check_cancel()
+            reply = self.model.chat.completions.create(model=self.model_name, messages=messages,
+                tools=[tool], tool_choice={"type": "function", "function": {"name": "propose_fulfillment_plan"}},
+                temperature=0)
+            self._check_cancel()
+            calls = (reply.choices[0].message.tool_calls or []) if reply.choices else []
+            reason = "INVALID_TOOL_CALLS"
+            if len(calls) == 1 and calls[0].function.name == "propose_fulfillment_plan":
+                try:
+                    reason = "INVALID_JSON"
+                    proposal = json.loads(calls[0].function.arguments)
+                    reason = "INVALID_PLAN"
+                    plan = validate_plan(proposal, context)
+                except (ValueError, TypeError, OrderError):
+                    pass
+                else:
+                    self._event("AGENT_PLAN_PROPOSED", context_digest=digest,
+                                items=plan["items"])
+                    return plan
+            self._event("AGENT_PLAN_REJECTED", attempt=attempt, reason=reason,
+                        call_count=len(calls),
+                        call_names=[call.function.name for call in calls])
+            messages.append({"role": "user", "content":
+                "Your proposal was rejected. Return exactly one propose_fulfillment_plan call. "
+                "Use valid JSON, the exact supplied context_digest, and every remaining item exactly once. "
+                "Do not execute any motion or claim completion."})
+        raise OrderError("Agent plan proposal failed validation after 3 bounded attempts")
 
     def select_candidate(self, target_sku: str | None = None) -> str:
         """BT owns execution; this Agent selects one actually perceived ID only."""

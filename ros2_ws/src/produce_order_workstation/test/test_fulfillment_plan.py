@@ -106,3 +106,33 @@ def test_agent_forces_one_plan_tool_and_validates_result(context):
     agent = ProduceAgent(order, {"model": "test-model"}, MagicMock(), model=model)
     assert agent.plan_order(context) == plan
     assert model.chat.completions.create.call_args.kwargs["tool_choice"]["function"]["name"] == "propose_fulfillment_plan"
+
+
+def test_plan_contract_failure_is_retried_before_any_physical_tool(context):
+    order = Order("order-1", "A", (OrderLine("corn", 2), OrderLine("apple", 1)))
+    model, client, events = MagicMock(), MagicMock(), MagicMock()
+    plan = proposal(context, [{"sku": "apple", "visual_attempts": 2},
+                              {"sku": "corn", "visual_attempts": 3}])
+    valid = SimpleNamespace(function=SimpleNamespace(
+        name="propose_fulfillment_plan", arguments=json.dumps(plan)))
+    model.chat.completions.create.side_effect = [
+        SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(tool_calls=[]))]),
+        SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(tool_calls=[valid]))]),
+    ]
+    agent = ProduceAgent(order, {"model": "test-model"}, client, model=model, event_sink=events)
+    assert agent.plan_order(context) == plan
+    assert model.chat.completions.create.call_count == 2
+    client.call.assert_not_called()
+    assert events.call_args_list[0].args[1] == "AGENT_PLAN_REJECTED"
+
+
+def test_plan_contract_failure_is_bounded_and_never_falls_back(context):
+    order = Order("order-1", "A", (OrderLine("corn", 2), OrderLine("apple", 1)))
+    model, client = MagicMock(), MagicMock()
+    model.chat.completions.create.return_value = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(tool_calls=[]))])
+    agent = ProduceAgent(order, {"model": "test-model"}, client, model=model)
+    with pytest.raises(OrderError, match="3 bounded attempts"):
+        agent.plan_order(context)
+    assert model.chat.completions.create.call_count == 3
+    client.call.assert_not_called()

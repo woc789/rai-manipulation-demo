@@ -14,12 +14,6 @@ simulation_restore:
   enabled: true
   fresh_simulator_max_age_s: 180
   allow_legacy_template_checkpoint: true
-  # Re-stage only these surviving identities when the destination is free.
-  # Prevent the retained A1 order bin from hiding the remaining apples.
-  source_position_overrides:
-    stock_apple_1: [0.395, 0.235, 0.05]
-    stock_apple_3: [0.332, 0.429, 0.05]
-    stock_carrot_4: [0.399, 0.337, 0.05]
 scheduler:
   accept_timeout_s: 15.0
   feedback_timeout_s: 180.0
@@ -59,15 +53,16 @@ stock:
   initial_counts: {corn: 4, carrot: 4, apple: 4, tomato: 4}
   settle_time_s: 2.0
   # Geometric setup guardrails, NOT a substitute for MoveIt collision/IK checks.
-  # Mixed stock occupies two side banks; the tight base/centre corridor is empty.
+  # Central mixed stock. Contact/hover IK was checked before reducing this
+  # conservative setup radius; real motion still uses MoveIt collision checks.
   layout:
-    min_base_radius_m: 0.40
+    min_base_radius_m: 0.26
     min_center_spacing_m: 0.10
     min_bin_distance_m: 0.17
 agent:
   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
-  # Desktop Clash; applies only to remote model requests, never local MCP/ROS.
-  proxy_url: http://127.0.0.1:7897
+  # Machine-specific proxies belong in the private launch profile.
+  proxy_url: null
   model: qwen3.7-flash-2026-07-15
   timeout_s: 40
   max_tool_calls_per_item: 6
