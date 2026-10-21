@@ -4,6 +4,7 @@
 
 - 名称：ROS 2 + Agent 生鲜配货仿真工作站。
 - 定位：基于 RobotecAI RAI 与 rai-manipulation-demo 的二次开发、单机 Ubuntu 24.04/Jazzy 仿真开发版。
+- 发布形式：Fork `RobotecAI/rai-manipulation-demo`，在 Fork 内发布改进分支，保留上游提交历史、LICENSE 和 NOTICE；不是新建空仓库重新声明独立原创项目。
 - 不宣称五轮压力测试通过，不宣称真机/工业可靠性或端到端 VLA。
 - 不增加功能键，不启动新压力批次，不自动安装/下载大型资源。
 
@@ -21,7 +22,7 @@
 ## 仍需人工验收 / 不能自动声称完成
 
 - 用户按 README 在本机从停止状态启动、确认恢复入口与实际使用体验。
-- 全新电脑的系统依赖、Conda/CUDA、O3DE 二进制与视觉缓存准备尚未在另一台机器验收；doctor 不代替这项工作。
+- 按用户要求，不额外安装/验证新环境；README 直接提供与本机对应的依赖、资源下载、配置和启动流程，明确驱动/硬件适配边界，不宣称跨机器保证。
 - 模型账户地区、型号、余额与免费额度由账户决定；启动检查不会发起计费模型请求。
 - 原生模拟器退出问题尚无根因结论；正常启动不再默认附加调试器。
 - 玉米漏检与箱子遮挡仍在已知问题中。固定压力批次第三轮结束后，第四轮受控失败；没有第五轮通过记录。
@@ -30,7 +31,7 @@
 
 ## 发布前检查
 
-本机启动、界面重开与幂等启动已验证；单元回归 420 通过、9 跳过，Qt 回归 46 通过，发布审计测试 3 通过。具体操作与未覆盖范围见 [启动与发布准备验收](STARTUP_RELEASE_VALIDATION_2026-10-21.md)。这些结果不替代用户验收或新机安装验收。
+本机启动、界面重开与幂等启动已验证；单元回归 420 通过、9 跳过，Qt 回归 46 通过，发布审计测试 3 通过。具体操作与未覆盖范围见 [启动与发布准备验收](STARTUP_RELEASE_VALIDATION_2026-10-21.md)。这些是已有本机结果，不构成跨硬件安装保证；按用户要求不新增新机安装验证。
 
 ```bash
 python3 scripts/release_audit.py --history
@@ -42,11 +43,28 @@ git status --short
 
 审计是启发式，不能保证识别所有秘密；若发现真实泄漏，先撤销/轮换密钥，再协商历史清理，不能直接强推改写历史。
 
-## 确定远程地址之后再做
+## 维护者：按 Fork 关系发布，不重建空仓库
 
-- 用户提供/确认自己的 GitHub 仓库地址、可见性与发布版本。
-- 在验收通过后再建立远程与 push；origin 当前属于 RobotecAI 上游，不对它执行发布推送。
-- 不执行 `git push --mirror`、强推或自动重写旧历史。
-- 大型模型/仿真包使用原始获取说明或合规 Release 分发，不提交业务数据库。
+1. 登录自己的 GitHub，在 [RobotecAI/rai-manipulation-demo](https://github.com/RobotecAI/rai-manipulation-demo) 点 **Fork**，创建自己的派生仓库。GitHub Fork 关系是平台操作，本地 `git branch` 或给新仓库改名不能代替。
+2. 提供该 Fork 的实际 HTTPS/SSH 地址。当前本地分支为 `kd/vacuum_gripper`，包含上游历史和本项目后续提交，不需要重新 `git init`、复制文件或删除历史。
+3. 在当前项目根目录，确认远程仍为记录的状态后，将原 origin 保留为 upstream，将 origin 指向自己的 Fork。以下是待确认地址后的维护者命令，**本轮没有执行**：
 
-参考：[GitHub 敏感信息处理](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/removing-sensitive-data-from-a-repository)、[大文件规则](https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-large-files-on-github)。
+```bash
+git remote -v
+# 仅在 origin 仍为 RobotecAI、且没有同名 upstream 时：
+git remote rename origin upstream
+git remote add origin https://github.com/YOUR_ACCOUNT/rai-manipulation-demo.git
+# 当前已提交 HEAD 推送为 Fork 的专用分支，不覆盖上游分支：
+git push --set-upstream origin HEAD:produce-workstation
+```
+
+4. 将 README 的 `YOUR_ACCOUNT`、`YOUR_RELEASE_BRANCH` 替换成真实账号和 `produce-workstation`，提交到同一 Fork 分支。将该分支设为 Fork 默认分支，或在项目介绍明确链接此分支，否则访客可能看到上游默认版本。
+5. 仓库首页保留 `forked from RobotecAI/rai-manipulation-demo` 的关系，README 保留上游来源和改动范围；不要求将此业务分支合并回上游才能展示。
+
+不向 RobotecAI 上游 origin 发布推送，不使用 `git push --mirror`、强推、历史重写或独立新许可证覆盖上游许可。大型模型/仿真包使用原始获取说明，不提交业务数据库。Fork 地址未提供前保持本地远程配置不变。
+
+## 使用者的目标路径
+
+README 的 A～G：准备系统 → 克隆 Fork 发布分支与固定 RAI → ROS/BT 依赖 → Conda 与编译 → 仿真/视觉资源下载 → 外部配置和自己的 Key → doctor/start → READY 后提交订单。既不需要运行压力测试，也不需要先构建维护者的旧订单数据库。
+
+参考：[GitHub Fork 操作](https://docs.github.com/en/pull-requests/how-tos/work-with-forks/fork-a-repo?tool=webui)、[配置 upstream](https://docs.github.com/en/pull-requests/how-tos/work-with-forks/configuring-a-remote-repository-for-a-fork)、[敏感信息处理](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/removing-sensitive-data-from-a-repository)、[大文件规则](https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-large-files-on-github)。

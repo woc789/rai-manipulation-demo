@@ -1,6 +1,6 @@
 # 首次安装与依赖准备
 
-本机已经有环境：**不要执行本页重装**，回到 README 的 doctor/start。此页给新电脑或独立克隆者说明所有外部依赖。没有在第二台全新电脑做完安装验收，不把它称为已验证的一键安装器。
+本机已经有环境：**不要执行本页重装**，回到 README 的 doctor/start。[README](../README.md) 的 A～G 是完整操作顺序，本页补充环境细节。按本机已有可运行环境整理依赖，不额外进行新环境安装验证；硬件与驱动差异需使用者自行适配。本仓库按 `RobotecAI/rai-manipulation-demo` 的 Fork / 二次开发分支发布，保留上游历史和许可。
 
 ## 1. 环境边界
 
@@ -38,7 +38,7 @@
 
 ## 2. 两个源码目录，不要直接重置现有目录
 
-本项目可以在 RAI 的 `src/examples/` 中，也可独立克隆。以下变量必须改成**自己的真实绝对路径**；本仓库地址从 GitHub 页面复制，不使用 RobotecAI 上游地址代替自己的改进版。
+推荐将本 Fork 的发布分支放到外层 RAI 的 `src/examples/rai-manipulation-demo/`。以下变量必须改成**自己的真实绝对路径**；本 Fork 地址和发布分支从 GitHub 页面复制，不使用 RobotecAI 上游默认分支代替改进版。这里的两个源码目录不表示发布为两个独立原创项目：外层 RAI 是运行依赖，本仓库是 demo 的衍生分支。
 
 ```bash
 export RAI_ROOT=/absolute/path/to/rai
@@ -79,7 +79,7 @@ rosdep install --from-paths "$RAI_ROOT/src/src/rai_interfaces" "$RAI_ROOT/src/ra
 
 检查输出并解决未解析项，不能因为 `-r` 继续执行就当所有依赖成功。特别需要 MoveIt/Panda 配置、gazebo_msgs（O3DE 服务接口）、depth_image_proc，以及 BehaviorTree.CPP 4.x；后者不能用不兼容的 3.x 代替。基线 RAI 的接口构建需要兼容 C++ 工具链，具体以其构建文档及报错为准。
 
-若 BehaviorTree.CPP 安装在独立前缀，保存其真实路径，后续同时用于 CMAKE_PREFIX_PATH 与运行库路径。本机已有此前准备的前缀，不需再下载或复制覆盖。
+本机 BehaviorTree.CPP 为 4.10.0。按 README 的 C 步下载 Jazzy deb 并解包到独立前缀，保存其真实路径，后续同时用于 CMAKE_PREFIX_PATH 与运行库路径。本机已有此前准备的前缀，不需再下载或复制覆盖。
 
 ## 4. 独立 Conda 与 Python 包
 
@@ -91,9 +91,10 @@ conda create -n rai-jazzy python=3.12 pip -y
 conda activate rai-jazzy
 python -m pip install numpy==1.26.4 torch==2.3.1 torchvision==0.18.1 transformers==4.57.6 scikit-learn==1.3.2 rf-groundingdino==0.2.0 rai-gsam2==1.1.3
 python -m pip install -e "$RAI_ROOT/src/rai_core" -e "$RAI_ROOT/src/rai_sim" -e "$RAI_ROOT/src/rai_extensions/rai_perception" -r "$WORKSTATION/requirements/runtime-extra.txt"
+conda deactivate
 ```
 
-CUDA、驱动与 PyTorch 分发源需要适配实际机器；不要把系统 ROS 包安装进另一个不兼容的 Python 版本。此页没有自动下载或修改本机环境，新的依赖解析也仍需新机验收。
+CUDA、驱动与 PyTorch 分发源需要适配实际机器；不要把系统 ROS 包安装进另一个不兼容的 Python 版本。此页没有自动下载或修改本机环境；后续编译在退出 Conda 后使用系统 Python。
 
 ## 5. 构建两层 ROS overlay
 

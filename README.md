@@ -1,6 +1,8 @@
-# ROS 2 + Agent 生鲜配货工作站
+# rai-manipulation-demo · 生鲜配货二次开发分支
 
 基于 [RobotecAI RAI](https://github.com/RobotecAI/rai) 和 [rai-manipulation-demo](https://github.com/RobotecAI/rai-manipulation-demo) 的二次开发。用 O3DE 中的 Panda 机械臂完成有限库存、多订单、**一单一箱**的混合配货。
+
+**仓库定位：保留上游历史的 Fork / 二次开发分支，不是从零编写的独立机器人框架，也不是 RobotecAI 官方版本。** 发布时应先 Fork `RobotecAI/rai-manipulation-demo`，再在自己的 Fork 中发布此分支；不能只创建空仓库便声称 GitHub 已建立 Fork 关系。上游提供仿真与 Panda 操作基础、RAI 工具和感知能力；本分支扩展订单/库存/箱位、调度与 SQLite、独立 Agent/MCP、受约束计划与行为树、运动安全检查及操作界面。许可与素材归属保留原声明。
 
 **当前定位：Ubuntu 24.04 + ROS 2 Jazzy 单机仿真开发版。** 不需要 Docker，不使用网页界面。视觉漏检、遮挡和模拟器原生异常仍有已知限制，不承诺订单必然完成，也没有“五轮压力测试全部通过”的结论。
 
@@ -88,7 +90,118 @@ Agent 从私有文件读取 Key；启动器不把 Key 转发进 systemd 可查�
 
 SQLite 与报告保留在 `~/.local/share/produce_order_workstation/`，不属于源码。重启不删库，清空日志不删订单；不要通过删除数据库来绕过恢复确认。
 
-**新电脑还需实际安装并构建：**系统 Jazzy/Qt → 固定版本 RAI 与本项目必要补丁 → Conda Python 依赖 → 两层 ROS workspace → 完整 O3DE 包与视觉缓存 → 外部配置/Key → doctor/start。具体可执行步骤见 [首次安装](docs/INSTALL.md)，尚未在第二台新电脑完整验收。本轮没有重新安装依赖或下载模型。
+### 新用户配置与下载顺序
+
+以下只用于**还没有环境的新用户**；本机使用者直接进入第 1 节。按现有可运行环境提供步骤，不额外进行新环境安装验证。驱动/CUDA 需与自己的 NVIDIA 显卡匹配；本文不保证不同硬件完全一致。
+
+A～G 尽量在同一终端依次执行；如果中途换终端，先恢复 `RAI_ROOT`、`WORKSTATION` 和外部 BT 前缀变量，再加载 Jazzy。所有路径以自己的安装位置为准。
+
+**A. 准备系统。** 安装 Ubuntu 24.04 图形桌面、NVIDIA 驱动、Miniconda，以及 [ROS 2 Jazzy](https://docs.ros.org/en/jazzy/Installation/Ubuntu-Install-Debs.html)。配置好 ROS apt 源后：
+
+```bash
+sudo apt-get update
+sudo apt-get install build-essential cmake git git-lfs wget unzip python3-colcon-common-extensions python3-vcstool python3-rosdep python3-pyqt5 ros-jazzy-moveit ros-jazzy-moveit-resources-panda-moveit-config ros-jazzy-depth-image-proc
+git lfs install
+source /opt/ros/jazzy/setup.bash
+```
+
+**B. 获取本 Fork 的发布分支，以及外层 RAI。** 从本 GitHub 页的 Code 按钮复制 **Fork 地址**，分支名使用维护者发布的实际分支，不要下载上游默认分支代替本分支。下面两个占位符发布后应替换为实际值；现阶段尚未创建远程 Fork。
+
+```bash
+export RAI_ROOT="$HOME/rai_embodied_project"
+export WORKSTATION="$RAI_ROOT/src/examples/rai-manipulation-demo"
+git clone https://github.com/RobotecAI/rai.git "$RAI_ROOT"
+git -C "$RAI_ROOT" checkout 6802d4073e8caa2ab72c5509fa1eeeb659663f64
+mkdir -p "$RAI_ROOT/src/examples"
+git clone --branch YOUR_RELEASE_BRANCH https://github.com/YOUR_ACCOUNT/rai-manipulation-demo.git "$WORKSTATION"
+git -C "$WORKSTATION" lfs pull
+git -C "$RAI_ROOT" apply --check "$WORKSTATION/patches/rai-workcell.patch"
+git -C "$RAI_ROOT" apply "$WORKSTATION/patches/rai-workcell.patch"
+```
+
+仅在新目录执行，不覆盖现有环境。RAI 补丁是本分支依赖的一部分，不能省略；不需要另 Fork RAI 才能使用本分支。
+
+**C. 补齐 ROS 和行为树依赖。**
+
+```bash
+cd "$RAI_ROOT"
+vcs import src < ros_deps.repos
+# 只有从未初始化 rosdep 的机器才执行 sudo rosdep init
+rosdep update
+rosdep install --from-paths "$RAI_ROOT/src/src/rai_interfaces" "$RAI_ROOT/src/rai_bringup" "$WORKSTATION/ros2_ws/src" --ignore-src -r -y
+```
+
+rosdep 输出有失败项必须处理。BehaviorTree.CPP 本机使用 **4.10.0**，不是 3.x。本机为避免混装发行版，将 Jazzy deb 解包到独立前缀；新机可按同样结构准备：
+
+```bash
+sudo apt-get install libsqlite3-dev libzmq3-dev ros-jazzy-tinyxml2-vendor
+mkdir -p "$HOME/.local/share/rai-deps/behaviortree-jazzy"
+cd "$HOME/.local/share/rai-deps/behaviortree-jazzy"
+apt-cache policy ros-jazzy-behaviortree-cpp
+apt-get download ros-jazzy-behaviortree-cpp
+# 将下面占位符换成上一条实际下载的 deb 文件名：
+dpkg-deb -x ./DOWNLOADED_BEHAVIORTREE_JAZZY.deb ./prefix
+export PRODUCE_BT_PREFIX="$PWD/prefix/opt/ros/jazzy"
+export CMAKE_PREFIX_PATH="$PRODUCE_BT_PREFIX:${CMAKE_PREFIX_PATH:-}"
+export LD_LIBRARY_PATH="$PRODUCE_BT_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+```
+
+apt 源若不再提供本机相同版本，记录实际版本；不要拿其他 ROS 发行版的包替代。上面的外部前缀随后要写进启动配置。
+
+**D. 创建 Conda 并安装 Python 依赖，然后编译。**
+
+```bash
+source "$HOME/miniconda3/etc/profile.d/conda.sh"
+conda create -n rai-jazzy python=3.12 pip -y
+conda activate rai-jazzy
+python -m pip install numpy==1.26.4 torch==2.3.1 torchvision==0.18.1 transformers==4.57.6 scikit-learn==1.3.2 rf-groundingdino==0.2.0 rai-gsam2==1.1.3
+python -m pip install -e "$RAI_ROOT/src/rai_core" -e "$RAI_ROOT/src/rai_sim" -e "$RAI_ROOT/src/rai_extensions/rai_perception" -r "$WORKSTATION/requirements/runtime-extra.txt"
+conda deactivate
+source /opt/ros/jazzy/setup.bash
+cd "$RAI_ROOT"
+colcon build --symlink-install --packages-select rai_interfaces rai_bringup
+source "$RAI_ROOT/install/local_setup.bash"
+cd "$WORKSTATION/ros2_ws"
+colcon build --symlink-install
+source "$WORKSTATION/ros2_ws/install/local_setup.bash"
+```
+
+Python 包依赖会联网下载，PyTorch 分发包与驱动需匹配；ROS 构建使用系统 Python，不使用另一 Python 版本替代。编译成功后才继续。
+
+**E. 下载运行资源。** 这些不在源码仓库中；API 模型不需要本地下载。
+
+| 资源 | 下载方式 | 大小与保存位置 |
+|---|---|---|
+| O3DE Manipulation Jazzy 完整包 | 下方 `download_demo.sh manipulation`，来自 RobotecAI 发布地址 | 大型压缩包；大小以下载显示为准，保留解压完整目录 `RAI_ROOT/demo_assets/manipulation/` |
+| GroundingDINO 权重 | `download-perception-models` | 693,997,677 字节，`~/.cache/rai/vision/weights/` |
+| SAM2 large 权重 | 同一命令 | 897,952,466 字节，同上 |
+| BERT tokenizer 与模型 | 下方 Hugging Face 命令 | 模型约 0.44 GB，加 tokenizer；`~/.cache/huggingface/` |
+
+```bash
+cd "$RAI_ROOT"
+source /opt/ros/jazzy/setup.bash
+bash scripts/download_demo.sh manipulation
+source "$HOME/miniconda3/etc/profile.d/conda.sh"
+conda activate rai-jazzy
+source "$RAI_ROOT/install/local_setup.bash"
+download-perception-models
+python -c 'from transformers import AutoTokenizer; AutoTokenizer.from_pretrained("bert-base-uncased")'
+python -c 'from huggingface_hub import hf_hub_download; hf_hub_download("bert-base-uncased", "model.safetensors")'
+```
+
+权重约 2 GB，另计仿真包、源码/LFS、Conda 和 CUDA/PyTorch 下载；**不是只下载 Git 仓库就有完整运行资源**。下载需要可访问对应站点；正式启动离线读取视觉缓存。上游仿真下载脚本会替换已有 manipulation 目录，因此只在首次准备时执行，不要当作日常启动命令。
+
+**F. 写配置。** 按本节上面的模板操作，把 `PRODUCE_RAI_ROOT`、Conda、BT 前缀和新数据库路径填好；新用户不使用本机历史验证库。独立保存自己的 Key，选择已开通的工具调用模型，代理仅按实际需要填写。不要照抄本机 `7897` 代理。
+
+**G. 启动并看效果。** 在已登录桌面的终端：
+
+```bash
+cd "$WORKSTATION"
+bash start.sh doctor
+bash start.sh start
+```
+
+doctor 通过后启动；等待 READY，看到仿真、订单窗口和桌面物品，再按第 3 节填写一份混合订单。具体环境细节另见 [安装说明](docs/INSTALL.md)。本流程按现有环境整理，未额外执行新环境安装验证。
 
 ## 1. 启动前：先检查，不要重复点启动
 
