@@ -67,6 +67,6 @@ git push origin HEAD:development
 
 ## 使用者的目标路径
 
-README 的 A～G：准备系统 → 克隆 Fork 发布分支与固定 RAI → ROS/BT 依赖 → Conda 与编译 → 仿真/视觉资源下载 → 外部配置和自己的 Key → doctor/start → READY 后提交订单。既不需要运行压力测试，也不需要先构建维护者的旧订单数据库。
+[安装文档](INSTALL.md) 的 A～G：准备系统 → 克隆 Fork 发布分支与固定 RAI → ROS/BT 依赖 → Conda 与编译 → 仿真/视觉资源下载 → 外部配置和自己的 Key → doctor/start → READY 后提交订单。README 保留快速入口，完整操作与恢复移至 [运行指南](OPERATIONS.md)。既不需要运行压力测试，也不需要先构建维护者的旧订单数据库。
 
 参考：[GitHub Fork 操作](https://docs.github.com/en/pull-requests/how-tos/work-with-forks/fork-a-repo?tool=webui)、[配置 upstream](https://docs.github.com/en/pull-requests/how-tos/work-with-forks/configuring-a-remote-repository-for-a-fork)、[敏感信息处理](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/removing-sensitive-data-from-a-repository)、[大文件规则](https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-large-files-on-github)。
