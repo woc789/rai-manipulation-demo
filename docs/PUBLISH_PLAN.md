@@ -45,6 +45,8 @@ git status --short
 
 ## 维护者：按 Fork 关系发布，不重建空仓库
 
+当前已确认 Fork 为 `https://github.com/woc789/rai-manipulation-demo`，目标分支为 `development`。本地已将该 Fork 设置为 origin，RobotecAI 原仓库设置为 upstream。下面步骤保留作维护说明；不要对已经完成设置的目录重复添加远程。发布成功与否以实际推送及远程检查结果为准。
+
 1. 登录自己的 GitHub，在 [RobotecAI/rai-manipulation-demo](https://github.com/RobotecAI/rai-manipulation-demo) 点 **Fork**，创建自己的派生仓库。GitHub Fork 关系是平台操作，本地 `git branch` 或给新仓库改名不能代替。
 2. 提供该 Fork 的实际 HTTPS/SSH 地址。当前本地分支为 `kd/vacuum_gripper`，包含上游历史和本项目后续提交，不需要重新 `git init`、复制文件或删除历史。
 3. 在当前项目根目录，确认远程仍为记录的状态后，将原 origin 保留为 upstream，将 origin 指向自己的 Fork。以下是待确认地址后的维护者命令，**本轮没有执行**：
@@ -53,12 +55,12 @@ git status --short
 git remote -v
 # 仅在 origin 仍为 RobotecAI、且没有同名 upstream 时：
 git remote rename origin upstream
-git remote add origin https://github.com/YOUR_ACCOUNT/rai-manipulation-demo.git
+git remote add origin https://github.com/woc789/rai-manipulation-demo.git
 # 当前已提交 HEAD 推送为 Fork 的专用分支，不覆盖上游分支：
-git push --set-upstream origin HEAD:produce-workstation
+git push origin HEAD:development
 ```
 
-4. 将 README 的 `YOUR_ACCOUNT`、`YOUR_RELEASE_BRANCH` 替换成真实账号和 `produce-workstation`，提交到同一 Fork 分支。将该分支设为 Fork 默认分支，或在项目介绍明确链接此分支，否则访客可能看到上游默认版本。
+4. README 已填写实际账号 `woc789` 与目标分支 `development`。仓库介绍应明确链接此分支，否则访客可能看到其他分支；不要未经确认改变默认分支设置。
 5. 仓库首页保留 `forked from RobotecAI/rai-manipulation-demo` 的关系，README 保留上游来源和改动范围；不要求将此业务分支合并回上游才能展示。
 
 不向 RobotecAI 上游 origin 发布推送，不使用 `git push --mirror`、强推、历史重写或独立新许可证覆盖上游许可。大型模型/仿真包使用原始获取说明，不提交业务数据库。Fork 地址未提供前保持本地远程配置不变。

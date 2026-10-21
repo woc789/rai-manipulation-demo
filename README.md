@@ -4,6 +4,8 @@
 
 **仓库定位：保留上游历史的 Fork / 二次开发分支，不是从零编写的独立机器人框架，也不是 RobotecAI 官方版本。** 发布时应先 Fork `RobotecAI/rai-manipulation-demo`，再在自己的 Fork 中发布此分支；不能只创建空仓库便声称 GitHub 已建立 Fork 关系。上游提供仿真与 Panda 操作基础、RAI 工具和感知能力；本分支扩展订单/库存/箱位、调度与 SQLite、独立 Agent/MCP、受约束计划与行为树、运动安全检查及操作界面。许可与素材归属保留原声明。
 
+本 Fork：[woc789/rai-manipulation-demo · development](https://github.com/woc789/rai-manipulation-demo/tree/development)。以下安装命令使用此分支，不向上游提交或推送。
+
 **当前定位：Ubuntu 24.04 + ROS 2 Jazzy 单机仿真开发版。** 不需要 Docker，不使用网页界面。视觉漏检、遮挡和模拟器原生异常仍有已知限制，不承诺订单必然完成，也没有“五轮压力测试全部通过”的结论。
 
 ## 从哪里开始
@@ -105,7 +107,7 @@ git lfs install
 source /opt/ros/jazzy/setup.bash
 ```
 
-**B. 获取本 Fork 的发布分支，以及外层 RAI。** 从本 GitHub 页的 Code 按钮复制 **Fork 地址**，分支名使用维护者发布的实际分支，不要下载上游默认分支代替本分支。下面两个占位符发布后应替换为实际值；现阶段尚未创建远程 Fork。
+**B. 获取本 Fork 的 `development` 分支，以及外层 RAI。** 不要下载 RobotecAI 上游默认分支代替本分支。
 
 ```bash
 export RAI_ROOT="$HOME/rai_embodied_project"
@@ -113,7 +115,7 @@ export WORKSTATION="$RAI_ROOT/src/examples/rai-manipulation-demo"
 git clone https://github.com/RobotecAI/rai.git "$RAI_ROOT"
 git -C "$RAI_ROOT" checkout 6802d4073e8caa2ab72c5509fa1eeeb659663f64
 mkdir -p "$RAI_ROOT/src/examples"
-git clone --branch YOUR_RELEASE_BRANCH https://github.com/YOUR_ACCOUNT/rai-manipulation-demo.git "$WORKSTATION"
+git clone --branch development https://github.com/woc789/rai-manipulation-demo.git "$WORKSTATION"
 git -C "$WORKSTATION" lfs pull
 git -C "$RAI_ROOT" apply --check "$WORKSTATION/patches/rai-workcell.patch"
 git -C "$RAI_ROOT" apply "$WORKSTATION/patches/rai-workcell.patch"
