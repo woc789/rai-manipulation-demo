@@ -38,6 +38,7 @@ def _key_from_private_file() -> str | None:
 def create_model(agent_config: dict):
     """Use OpenAI-compatible tool calling, defaulting to the user's Bailian key."""
     from openai import OpenAI
+    import httpx
 
     key = os.getenv("DASHSCOPE_API_KEY") or _key_from_private_file()
     if not key:
@@ -50,7 +51,31 @@ def create_model(agent_config: dict):
         base_url=os.getenv("PRODUCE_AGENT_BASE_URL", agent_config["base_url"]),
         timeout=agent_config["timeout_s"],
         max_retries=1,
+        # systemd does not inherit desktop proxy variables. Configure this
+        # remote-only client explicitly; MCP has its own direct HTTP client.
+        http_client=httpx.Client(
+            proxy=os.getenv("PRODUCE_AGENT_PROXY_URL") or agent_config.get("proxy_url"),
+            trust_env=False,
+        ),
     )
+
+
+def explain_model_error(exc):
+    """Expose transport cause types, never request headers, body or API keys."""
+    from openai import APIConnectionError, APIStatusError
+
+    if isinstance(exc, APIConnectionError):
+        causes, current, dns_failure = [], exc, False
+        for _ in range(6):
+            if current is None:
+                break
+            causes.append(type(current).__name__)
+            dns_failure = dns_failure or "Temporary failure in name resolution" in str(current)
+            current = current.__cause__
+        return ("模型域名 DNS 解析失败（" if dns_failure else "模型网络连接失败（") + " → ".join(causes) + "）；这不是 Key 鉴权失败的证据"
+    if isinstance(exc, APIStatusError):
+        return f"模型接口返回 HTTP {exc.status_code}；请按状态码检查鉴权、限流或服务状态"
+    return str(exc)
 
 
 class ProduceAgent:

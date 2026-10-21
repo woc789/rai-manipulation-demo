@@ -912,6 +912,9 @@ class OrderActionServer(Node):
     def _prepare_initial_stock(self) -> None:
         """Make inventory visible before a customer submits an order."""
         if getattr(self, "_startup_review", False):
+            if self.config.get("simulation_restore", {}).get("enabled", False):
+                self._restore_simulation_checkpoint()
+                return
             self._set_state(
                 "RECOVERY_REQUIRED",
                 "历史物理任务待核对；业务协作页可明确确认丢弃旧现场并重建",
@@ -935,6 +938,37 @@ class OrderActionServer(Node):
         self.get_logger().info(
             "Mixed stock spawned; visual count/class validation is still pending"
         )
+
+    def _restore_simulation_checkpoint(self):
+        """Rebuild a fresh simulator without erasing durable partial progress."""
+        from .simulation_restore import restore_checkpoint, supersede_old_restore_intents
+
+        self._busy = True
+        self._set_state("RECOVERING", "正在恢复仿真订单箱及已装箱检查点，保留原订单进度")
+        try:
+            self.workstation.wait_until_ready(with_scene=True)
+            clock = self._sim_clock_value
+            maximum = float(self.config["simulation_restore"]["fresh_simulator_max_age_s"])
+            if clock is None or not 0 <= clock[0] <= maximum:
+                raise ValueError("恢复要求刚启动的完整仿真；不能在运行中的旧现场重复生成实体")
+            instance = os.getenv("PRODUCE_SIMULATION_INSTANCE", "")
+            started = float(os.getenv("PRODUCE_SIMULATION_STARTED_AT", "0"))
+            supersede_old_restore_intents(self.store, instance, started)
+            self.workstation._simulation_instance_id = instance
+            plan = restore_checkpoint(self.workstation, self.scene_path)
+            with self._lock:
+                self._startup_review = False
+                self._initial_inventory_required = False
+                self._inventory_ready = False
+                self._scan_requested = True
+            self._set_state("SCANNING", "原订单检查点已恢复，视觉重新定位后继续剩余任务", ready=True)
+            self.get_logger().info(f"Restored {len(plan.jobs)} orders and {len(plan.goods)} verified goods")
+        except Exception as exc:
+            self.get_logger().error(f"Simulator checkpoint restore refused/failed: {exc}")
+            self._set_state("RECOVERY_REQUIRED", f"检查点恢复未完成，保留原进度且禁止自动重抓：{exc}")
+        finally:
+            self._busy = False
+            self.publish_status()
 
     def pickup_callback(self, request, response):
         with self._lock:

@@ -1,5 +1,8 @@
 """Start an empty O3DE benchmark workcell and the RAI manipulation stack."""
 
+import time
+import uuid
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, SetEnvironmentVariable
 from launch.conditions import IfCondition
@@ -12,6 +15,8 @@ from launch_ros.substitutions import FindPackageShare
 def generate_launch_description():
     return LaunchDescription(
         [
+            SetEnvironmentVariable("PRODUCE_SIMULATION_INSTANCE", uuid.uuid4().hex),
+            SetEnvironmentVariable("PRODUCE_SIMULATION_STARTED_AT", str(time.time())),
             # Use the original detector; layout, not repeated tiled inference,
             # is the default way to keep this learning scene usable.
             SetEnvironmentVariable("RAI_GDINO_TILE_CLASSES", ""),

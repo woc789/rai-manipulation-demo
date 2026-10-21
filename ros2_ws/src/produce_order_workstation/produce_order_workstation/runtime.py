@@ -313,6 +313,12 @@ class Workstation:
         scene_objects = self.synchronize_scene()
         self._scene_prepared = True
         self.inventory.reset()
+        from .simulation_restore import source_manifest
+
+        self.store.set_meta("simulation_source_manifest", {
+            "epoch": self.inventory.epoch,
+            "entities": source_manifest(scene, self.config),
+        })
         self._active_order_id = None
         self._allocated_bin_index = None
         self._visual_candidates = {}
@@ -759,6 +765,12 @@ class Workstation:
                 entity.name = f"{entity.name}_refill_{generation}"
                 self._scene_bridge._spawn_entity(entity)
         self.inventory.invalidate_source()
+        from .simulation_restore import source_manifest
+
+        self.store.set_meta("simulation_source_manifest", {
+            "epoch": self.inventory.epoch,
+            "entities": source_manifest(scene_config, self.config),
+        })
         time.sleep(self.config["motion"]["settle_time_s"])
         self.synchronize_scene()
 

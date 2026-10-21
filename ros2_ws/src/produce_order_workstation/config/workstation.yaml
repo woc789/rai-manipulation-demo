@@ -9,6 +9,17 @@ persistence:
   max_events: 5000
   event_retention_days: 7
 scene_service_timeout_s: 20.0
+simulation_restore:
+  # Simulator-only checkpoint reconstruction; never enable for physical robots.
+  enabled: true
+  fresh_simulator_max_age_s: 180
+  allow_legacy_template_checkpoint: true
+  # Re-stage only these surviving identities when the destination is free.
+  # Prevent the retained A1 order bin from hiding the remaining apples.
+  source_position_overrides:
+    stock_apple_1: [0.395, 0.235, 0.05]
+    stock_apple_3: [0.332, 0.429, 0.05]
+    stock_carrot_4: [0.399, 0.337, 0.05]
 scheduler:
   accept_timeout_s: 15.0
   feedback_timeout_s: 180.0
@@ -55,6 +66,8 @@ stock:
     min_bin_distance_m: 0.17
 agent:
   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  # Desktop Clash; applies only to remote model requests, never local MCP/ROS.
+  proxy_url: http://127.0.0.1:7897
   model: qwen3.7-flash-2026-07-15
   timeout_s: 40
   max_tool_calls_per_item: 6
@@ -68,6 +81,8 @@ perception:
       text_threshold: 0.35
   color_verification:
     enabled: true
+    verify_corn: true
+    min_corn_support: 0.35
     profile: brown_apple_red_tomato
     min_pixels: 50
     # Actual SAM masks: brown support >= 0.54 on apples, < 0.06 on tomatoes.

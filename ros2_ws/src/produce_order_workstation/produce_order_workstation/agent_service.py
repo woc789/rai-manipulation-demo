@@ -18,7 +18,7 @@ from std_msgs.msg import String
 import yaml
 
 from produce_order_interfaces.action import ExecuteAgent, ExecuteBusiness
-from .agent import ProduceAgent, create_model
+from .agent import ProduceAgent, create_model, explain_model_error
 from .mcp_client import WorkstationMCPClient
 from .order import Order, OrderCancelled, OrderError, OrderLine, OrderPaused, validate_order
 from .fulfillment_plan import validate_plan
@@ -122,7 +122,8 @@ class ProduceAgentService(Node):
         except OrderPaused as exc:
             status, error = "PAUSED", str(exc)
         except Exception as exc:
-            status, error = "FAILED", str(exc)
+            status, error = "FAILED", explain_model_error(exc)
+            self.get_logger().error(f"Agent {getattr(request, 'mode', '') or 'run'} failed: {error}")
         finally:
             with self._lock:
                 self._busy = False

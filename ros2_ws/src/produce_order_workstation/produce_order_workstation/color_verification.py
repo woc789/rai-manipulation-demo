@@ -1,4 +1,4 @@
-"""Mask-only color evidence for this workcell's brown-apple/red-tomato assets.
+"""Mask-only color evidence for this workcell's fruit and green/yellow corn assets.
 
 Not a universal fruit classifier. Never reads entity IDs, poses or expected counts.
 """
@@ -11,7 +11,7 @@ import numpy as np
 from rai_perception.components.gripping_points import PointCloudFromSegmentation
 
 
-def classify_mask(bgr, mask, policy):
+def classify_mask(bgr, mask, policy, requested_sku=None):
     if bgr.ndim != 3 or bgr.shape[2] != 3 or mask.shape != bgr.shape[:2]:
         raise ValueError("Color verification requires aligned BGR image and 2D mask")
     interior = cv2.erode((mask > 0).astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
@@ -31,6 +31,22 @@ def classify_mask(bgr, mask, policy):
     if len(valid) < policy.get("min_pixels", 50) or len(valid) < area * 0.3:
         return dict(result, reason="insufficient_color_evidence")
     h, s = valid[:, 0], valid[:, 1]
+    if requested_sku == "corn":
+        # This demo's corn has green husks/yellow kernels, not carrot orange.
+        # Evidence comes only from the current eroded SAM mask's image pixels.
+        support = float(np.mean((h >= 20) & (h <= 90)))
+        orange = float(np.mean((h >= 8) & (h < 20) & (s >= 175)))
+        accepted = (
+            support >= policy.get("min_corn_support", 0.35) and support - orange >= 0.15
+        )
+        return dict(
+            result,
+            label="corn" if accepted else None,
+            corn_fraction=support,
+            orange_fraction=orange,
+            valid_pixels=len(valid),
+            reason="corn_color_confirmed" if accepted else "not_corn_color",
+        )
     apple = float(np.mean((h >= 8) & (h <= 30) & (s >= 60) & (s <= 170)))
     tomato = float(np.mean(((h <= 10) | (h >= 170)) & (s >= 175)))
     result.update(
@@ -60,14 +76,18 @@ class ColorVerifiedPointCloud(PointCloudFromSegmentation):
         for key, default, lower in (
             ("min_support", 0.55, 0.5),
             ("min_margin", 0.2, 0.1),
+            ("min_corn_support", 0.35, 0.1),
         ):
             value = float(color_policy.get(key, default))
             if not isfinite(value) or not lower <= value <= 1:
                 raise ValueError(f"Invalid color verification {key}")
+        skus = (
+            ("apple", "tomato", "corn")
+            if color_policy.get("verify_corn", False)
+            else ("apple", "tomato")
+        )
         self.color_aliases = {
-            alias.strip().lower(): sku
-            for sku in ("apple", "tomato")
-            for alias in aliases.get(sku, [])
+            alias.strip().lower(): sku for sku in skus for alias in aliases.get(sku, [])
         }
         self._color_sku = None
 
@@ -94,7 +114,9 @@ class ColorVerifiedPointCloud(PointCloudFromSegmentation):
         for index, message in enumerate(response.masks):
             self.check_cancel()
             mask = bridge.imgmsg_to_cv2(message, desired_encoding="mono8")
-            result = classify_mask(bgr, mask, self.color_policy)
+            result = classify_mask(
+                bgr, mask, self.color_policy, requested_sku=self._color_sku
+            )
             accepted = result["label"] == self._color_sku
             evidence.append(
                 dict(

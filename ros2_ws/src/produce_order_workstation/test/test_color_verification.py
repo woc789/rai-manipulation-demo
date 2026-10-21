@@ -37,6 +37,21 @@ def test_color_rules_are_conservative(bgr, label):
     assert classify_mask(image, mask, {})["label"] == label
 
 
+@pytest.mark.parametrize(
+    "bgr,label",
+    [
+        ((80, 180, 100), "corn"),
+        ((20, 210, 220), "corn"),
+        ((20, 120, 220), None),
+        ((30, 60, 210), None),
+        ((220, 220, 220), None),
+    ],
+)
+def test_corn_husk_and_kernel_color_does_not_accept_carrot_or_tomato(bgr, label):
+    image, mask = sample(bgr)
+    assert classify_mask(image, mask, {}, requested_sku="corn")["label"] == label
+
+
 def test_background_does_not_decide_mask_color():
     image, mask = sample((100, 150, 200))
     assert classify_mask(image, mask, {})["label"] == "apple"

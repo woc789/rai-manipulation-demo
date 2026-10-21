@@ -177,6 +177,7 @@ def test_model_timeout_never_moves_and_releases_agent_busy(monkeypatch):
         model=model,
         _busy=True,
         _active_order="api-outage",
+        get_logger=MagicMock(),
         _lock=Lock(),
         _stopping=Event(),
         publish_status=MagicMock(),
