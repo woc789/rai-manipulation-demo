@@ -559,6 +559,8 @@ class OrderActionServer(Node):
                     reason
                     + "；请检查相机画面与物品布局，再点击“视觉复查”；订单保留，暂不执行"
                 )
+            if getattr(self.workstation, "physical_state_uncertain", False):
+                raise ValueError("观察姿态运动结果不明确，视觉复查不能解除现场核对")
             self._initial_inventory_required = False
             self._inventory_ready = True
             with self._lock:
@@ -569,7 +571,7 @@ class OrderActionServer(Node):
                                 self.resources.update(
                                     job.order.order_id,
                                     review_required=False,
-                                    reason="人工请求复查已完成，等待重新校验资源并恢复",
+                                    reason="请求的视觉复查已完成，等待校验剩余需求与资源后恢复",
                                 )
                     self._resume_review_after_scan = False
             reason = "视觉库存复查完成；观测不足的订单等待复查或补货"
@@ -803,10 +805,17 @@ class OrderActionServer(Node):
             success = True
             with self._lock:
                 self._inventory_ready = False
-                self._initial_inventory_required = True
+                # Replenishment preserves order bins, which may occlude part
+                # of the stock. Persist actual observations, then let resource
+                # admission reserve each order's remaining demand. The full
+                # initial_counts gate belongs to a newly prepared scene only.
+                self._initial_inventory_required = False
                 self._initial_inventory_check = None
+                self._resume_review_after_scan = True
                 self._scan_requested = True
-            self._set_state("SCANNING", "桌面已补货，等待四类商品视觉验收", ready=True)
+            self._set_state(
+                "SCANNING", "桌面已补货，等待视觉库存更新与原订单剩余需求校验", ready=True
+            )
         finally:
             with self._lock:
                 self._busy = False

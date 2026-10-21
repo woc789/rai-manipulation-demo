@@ -404,13 +404,16 @@ def test_scene_has_four_bins_and_mixed_order_independent_stock():
         assert [pos["x"], pos["y"]] == slot
     barrier_names = CONFIG["planning_scene"]["barrier"]["entities"]
     assert len(barrier_names) == 1
-    assert all(entities[name]["prefab_name"] == "toy_box" for name in barrier_names)
-    for name, center in zip(
-        barrier_names,
-        [CONFIG["planning_scene"]["barrier"]["expected_pose"]["position"]],
-    ):
-        pos = entities[name]["pose"]["translation"]
-        assert [pos["x"], pos["y"]] == center[:2]
+    if CONFIG["planning_scene"]["barrier"].get("enabled", True):
+        assert all(entities[name]["prefab_name"] == "toy_box" for name in barrier_names)
+        for name, center in zip(
+            barrier_names,
+            [CONFIG["planning_scene"]["barrier"]["expected_pose"]["position"]],
+        ):
+            pos = entities[name]["pose"]["translation"]
+            assert [pos["x"], pos["y"]] == center[:2]
+    else:
+        assert all(name not in entities for name in barrier_names)
     stock = Counter(
         item["prefab_name"]
         for item in entities.values()
@@ -433,9 +436,10 @@ def test_scene_has_four_bins_and_mixed_order_independent_stock():
     scene_config = Workstation(MagicMock(), CONFIG).build_scene(
         PACKAGE / "config/demo_scene.yaml"
     )
-    assert (
-        len(scene_config.entities) == 21
-    )  # four unspawned bin templates, stock and crate
+    expected = sum(stock.values()) + len(zone["slot_entities"])
+    if CONFIG["planning_scene"]["barrier"].get("enabled", True):
+        expected += len(barrier_names)
+    assert len(scene_config.entities) == expected
 
 
 def test_stock_quantity_is_distinct_from_bin_capacity():
